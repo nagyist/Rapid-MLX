@@ -16,7 +16,10 @@
 # The per-run deadline must sit ABOVE the healthy serialized run so a healthy
 # suite never expires (per-suite .timeLimit provides the real 2-minute
 # guarantee); override with RAPID_DESKTOP_DEADLINE_MINUTES if a host runs the
-# suite slower/faster.
+# suite slower/faster. Default 15 min: generously above any healthy serialized
+# run while still 5 min below the job's 20-min timeout AND producing a sample
+# artifact (which a plain job timeout never does). The suite-level .timeLimit
+# is what actually delivers the 2-minute fail-fast for the hang-prone suites.
 #
 # Artifacts are written to RAPID_DESKTOP_HANG_ARTIFACT_DIR (default
 # build/desktop-hang-artifacts, match CI's upload step path if you move it).
@@ -25,7 +28,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-DEADLINE_MINUTES="${RAPID_DESKTOP_DEADLINE_MINUTES:-8}"
+DEADLINE_MINUTES="${RAPID_DESKTOP_DEADLINE_MINUTES:-15}"
 ARTIFACT_DIR="${RAPID_DESKTOP_HANG_ARTIFACT_DIR:-"$ROOT/build/desktop-hang-artifacts"}"
 
 # Locate (and if needed build) the watchdog executable BEFORE launching
