@@ -572,7 +572,7 @@ def test_backend_validation_surfaces_fail_closed_before_model_work():
     lane, _ = _prepare(runtime, 1, [1, 2])
     assert backend._prefix(lane.lane, []).tolist() == [1, 2]
     lane.lane.sampling = SelfMTPSampling(temperature=0.5)
-    with pytest.raises(ContinuousSelfMTPUnsupported, match="greedy sampling only"):
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="exact residual hooks"):
         backend._distribution(lane.lane, lane.lane.token_prefix, np.zeros(4))
 
     lane.lane.sampling = SelfMTPSampling(has_logits_processors=True)
@@ -606,7 +606,7 @@ def test_long_prefill_threads_previous_hidden_into_recursive_draft():
     [
         (SelfMTPSampling(), 1, "requires K=2"),
         (SelfMTPSampling(uses_xtc=True), 2, "XTC"),
-        (SelfMTPSampling(temperature=0.5), 2, "greedy sampling only"),
+        (SelfMTPSampling(temperature=0.5), 2, "exact residual hooks"),
         (SelfMTPSampling(has_logits_processors=True), 2, "injected hook"),
     ],
 )

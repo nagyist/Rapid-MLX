@@ -42,6 +42,24 @@ class ArrayOps(Protocol):
     def argmax_int(self, logprobs: Any) -> int: ...
 
 
+class ResidualSamplingHooks(Protocol):
+    """Exact target/draft distribution verifier for sampled lanes."""
+
+    def validate_sampling(self, sampling: Any) -> None: ...
+
+    def logprobs(self, logits: Any, temperature: float) -> Any: ...
+
+    def sample(self, logprobs: Any, temperature: float) -> int: ...
+
+    def verify(
+        self,
+        target_logprobs: Any,
+        draft_logprobs: Sequence[Any],
+        draft_tokens: Sequence[int],
+        temperature: float,
+    ) -> tuple[int, int]: ...
+
+
 class _MLXArrayOps:
     """Lazy production adapter; construction is the first MLX import."""
 
@@ -338,6 +356,7 @@ class RapidMLXSelfMTPBackend:
         target_cache_factory: Callable[[], Any] | None = None,
         draft_cache_factory: Callable[[], Any] | None = None,
         array_ops: ArrayOps | None = None,
+        residual_sampling: ResidualSamplingHooks | None = None,
         logits_processor: Callable[[SelfMTPLane, Any, Any], Any] | None = None,
         prefill_step_size: int = 512,
         draft_depth: int = 2,
@@ -349,6 +368,7 @@ class RapidMLXSelfMTPBackend:
         self.target_cache_factory = target_cache_factory
         self.draft_cache_factory = draft_cache_factory
         self.ops = array_ops or _MLXArrayOps()
+        self.residual_sampling = residual_sampling
         self.logits_processor = logits_processor
         self.prefill_step_size = int(prefill_step_size)
         self.draft_depth = draft_depth
@@ -382,9 +402,16 @@ class RapidMLXSelfMTPBackend:
         if lane.sampling.temperature == 0:
             logprobs = self.ops.logprobs(logits)
             return self.ops.argmax_int(logprobs), logprobs
-        raise ContinuousSelfMTPUnsupported(
-            "Qwen3.8 dense continuous MTP supports greedy sampling only"
-        )
+        hooks = self.residual_sampling
+        if hooks is None:
+            raise ContinuousSelfMTPUnsupported(
+                "transformed sampling requires exact residual hooks"
+            )
+        validate_sampling = getattr(hooks, "validate_sampling", None)
+        if callable(validate_sampling):
+            validate_sampling(lane.sampling)
+        logprobs = hooks.logprobs(logits, lane.sampling.temperature)
+        return hooks.sample(logprobs, lane.sampling.temperature), logprobs
 
     def _prefix(self, lane: SelfMTPLane, extra: Sequence[int]) -> Any:
         if not extra:
@@ -408,10 +435,16 @@ class RapidMLXSelfMTPBackend:
             raise ContinuousSelfMTPUnsupported("Rapid continuous self-MTP requires K=2")
         if spec.sampling.uses_xtc:
             raise ContinuousSelfMTPUnsupported("XTC has no exact verifier")
-        if spec.sampling.temperature > 0:
+        if spec.sampling.temperature > 0 and self.residual_sampling is None:
             raise ContinuousSelfMTPUnsupported(
-                "Qwen3.8 dense continuous MTP supports greedy sampling only"
+                "transformed sampling requires exact residual hooks"
             )
+        if self.residual_sampling is not None:
+            validate_sampling = getattr(
+                self.residual_sampling, "validate_sampling", None
+            )
+            if callable(validate_sampling):
+                validate_sampling(spec.sampling)
         if spec.sampling.has_logits_processors and self.logits_processor is None:
             raise ContinuousSelfMTPUnsupported(
                 "logits processors require an exact injected hook"
@@ -553,6 +586,7 @@ class RapidMLXSelfMTPBackend:
             )
 
         drafts: list[list[int]] = [[] for _ in lanes]
+        draft_logprobs: list[list[Any]] = [[] for _ in lanes]
         draft_hidden = [lane.seed_hidden for lane in lanes]
 
         first_lengths = [
@@ -601,12 +635,13 @@ class RapidMLXSelfMTPBackend:
             _finalize_group(draft_cache)
         for row, (lane, depth, valid) in enumerate(zip(lanes, depths, first_lengths)):
             position = valid - 1
-            token, _ = self._distribution(
+            token, logprobs = self._distribution(
                 lane,
                 self._prefix(lane, [lane.cur]),
                 first_logits[row, position],
             )
             drafts[row].append(token)
+            draft_logprobs[row].append(logprobs)
             draft_hidden[row] = first_hidden[row : row + 1, position : position + 1]
             lane.pending_hidden = None
             lane.pending_tokens = []
@@ -626,12 +661,13 @@ class RapidMLXSelfMTPBackend:
             finally:
                 _finalize_group(draft_cache)
             for row, lane in enumerate(lanes):
-                token, _ = self._distribution(
+                token, logprobs = self._distribution(
                     lane,
                     self._prefix(lane, [lane.cur] + drafts[row]),
                     second_logits[row, -1],
                 )
                 drafts[row].append(token)
+                draft_logprobs[row].append(logprobs)
 
         verify_width = max(depth + 1 for depth in depths)
         verify_rows = [
@@ -666,15 +702,42 @@ class RapidMLXSelfMTPBackend:
                 logits = self._apply_processor(
                     lane, prefix, target_logits[row, position]
                 )
-                logprobs = self.ops.logprobs(logits)
-                token = self.ops.argmax_int(logprobs)
+                if lane.sampling.temperature == 0:
+                    logprobs = self.ops.logprobs(logits)
+                    token = self.ops.argmax_int(logprobs)
+                else:
+                    hooks = self.residual_sampling
+                    if hooks is None:
+                        raise ContinuousSelfMTPUnsupported(
+                            "transformed sampling requires exact residual hooks"
+                        )
+                    logprobs = hooks.logprobs(logits, lane.sampling.temperature)
+                    token = -1
                 target_lps.append(logprobs)
                 target_tokens.append(token)
 
-            n_accept = 0
-            while n_accept < depth and target_tokens[n_accept] == drafts[row][n_accept]:
-                n_accept += 1
-            bonus = target_tokens[n_accept]
+            if lane.sampling.temperature == 0:
+                n_accept = 0
+                while (
+                    n_accept < depth
+                    and target_tokens[n_accept] == drafts[row][n_accept]
+                ):
+                    n_accept += 1
+                bonus = target_tokens[n_accept]
+            else:
+                hooks = self.residual_sampling
+                assert hooks is not None
+                stacked_target = self.ops.concatenate(
+                    [self.ops.expand_dims(value, 0) for value in target_lps], axis=0
+                )
+                n_accept, bonus = hooks.verify(
+                    stacked_target,
+                    draft_logprobs[row],
+                    drafts[row],
+                    lane.sampling.temperature,
+                )
+                if n_accept < 0 or n_accept > depth:
+                    raise RuntimeError("residual verifier returned invalid acceptance")
             accepted.append(n_accept)
             bonuses.append(int(bonus))
             output_rows.append(
