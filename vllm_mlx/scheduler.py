@@ -829,10 +829,12 @@ def _install_continuous_mtp_router(
         cache_quantized=cache_quantized,
         cache_windowed=bool(getattr(config, "use_paged_cache", False)),
         max_lanes=max_lanes,
-        # Preserve the mature singleton verifier for one-user traffic.  The
-        # continuous coordinator pays for ragged bookkeeping even at B=1 and
-        # is admitted only when there is real batching work to amortize it.
-        min_batch_lanes=2,
+        # The generic planner remains batch-first (default minimum two).  An
+        # operator who explicitly enables the continuous integration is also
+        # asking for its batched execution contract at serial N=1, so this
+        # reached path admits batched-B1 instead of falling through to the
+        # legacy single-request generator.
+        min_batch_lanes=1,
         allow_dynamic_membership=bool(
             getattr(config, "mtp_allow_dynamic_membership", False)
         ),
