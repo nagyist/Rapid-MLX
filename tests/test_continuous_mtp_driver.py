@@ -8,7 +8,6 @@ import types
 from pathlib import Path
 
 import pytest
-
 MTP_DIR = Path(__file__).parents[1] / "vllm_mlx" / "spec_decode" / "mtp"
 PACKAGE = "_continuous_mtp_driver_probe"
 package = types.ModuleType(PACKAGE)
@@ -76,7 +75,6 @@ class _Compute:
 
     def abort(self, lanes, caches, computation, cause):
         del lanes, caches, computation, cause
-
     def detach_lane(self, lane, caches):
         self.calls.append(("detach", lane.uid, caches.target, caches.draft))
 
@@ -338,8 +336,6 @@ def test_fixed_remove_turns_over_companion_without_transferring_its_ownership():
     compute.queued_outputs.append([(_target(211),)])
     assert _triples(batch_driver.next()) == [(2, 211, None)]
     assert not any(call == ("prepare", 2) for call in compute.calls[2:])
-
-
 def test_driver_construction_resume_and_inspection_contracts():
     runtime, _compute, _caches = _runtime()
     with pytest.raises(TypeError, match="batch"):
