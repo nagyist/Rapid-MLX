@@ -103,10 +103,7 @@ def test_tagged_promotion_and_standalone_build_are_mutually_exclusive():
         "&& inputs.promote_sha != '')"
     )
     assert " ".join(jobs["mirror-dist"]["if"].split()) == publish_condition
-    assert (
-        " ".join(jobs["publish-updater-fallback"]["if"].split())
-        == publish_condition
-    )
+    assert " ".join(jobs["publish-updater-fallback"]["if"].split()) == publish_condition
 
 
 def test_release_preflight_is_dispatch_only_and_exact_head_bound():
