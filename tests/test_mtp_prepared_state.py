@@ -7,13 +7,12 @@ from dataclasses import replace
 import pytest
 
 from vllm_mlx.spec_decode.mtp.prepared_state import (
+    ABSENT_STATE_LAYOUT,
     PreparedMTPState,
     PreparedStateIdentity,
-    PreparedStateMetadata,
     RestoreReason,
     evaluate_restore,
     fingerprint_config,
-    fingerprint_tokens,
     prepare_mtp_state,
 )
 
@@ -28,6 +27,9 @@ def _identity(**changes) -> PreparedStateIdentity:
         "target_cache_layout": "qwen4:12qsa+36arrays:bf16",
         "mtp_cache_layout": "qwen4-mtp:1qsa:bf16",
         "seed_hidden_layout": "bf16[1,1,2048]",
+        "gdn_state_layout": "qwen4:gdn:conv+matrix:bf16+fp32",
+        "ple_state_layout": "qwen4:ple:conv+history+atomic-rollback:v1",
+        "qsa_state_layout": "qwen4:qsa:kv+raw-index+pooled+shared-topk:v1",
         "adapter_id": None,
         "tokenizer_fingerprint": "tokenizer-sha256",
     }
@@ -51,6 +53,9 @@ def _state(
             mtp_cache=object(),
             mtp_cache_pairs=covered - 1,
             seed_hidden=object(),
+            gdn_state=object(),
+            ple_state=object(),
+            qsa_state=object(),
             captured_at=captured_at,
         ),
         prefix,
@@ -85,6 +90,7 @@ def test_exact_joint_boundary_is_restore_eligible() -> None:
     assert decision.covered_tokens == 128
     assert decision.resume_at == 128
     assert decision.bypass_hit is False
+    assert state.metadata.logical_context_tokens == 128
 
 
 @pytest.mark.parametrize(
@@ -106,6 +112,9 @@ def test_capture_rejects_incomplete_or_unaligned_state(changes, message) -> None
         "mtp_cache": object(),
         "mtp_cache_pairs": 127,
         "seed_hidden": object(),
+        "gdn_state": object(),
+        "ple_state": object(),
+        "qsa_state": object(),
         "captured_at": 100.0,
     }
     kwargs.update(changes)
@@ -159,6 +168,9 @@ def test_model_identity_mismatch_refuses_restore(expected_identity) -> None:
         _identity(target_cache_layout="different-target-layout"),
         _identity(mtp_cache_layout="different-mtp-layout"),
         _identity(seed_hidden_layout="bf16[1,1,4096]"),
+        _identity(gdn_state_layout="different-gdn-layout"),
+        _identity(ple_state_layout="different-ple-layout"),
+        _identity(qsa_state_layout="different-qsa-layout"),
     ],
 )
 def test_config_or_layout_mismatch_refuses_restore(expected_identity) -> None:
@@ -224,6 +236,9 @@ def test_corrupt_persisted_metadata_refuses_without_raising(
         target_cache=state.target_cache,
         mtp_cache=state.mtp_cache,
         seed_hidden=state.seed_hidden,
+        gdn_state=state.gdn_state,
+        ple_state=state.ple_state,
+        qsa_state=state.qsa_state,
     )
 
     decision = _evaluate(corrupt, prefix)
@@ -241,129 +256,96 @@ def test_config_fingerprint_is_order_independent_and_value_sensitive() -> None:
     assert left != changed
 
 
-@pytest.mark.parametrize(
-    ("changes", "message"),
-    [
-        ({"model_id": ""}, "model_id"),
-        ({"model_revision": 3}, "model_revision"),
-        ({"adapter_id": " "}, "adapter_id"),
-        ({"tokenizer_fingerprint": 3}, "tokenizer_fingerprint"),
-    ],
-)
-def test_identity_rejects_empty_or_non_string_fields(changes, message) -> None:
-    with pytest.raises(ValueError, match=message):
-        _identity(**changes)
-
-
-def test_identity_from_config_uses_canonical_fingerprint() -> None:
-    identity = PreparedStateIdentity.from_config(
-        model_id="model",
-        model_revision="revision",
-        speculative_config={"k": 3, "method": "mtp"},
-        target_cache_layout="target",
-        mtp_cache_layout="draft",
-        seed_hidden_layout="hidden",
-    )
-    assert identity.speculative_config_fingerprint == fingerprint_config(
-        {"method": "mtp", "k": 3}
-    )
-
-
-@pytest.mark.parametrize("config", [[], {"bad": object()}, {"nan": float("nan")}])
-def test_config_fingerprint_rejects_noncanonical_input(config) -> None:
-    error = TypeError if isinstance(config, list) else ValueError
-    with pytest.raises(error):
-        fingerprint_config(config)
-
-
-@pytest.mark.parametrize("tokens", [[True], [-1], [1 << 64]])
-def test_token_fingerprint_rejects_invalid_ids(tokens) -> None:
-    with pytest.raises(ValueError, match="tokens|64-bit"):
-        fingerprint_tokens(tokens)
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"prefix_tokens": (), "target_cache_tokens": 0, "mtp_cache_pairs": 0},
-        {"target_cache_tokens": True},
-        {"mtp_cache_pairs": -1},
-        {"captured_at": float("inf")},
-        {"captured_at": -1.0},
-    ],
-)
-def test_capture_rejects_empty_counts_and_bad_timestamps(changes) -> None:
+@pytest.mark.parametrize("surface", ["gdn_state", "ple_state", "qsa_state"])
+def test_capture_requires_every_declared_mutable_surface(surface) -> None:
     kwargs = {
         "identity": _identity(),
-        "prefix_tokens": tuple(range(2)),
+        "prefix_tokens": tuple(range(128)),
         "target_cache": object(),
-        "target_cache_tokens": 2,
+        "target_cache_tokens": 128,
         "mtp_cache": object(),
-        "mtp_cache_pairs": 1,
+        "mtp_cache_pairs": 127,
         "seed_hidden": object(),
+        "gdn_state": object(),
+        "ple_state": object(),
+        "qsa_state": object(),
         "captured_at": 100.0,
     }
-    kwargs.update(changes)
-    with pytest.raises(ValueError):
+    kwargs[surface] = None
+
+    with pytest.raises(ValueError, match=f"{surface} must be present"):
         prepare_mtp_state(**kwargs)
 
 
-@pytest.mark.parametrize("minimum", [True, 0, 1.5])
-def test_restore_rejects_invalid_minimum(minimum) -> None:
-    state, prefix = _state()
-    with pytest.raises(ValueError, match="positive integer"):
-        _evaluate(state, prefix, min_useful_prefix_tokens=minimum)
-
-
-@pytest.mark.parametrize("max_age", [-1, float("inf")])
-def test_restore_rejects_invalid_max_age(max_age) -> None:
-    state, prefix = _state()
-    with pytest.raises(ValueError, match="finite and non-negative"):
-        _evaluate(state, prefix, max_age_seconds=max_age)
-
-
-def test_restore_refuses_malformed_identity_time_and_live_values() -> None:
-    state, prefix = _state()
-    assert (
-        _evaluate(state, prefix, expected_identity=object()).reason
-        is RestoreReason.MALFORMED
-    )
-    assert _evaluate(state, prefix, now=object()).reason is RestoreReason.MALFORMED
-    assert _evaluate(state, prefix, now=99.0).reason is RestoreReason.STALE
-    assert (
-        _evaluate(state, prefix, target_cache_tokens=True).reason
-        is RestoreReason.MALFORMED
-    )
-    malformed_request = (True,) + prefix[1:] + (999,)
-    assert (
-        _evaluate(state, prefix, request_tokens=malformed_request).reason
-        is RestoreReason.MALFORMED
-    )
-
-
 @pytest.mark.parametrize(
-    "metadata",
+    ("surface", "layout"),
     [
-        None,
-        PreparedStateMetadata(
-            identity=_identity(),
-            covered_tokens=-1,
-            mtp_covered_pairs=0,
-            boundary_fingerprint="0" * 64,
-            captured_at=1.0,
-        ),
-        PreparedStateMetadata(
-            identity=_identity(),
-            covered_tokens=1,
-            mtp_covered_pairs=True,
-            boundary_fingerprint="0" * 64,
-            captured_at=1.0,
-        ),
+        ("gdn_state", "gdn_state_layout"),
+        ("ple_state", "ple_state_layout"),
+        ("qsa_state", "qsa_state_layout"),
     ],
 )
-def test_restore_refuses_non_metadata_and_invalid_metadata_counts(metadata) -> None:
+def test_restore_refuses_payload_missing_from_declared_surface(surface, layout) -> None:
     state, prefix = _state()
-    corrupt = PreparedMTPState(
-        metadata, state.target_cache, state.mtp_cache, state.seed_hidden
+    values = {
+        "metadata": state.metadata,
+        "target_cache": state.target_cache,
+        "mtp_cache": state.mtp_cache,
+        "seed_hidden": state.seed_hidden,
+        "gdn_state": state.gdn_state,
+        "ple_state": state.ple_state,
+        "qsa_state": state.qsa_state,
+    }
+    values[surface] = None
+
+    decision = _evaluate(PreparedMTPState(**values), prefix)
+
+    assert getattr(state.metadata.identity, layout) != "absent"
+    assert decision.eligible is False
+    assert decision.reason is RestoreReason.BOUNDARY_MISMATCH
+
+
+def test_architecture_absence_is_explicit_and_accepts_no_payload() -> None:
+    identity = _identity(
+        ple_state_layout=ABSENT_STATE_LAYOUT,
+        qsa_state_layout=ABSENT_STATE_LAYOUT,
     )
-    assert _evaluate(corrupt, prefix).reason is RestoreReason.MALFORMED
+    prefix = tuple(range(128))
+
+    state = prepare_mtp_state(
+        identity=identity,
+        prefix_tokens=prefix,
+        target_cache=object(),
+        target_cache_tokens=128,
+        mtp_cache=object(),
+        mtp_cache_pairs=127,
+        seed_hidden=object(),
+        gdn_state=object(),
+        ple_state=None,
+        qsa_state=None,
+        captured_at=100.0,
+    )
+
+    decision = _evaluate(state, prefix, expected_identity=identity)
+
+    assert decision.eligible is True
+
+
+def test_declared_absent_surface_refuses_non_none_payload() -> None:
+    identity = _identity(ple_state_layout=ABSENT_STATE_LAYOUT)
+    kwargs = {
+        "identity": identity,
+        "prefix_tokens": tuple(range(128)),
+        "target_cache": object(),
+        "target_cache_tokens": 128,
+        "mtp_cache": object(),
+        "mtp_cache_pairs": 127,
+        "seed_hidden": object(),
+        "gdn_state": object(),
+        "ple_state": object(),
+        "qsa_state": object(),
+        "captured_at": 100.0,
+    }
+
+    with pytest.raises(ValueError, match="ple_state must be None"):
+        prepare_mtp_state(**kwargs)

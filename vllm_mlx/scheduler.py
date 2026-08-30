@@ -18,6 +18,7 @@ import os
 import threading
 import time
 from collections import OrderedDict, deque
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -756,6 +757,171 @@ def _mtp_controller_key(model_name: str | None, sidecar: str | None) -> str | No
     return f"{len(model_name)}:{model_name}+mtp:{sidecar}"
 
 
+def _make_continuous_mtp_apc_bridge(model: Any, tokenizer: Any, config: Any):
+    """Build the process-local APC sidecar namespace for one loaded model."""
+
+    from .spec_decode.mtp.continuous_apc import (
+        ContinuousMTPAPCBridge,
+        ContinuousMTPAPCNamespace,
+    )
+
+    candidate = getattr(model, "language_model", model)
+    descriptor = getattr(candidate, "batched_mtp_capability", None)
+    descriptor = dict(descriptor) if isinstance(descriptor, Mapping) else {}
+    model_id = (
+        getattr(config, "model_name", None)
+        or getattr(candidate, "name_or_path", None)
+        or f"{type(candidate).__module__}.{type(candidate).__qualname__}"
+    )
+    declared_revision = (
+        descriptor.get("model_revision")
+        or getattr(candidate, "revision", None)
+        or getattr(candidate, "_revision", None)
+    )
+    # The sidecar is intentionally process-local.  When a checkpoint does not
+    # expose an immutable revision, object identity is stricter than an alias:
+    # a live model swap can never inherit the previous object's sidecars.
+    model_revision = str(declared_revision or f"runtime-object:{id(candidate):x}")
+    actual_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+    tokenizer_fingerprint = ":".join(
+        (
+            str(
+                getattr(
+                    actual_tokenizer, "name_or_path", type(actual_tokenizer).__name__
+                )
+            ),
+            str(getattr(actual_tokenizer, "vocab_size", "unknown")),
+            f"runtime-object:{id(actual_tokenizer):x}",
+        )
+    )
+    speculative_config = {
+        "method": "mtp",
+        "continuous_batching": True,
+        "model_family": descriptor.get("model_family"),
+        "protocol_version": descriptor.get("protocol_version"),
+        "recursive_draft_depth": descriptor.get("recursive_draft_depth"),
+        "mtp_sidecar": getattr(config, "mtp_sidecar", None),
+        "mtp_model_type": getattr(config, "mtp_model_type", None),
+        "speculation_rollback": bool(
+            getattr(config, "mtp_speculation_rollback", False)
+        ),
+        "kv_cache_dtype": getattr(config, "kv_cache_dtype", "bf16"),
+        "kv_cache_quantization": bool(getattr(config, "kv_cache_quantization", False)),
+        "kv_cache_quantization_bits": getattr(
+            config, "kv_cache_quantization_bits", None
+        ),
+        "kv_cache_quantization_group_size": getattr(
+            config, "kv_cache_quantization_group_size", None
+        ),
+        "kv_cache_turboquant": bool(getattr(config, "kv_cache_turboquant", False)),
+    }
+    return ContinuousMTPAPCBridge(
+        ContinuousMTPAPCNamespace(
+            model_id=str(model_id),
+            model_revision=model_revision,
+            speculative_config=speculative_config,
+            tokenizer_fingerprint=tokenizer_fingerprint,
+            model_family=(
+                str(descriptor["model_family"])
+                if descriptor.get("model_family")
+                else None
+            ),
+        ),
+        max_entries=max(1, int(getattr(config, "prefix_cache_size", 100))),
+    )
+
+
+def _apply_continuous_mtp_apc_restore(request: Any, bridge: Any) -> bool:
+    """Promote a target APC hit atomically, or preserve it for plain decode."""
+
+    if bridge is None or request.prompt_cache is None or request.cached_tokens <= 0:
+        return False
+    result = bridge.restore(
+        request.prompt_token_ids,
+        target_cache=request.prompt_cache,
+        cached_tokens=request.cached_tokens,
+    )
+    eligibility = result.eligibility
+    if eligibility.eligible:
+        from .spec_decode.mtp.continuous_routing import ContinuousMTPAPCHit
+
+        assert result.state is not None and result.expected_identity is not None
+        hit = ContinuousMTPAPCHit(
+            state=result.state,
+            expected_identity=result.expected_identity,
+            target_cache_tokens=eligibility.covered_tokens,
+            mtp_cache_pairs=eligibility.covered_tokens - 1,
+            min_useful_prefix_tokens=bridge.min_useful_prefix_tokens,
+        )
+        updates = {
+            "_continuous_mtp_apc_hit": hit,
+            "_continuous_mtp_apc_refusal": None,
+            "prompt_cache": result.state.target_cache,
+            "cached_tokens": eligibility.covered_tokens,
+            "remaining_tokens": request.prompt_token_ids[eligibility.covered_tokens :],
+            "cache_hit_type": "continuous_mtp_prepared_state_v2",
+        }
+        missing = object()
+        previous = {name: getattr(request, name, missing) for name in updates}
+        try:
+            for name, value in updates.items():
+                setattr(request, name, value)
+        except Exception:  # noqa: BLE001 - restore must be all-or-nothing
+            for name, value in previous.items():
+                if value is missing:
+                    try:
+                        delattr(request, name)
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(request, name, value)
+            bridge.record_attach_failure()
+            logger.warning(
+                "[MTP-APC] schema-v2 request attachment rolled back "
+                "request=%s cached_tokens=%d",
+                getattr(request, "request_id", "unknown"),
+                eligibility.covered_tokens,
+            )
+            return False
+        logger.info(
+            "[MTP-APC] schema-v2 prepared-state hit request=%s cached_tokens=%d",
+            getattr(request, "request_id", "unknown"),
+            eligibility.covered_tokens,
+        )
+        return True
+
+    # Missing, stale, or foreign sidecar state must not disable a valid target
+    # APC hit.  Preserve target KV for ordinary plain decode, record why joint
+    # self-MTP was refused, and leave the exact-state marker absent.
+    request._continuous_mtp_apc_hit = None
+    request._continuous_mtp_apc_refusal = eligibility.reason.value
+    logger.info(
+        "[MTP-APC] target-only hit preserved for plain fallback "
+        "request=%s cached_tokens=%d reason=%s",
+        getattr(request, "request_id", "unknown"),
+        int(getattr(request, "cached_tokens", 0) or 0),
+        eligibility.reason.value,
+    )
+    return False
+
+
+def _continuous_mtp_effective_context(
+    *,
+    request_prompt_tokens: int,
+    cached_tokens: int,
+    remaining_tokens: Sequence[int],
+    history: Sequence[int],
+    prompt: Sequence[int],
+) -> int:
+    """Resolve one logical prompt length without double-counting APC state."""
+
+    return max(
+        request_prompt_tokens,
+        len(history) + len(prompt),
+        cached_tokens + len(remaining_tokens),
+    )
+
+
 def _install_continuous_mtp_router(
     batch_gen: "BatchGenerator",
     model: Any,
@@ -934,7 +1100,11 @@ def _install_continuous_mtp_router(
         request = None if requests is None else requests.get(request_id)
         if request is None:
             return None
-        prompt = tuple(int(token) for segment in segments for token in segment)
+        queued_prompt = tuple(int(token) for segment in segments for token in segment)
+        prompt = tuple(
+            int(token)
+            for token in (getattr(request, "prompt_token_ids", None) or queued_prompt)
+        )
         if not prompt:
             return None
         params = request.sampling_params
@@ -946,12 +1116,34 @@ def _install_continuous_mtp_router(
         # delivery.  Keep those requests on the legacy/plain path until the
         # driver has an explicit post-commit rewind acknowledgement surface.
         scheduler_owned_termination = bool(params.stop) or bool(request.has_tools)
-        cache_ready = not history and not any(_cache_offset(cache) for cache in caches)
-        capability = getattr(type(caches[0]), "__name__", "") if caches else ""
-        cache_quantized = "quantized" in capability.lower()
-        cache_windowed = any(
-            marker in capability.lower() for marker in ("rotating", "window", "sink")
+        apc_hit = getattr(request, "_continuous_mtp_apc_hit", None)
+        cache_ready = apc_hit is not None or (
+            not history and not any(_cache_offset(cache) for cache in caches)
         )
+        capabilities = tuple(type(cache).__name__.lower() for cache in caches)
+        cache_quantized = any("quantized" in name for name in capabilities)
+        cache_windowed = any(
+            marker in name
+            for name in capabilities
+            for marker in ("rotating", "window", "sink")
+        )
+        cached_tokens = max(0, int(getattr(request, "cached_tokens", 0) or 0))
+        request_prompt_tokens = int(
+            getattr(request, "model_prompt_tokens", 0)
+            or getattr(request, "num_prompt_tokens", 0)
+            or 0
+        )
+        # ``history`` is the generator's already-materialized logical prefix;
+        # the public request count is authoritative when APC reduced segments
+        # to an uncached suffix.
+        effective_context = _continuous_mtp_effective_context(
+            request_prompt_tokens=request_prompt_tokens,
+            cached_tokens=cached_tokens,
+            remaining_tokens=getattr(request, "remaining_tokens", ()) or (),
+            history=history,
+            prompt=prompt,
+        )
+        requested_output = int(getattr(params, "max_tokens", maximum) or maximum)
         return ContinuousMTPRequestMetadata(
             lane_id=request_id,
             uid=int(uid),
@@ -969,6 +1161,11 @@ def _install_continuous_mtp_router(
             cache_ready=cache_ready,
             cache_quantized=cache_quantized,
             cache_windowed=cache_windowed,
+            effective_context_tokens=effective_context,
+            projected_context_tokens=effective_context + requested_output,
+            apc_cached_tokens=cached_tokens,
+            apc_hit=apc_hit,
+            exact_joint_mtp_state=apc_hit is not None,
         )
 
     def _queued_candidates():
@@ -1026,6 +1223,11 @@ def _install_continuous_mtp_router(
         for sequence, metadata in _queued_candidates():
             if len(joining_specs) >= room:
                 break
+            # Exact prepared-state restores enter only through the initial
+            # cohort planner, which validates the complete coupled payload.
+            # The incremental join seam remains cold-only.
+            if metadata.apc_hit is not None:
+                continue
             lane = LaneAdmission(
                 lane_id=metadata.lane_id,
                 base_bytes=metadata.base_bytes,
@@ -3669,6 +3871,7 @@ class Scheduler:
         self.memory_aware_cache: MemoryAwarePrefixCache | None = None
         self.paged_cache_manager: PagedCacheManager | None = None
         self.block_aware_cache: BlockAwarePrefixCache | None = None
+        self._continuous_mtp_apc_bridge = None
 
         if self.config.enable_prefix_cache:
             if self.config.use_paged_cache:
@@ -3741,6 +3944,28 @@ class Scheduler:
                 )
                 logger.info(
                     f"Prefix cache enabled with max_entries={self.config.prefix_cache_size}"
+                )
+
+        if (
+            self.config.enable_prefix_cache
+            and getattr(self.config, "mtp_continuous_batching", False)
+            and not self.config.use_paged_cache
+            and not self.config.kv_cache_quantization
+            and not self.config.kv_cache_turboquant
+            and self.config.kv_cache_dtype == "bf16"
+        ):
+            try:
+                self._continuous_mtp_apc_bridge = _make_continuous_mtp_apc_bridge(
+                    model, self._actual_tokenizer, self.config
+                )
+                logger.info(
+                    "[MTP-continuous] APC sidecar bridge enabled "
+                    "(schema-v2, process-local, exact target/MTP/seed/GDN/PLE/QSA)"
+                )
+            except Exception as exc:  # noqa: BLE001 - optional feature
+                logger.warning(
+                    "[MTP-continuous] APC sidecar bridge disabled: %s",
+                    exc,
                 )
 
         # Thread-safe set for deferred aborts (main thread → executor thread)
@@ -6617,6 +6842,12 @@ class Scheduler:
             request.cache_hit_type = "miss"
             request.remaining_tokens = request.prompt_token_ids
 
+        if getattr(self.config, "mtp_continuous_batching", False):
+            _apply_continuous_mtp_apc_restore(
+                request,
+                getattr(self, "_continuous_mtp_apc_bridge", None),
+            )
+
         # Add to tracking. D-M01-2X (0.8.2 dogfood, codex r10
         # BLOCKING follow-up): the cancellation dedupe ledgers
         # (``_cancelled_request_ids`` / ``_disconnect_abort_ids``)
@@ -8094,6 +8325,9 @@ class Scheduler:
                 # pair without reconstructing state from delivered tokens.
                 if getattr(response, "mtp_state", None) is not None:
                     request._continuous_mtp_state = response.mtp_state
+                    request._continuous_mtp_cache_tokens = getattr(
+                        response, "mtp_cache_tokens", None
+                    )
 
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1
@@ -8282,6 +8516,34 @@ class Scheduler:
             # positions that do not match any real prompt prefix.
             pflash_skip_store = request is not None and _pflash_compressed(request)
 
+            full_token_sequence = None
+            mtp_apc_sidecar = None
+            mtp_apc_bridge = getattr(self, "_continuous_mtp_apc_bridge", None)
+            if (
+                request is not None
+                and request.prompt_token_ids
+                and getattr(request, "_extracted_cache", None) is not None
+                and mtp_apc_bridge is not None
+            ):
+                delivered_sequence = list(request.prompt_token_ids) + list(
+                    request.output_token_ids
+                )
+                cache_boundary = getattr(request, "_continuous_mtp_cache_tokens", None)
+                if (
+                    isinstance(cache_boundary, (list, tuple))
+                    and cache_boundary
+                    and delivered_sequence[: len(cache_boundary)]
+                    == list(cache_boundary)
+                ):
+                    full_token_sequence = list(cache_boundary)
+                else:
+                    full_token_sequence = delivered_sequence
+                mtp_apc_sidecar = mtp_apc_bridge.capture(
+                    full_token_sequence,
+                    request._extracted_cache,
+                    getattr(request, "_continuous_mtp_state", None),
+                )
+
             # Store cache for future reuse
             if (
                 request is not None
@@ -8296,8 +8558,9 @@ class Scheduler:
                         and request._extracted_cache is not None
                     ):
                         try:
-                            full_token_sequence = list(request.prompt_token_ids) + list(
-                                request.output_token_ids
+                            full_token_sequence = full_token_sequence or (
+                                list(request.prompt_token_ids)
+                                + list(request.output_token_ids)
                             )
                             self.block_aware_cache.store_cache(
                                 request_id,
@@ -8329,8 +8592,9 @@ class Scheduler:
                         and request._extracted_cache is not None
                     ):
                         try:
-                            full_token_sequence = list(request.prompt_token_ids) + list(
-                                request.output_token_ids
+                            full_token_sequence = full_token_sequence or (
+                                list(request.prompt_token_ids)
+                                + list(request.output_token_ids)
                             )
                             import time as _time
 
@@ -8340,6 +8604,10 @@ class Scheduler:
                                 request._extracted_cache,
                                 evict_prefixes=False,
                             )
+                            if stored and mtp_apc_bridge is not None:
+                                mtp_apc_bridge.commit(
+                                    full_token_sequence, mtp_apc_sidecar
+                                )
                             _store_dt = _time.monotonic() - _store_t0
                             # NOTE: We intentionally do NOT store a prompt-only
                             # cache entry.  Hybrid Mamba+Transformer models
@@ -8378,13 +8646,18 @@ class Scheduler:
                         and request._extracted_cache is not None
                     ):
                         try:
-                            full_token_sequence = list(request.prompt_token_ids) + list(
-                                request.output_token_ids
+                            full_token_sequence = full_token_sequence or (
+                                list(request.prompt_token_ids)
+                                + list(request.output_token_ids)
                             )
                             self.prefix_cache.store_cache(
                                 full_token_sequence,
                                 request._extracted_cache,
                             )
+                            if mtp_apc_bridge is not None:
+                                mtp_apc_bridge.commit(
+                                    full_token_sequence, mtp_apc_sidecar
+                                )
                             logger.debug(
                                 f"Stored cache for request {request_id} "
                                 f"({len(full_token_sequence)} tokens: {len(request.prompt_token_ids)} prompt + {len(request.output_token_ids)} output)"
@@ -9083,6 +9356,9 @@ class Scheduler:
             stats["memory_aware_cache"] = self.memory_aware_cache.get_stats()
         elif self.prefix_cache is not None:
             stats["prefix_cache"] = self.prefix_cache.get_stats()
+        bridge = getattr(self, "_continuous_mtp_apc_bridge", None)
+        if bridge is not None:
+            stats["continuous_mtp_apc"] = bridge.stats_snapshot()
         return stats
 
     def get_cache_stats(self) -> dict[str, Any] | None:
@@ -9109,6 +9385,9 @@ class Scheduler:
         elif self.prefix_cache is not None:
             self.prefix_cache.clear(reset_stats=reset_stats)
             cleared = True
+        bridge = getattr(self, "_continuous_mtp_apc_bridge", None)
+        if bridge is not None:
+            bridge.clear()
         return cleared
 
     def reset(self) -> None:
@@ -9178,6 +9457,9 @@ class Scheduler:
             self.memory_aware_cache.clear()
         if self.prefix_cache is not None:
             self.prefix_cache.clear()
+        bridge = getattr(self, "_continuous_mtp_apc_bridge", None)
+        if bridge is not None:
+            bridge.clear()
 
     def deep_reset(self) -> None:
         """

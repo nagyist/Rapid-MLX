@@ -59,6 +59,7 @@ class ContinuousMTPDriverResponse:
     all_tokens: list[int] | None = None
     from_draft: bool = False
     mtp_state: tuple[Any, Any] | None = None
+    mtp_cache_tokens: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -332,6 +333,11 @@ class ContinuousMTPDriver:
                             finishing_package.draft_cache,
                             finishing_package.lane.seed_hidden,
                         )
+                        if finishing_package is not None
+                        else None
+                    ),
+                    mtp_cache_tokens=(
+                        [int(token) for token in finishing_package.lane.token_prefix]
                         if finishing_package is not None
                         else None
                     ),
