@@ -222,6 +222,11 @@ struct ChatView: View {
 
     @State private var draft: String = ""
     @State private var attachmentDrafts = ChatAttachmentDraftStore()
+    /// A rejected photo is a capability explanation, not an attachment
+    /// failure. Keep it outside the conversation-keyed attachment draft so it
+    /// can use an informational treatment and disappear as soon as the user
+    /// continues with text, another conversation, or another model.
+    @State private var imageInputNotice: String?
     @State private var isAttachmentDropTarget = false
     @State private var composeFocusToken: Int = 0
     /// Incremented every time the user tries to send while gated. Drives
@@ -300,7 +305,14 @@ struct ChatView: View {
             composeFocusToken &+= 1
         }
         .onChange(of: viewModel.conversations.map(\.id)) { _, _ in pruneAttachmentDrafts() }
-        .onChange(of: viewModel.activeConversationID) { _, _ in pruneAttachmentDrafts() }
+        .onChange(of: viewModel.activeConversationID) { _, _ in
+            pruneAttachmentDrafts()
+            imageInputNotice = nil
+        }
+        .onChange(of: alias) { _, _ in imageInputNotice = nil }
+        .onChange(of: draft) { _, newDraft in
+            if !newDraft.isEmpty { imageInputNotice = nil }
+        }
     }
 
     // MARK: - Transcript
@@ -623,6 +635,10 @@ struct ChatView: View {
                 InlineNotice(message: attachmentNotice, tone: .error)
                     .frame(maxWidth: contentMaxWidth)
                     .frame(maxWidth: .infinity)
+            } else if let imageInputNotice {
+                InlineNotice(message: imageInputNotice, tone: .info)
+                    .frame(maxWidth: contentMaxWidth)
+                    .frame(maxWidth: .infinity)
             }
             // One input, not a pill containing a second pill.
             //
@@ -913,6 +929,7 @@ struct ChatView: View {
         // flashes and VoiceOver speaks the same sentence the Send
         // tooltip carries.
         guard acknowledgeIfNotReady() else { return }
+        imageInputNotice = nil
         draft = ""
         let submission = attachmentDraft.takeSubmission()
         composeFocusToken &+= 1
@@ -1036,6 +1053,7 @@ struct ChatView: View {
     @discardableResult
     private func addAttachmentURLs(_ urls: [URL]) -> Bool {
         guard !attachmentDraft.isImportingFiles else { return false }
+        imageInputNotice = nil
         // Filter before splitting, so images and documents get the same
         // answer to "is this already here". Re-attaching is not merely
         // redundant for a document: the per-message character budget is split
@@ -1257,9 +1275,9 @@ struct ChatView: View {
     }
 
     private func rejectImageInputForCurrentModel() {
-        attachmentDraft.notice = imageInputUnavailableMessage
+        imageInputNotice = imageInputUnavailableMessage
             ?? "This model doesn't support photos. Choose a vision-capable model to add one."
-        VoiceOverAnnouncer.announce(attachmentDraft.notice ?? "This model doesn't support images.")
+        VoiceOverAnnouncer.announce(imageInputNotice ?? "This model doesn't support images.")
     }
 
     /// The shared lifecycle gate for every path that would start a turn:

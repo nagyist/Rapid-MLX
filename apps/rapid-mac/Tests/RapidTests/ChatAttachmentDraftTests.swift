@@ -490,8 +490,33 @@ struct ChatAttachmentDraftTests {
         #expect(stripped.contains(
             "attachmentDrafts.finishFileImport(request:importRequest,outcome.0,notice:notice)"
         ))
-        #expect(stripped.contains(".onChange(of:viewModel.activeConversationID){_,_inpruneAttachmentDrafts()}"))
+        #expect(stripped.contains(
+            ".onChange(of:viewModel.activeConversationID){_,_inpruneAttachmentDrafts()imageInputNotice=nil}"
+        ))
         #expect(stripped.contains(".onChange(of:viewModel.conversations.map(\\.id)){_,_inpruneAttachmentDrafts()}"))
+    }
+
+    @Test("Photo capability notices stay informational and transient")
+    func photoCapabilityNoticeWiring() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/Rapid/UI/ChatView.swift"),
+            encoding: .utf8
+        )
+        let stripped = CapabilityChipRenderGateSourceGuardTests
+            .stripCommentsAndWhitespace(source)
+
+        #expect(stripped.contains("@StateprivatevarimageInputNotice:String?"))
+        #expect(stripped.contains("InlineNotice(message:imageInputNotice,tone:.info)"))
+        #expect(stripped.contains("InlineNotice(message:attachmentNotice,tone:.error)"))
+        #expect(stripped.contains("imageInputNotice=imageInputUnavailableMessage??"))
+        #expect(!stripped.contains("attachmentDraft.notice=imageInputUnavailableMessage??"))
+        #expect(stripped.contains(".onChange(of:alias){_,_inimageInputNotice=nil}"))
+        #expect(stripped.contains("if!newDraft.isEmpty{imageInputNotice=nil}"))
+        #expect(stripped.contains("guardacknowledgeIfNotReady()else{return}imageInputNotice=nil"))
     }
 
     private func makeImage(name: String, bytes: Int = 4) throws -> ChatImageAttachment {
