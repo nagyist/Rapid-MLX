@@ -474,6 +474,7 @@ struct ChatView: View {
                             // could kick off a turn the Send button is refusing
                             // to allow one row below.
                             guard acknowledgeIfNotReady() else { return false }
+                            photoCapabilityNotice.dismiss()
                             return viewModel.editUserMessage(
                                 id: message.id,
                                 newContent: newContent,
@@ -483,6 +484,7 @@ struct ChatView: View {
                         },
                         onRetry: {
                             guard acknowledgeIfNotReady() else { return false }
+                            photoCapabilityNotice.dismiss()
                             return viewModel.retryAssistantMessage(
                                 id: message.id,
                                 alias: alias,
@@ -997,6 +999,7 @@ struct ChatView: View {
     private func sendSuggestion(_ text: String) {
         guard !viewModel.isStreaming, !attachmentDraft.isImportingFiles else { return }
         guard acknowledgeIfNotReady() else { return }
+        photoCapabilityNotice.dismiss()
         composeFocusToken &+= 1
         viewModel.send(text, alias: alias, supportsImageInput: supportsImageInput)
     }
@@ -1069,6 +1072,7 @@ struct ChatView: View {
     }
 
     private func choosePhotos() {
+        photoCapabilityNotice.dismiss()
         let panel = NSOpenPanel()
         // ImageIO normalizes native still-image formats at the shared draft
         // boundary; the picker must expose the same contract as paste/drop.
@@ -1081,6 +1085,7 @@ struct ChatView: View {
     }
 
     private func chooseFiles() {
+        photoCapabilityNotice.dismiss()
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf, .commaSeparatedText, .plainText]
         panel.allowsMultipleSelection = true

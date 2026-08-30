@@ -4167,6 +4167,8 @@ flow_localized_photo_hint() {
     wait_tree_text "$expected" "$OUT/zh-photo-notice.json" 40
     send_prompt "Text chat remains available" zh-text-after-photo
     wait_send_idle "$OUT/zh-text-after-photo-complete.json"
+    assert_tree_text "$OUT/zh-text-after-photo-complete.json" "Text chat remains available"
+    assert_tree_text "$OUT/zh-text-after-photo-complete.json" "deterministic content"
     jq -e --arg expected "$expected" '
         [.data.ui_elements[]?
          | select([(.title // ""), (.value // ""), (.description // "")]

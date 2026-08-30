@@ -518,6 +518,11 @@ struct ChatAttachmentDraftTests {
         #expect(stripped.contains(".onChange(of:photoAvailability){_,availabilityinphotoCapabilityNotice.reconcile(with:availability)}"))
         #expect(stripped.contains(".onChange(of:draft){_,_inphotoCapabilityNotice.dismiss()}"))
         #expect(stripped.contains("guardacknowledgeIfNotReady()else{return}photoCapabilityNotice.dismiss()"))
+        #expect(stripped.contains("guardacknowledgeIfNotReady()else{returnfalse}photoCapabilityNotice.dismiss()returnviewModel.editUserMessage"))
+        #expect(stripped.contains("guardacknowledgeIfNotReady()else{returnfalse}photoCapabilityNotice.dismiss()returnviewModel.retryAssistantMessage"))
+        #expect(stripped.contains("privatefuncsendSuggestion(_text:String){guard!viewModel.isStreaming,!attachmentDraft.isImportingFileselse{return}guardacknowledgeIfNotReady()else{return}photoCapabilityNotice.dismiss()"))
+        #expect(stripped.contains("privatefuncchoosePhotos(){photoCapabilityNotice.dismiss()letpanel=NSOpenPanel()"))
+        #expect(stripped.contains("privatefuncchooseFiles(){photoCapabilityNotice.dismiss()letpanel=NSOpenPanel()"))
     }
 
     @Test("Photo capability guidance expires when same-alias availability changes")
