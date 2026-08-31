@@ -1491,15 +1491,21 @@ follow_memory_confirmation_edge() {
         # click-center proves that mouse events were posted, not that SwiftUI
         # consumed them. Retry a still-identical presentation after one second,
         # but cap attempts so a stuck alert cannot be hammered every poll.
+        # Product-side confirmPendingMemoryLoad claims the warning synchronously
+        # before async revalidation, so a repeated delivery while it is checking
+        # cannot enqueue a duplicate launch.
         if [[ -n "$signature" \
               && "$MEMORY_CONFIRMATION_ATTEMPTS" -lt 3 \
               && ( "$MEMORY_CONFIRMATION_ATTEMPTS" == 0 \
-                   || "$MEMORY_CONFIRMATION_POLLS" -ge 4 ) ]] \
-            && confirm_memory_warning_from_tree "$tree" "$evidence" "$identifier"; then
+                   || "$MEMORY_CONFIRMATION_POLLS" -ge 4 ) ]]; then
+            # Consume the budget before posting the click. Driver failures must
+            # be spaced and capped just like successfully posted mouse events.
             MEMORY_CONFIRMATION_SIGNATURE="$signature"
             MEMORY_CONFIRMATION_POLLS=0
             MEMORY_CONFIRMATION_ATTEMPTS=$((MEMORY_CONFIRMATION_ATTEMPTS + 1))
-            MEMORY_CONFIRMATION_CLICKED=1
+            if confirm_memory_warning_from_tree "$tree" "$evidence" "$identifier"; then
+                MEMORY_CONFIRMATION_CLICKED=1
+            fi
         fi
     else
         MEMORY_CONFIRMATION_SIGNATURE=""

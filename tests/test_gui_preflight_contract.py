@@ -643,6 +643,7 @@ def test_memory_confirmation_helper_handles_quickstart_revalidation(tmp_path):
     driver = tmp_path / "driver.sh"
     driver.write_text(
         '#!/usr/bin/env bash\nprintf \'%s\\n\' "$3" >> "$CLICKS"\n'
+        '[[ "$3" != "MemoryWarning.Fail" ]] || exit 1\n'
         "printf '{\"success\":true}\\n'\n"
     )
     driver.chmod(0o755)
@@ -707,6 +708,22 @@ def test_memory_confirmation_helper_handles_quickstart_revalidation(tmp_path):
             }
         )
     )
+    failed_delivery = tmp_path / "failed-delivery.json"
+    failed_delivery.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "ui_elements": [
+                        {
+                            "identifier": "MemoryWarning.Fail",
+                            "enabled": True,
+                            "label": "Load model",
+                        }
+                    ]
+                }
+            }
+        )
+    )
     evidence = tmp_path / "evidence.json"
     clicks = tmp_path / "clicks.txt"
     script = f"""
@@ -714,7 +731,7 @@ set -euo pipefail
 AX_DRIVER="$1"
 APP_PID=42
 EVIDENCE="$7"
-export CLICKS="$8"
+export CLICKS="$9"
 log() {{ :; }}
 die() {{ printf '%s\\n' "$*" >&2; exit 1; }}
 {helpers}
@@ -750,6 +767,15 @@ scan_main "$5"
 scan_main "$6"
 scan_main "$6"
 for _ in {{1..20}}; do scan_main "$6"; done
+fail_signature=""; fail_polls=0; fail_attempts=0
+scan_failure() {{
+    follow_memory_confirmation_edge "$1" "$EVIDENCE" \\
+        "$fail_signature" "$fail_polls" "$fail_attempts" MemoryWarning.Fail
+    fail_signature="$MEMORY_CONFIRMATION_SIGNATURE"
+    fail_polls="$MEMORY_CONFIRMATION_POLLS"
+    fail_attempts="$MEMORY_CONFIRMATION_ATTEMPTS"
+}}
+for _ in {{1..20}}; do scan_failure "$8"; done
 """
     result = subprocess.run(
         [
@@ -764,6 +790,7 @@ for _ in {{1..20}}; do scan_main "$6"; done
             str(main_tight),
             str(main_unsafe),
             str(evidence),
+            str(failed_delivery),
             str(clicks),
         ],
         capture_output=True,
@@ -778,7 +805,10 @@ for _ in {{1..20}}; do scan_main "$6"; done
     ]
     # Tight is clicked once, then the semantically new unsafe presentation
     # gets at most three spaced delivery attempts despite remaining visible.
-    assert recorded[2:] == ["MemoryWarning.Confirm"] * 4
+    assert recorded[2:6] == ["MemoryWarning.Confirm"] * 4
+    # A failing driver consumes the same spaced budget instead of retrying on
+    # every 250 ms poll forever.
+    assert recorded[6:] == ["MemoryWarning.Fail"] * 3
 
 
 def test_ready_wait_confirms_memory_warning_after_session_restore():
