@@ -170,6 +170,11 @@ def _managed_desktop_runtime() -> bool:
     return _managed_desktop_runtime_kind() is not None
 
 
+def _managed_desktop_runtime_root() -> Path:
+    """Return the active sidecar root derived from its interpreter layout."""
+    return Path(sys.executable).resolve().parents[2]
+
+
 def _vision_install_hint() -> str:
     """Return a repair path that cannot accidentally target another Python.
 
@@ -180,10 +185,11 @@ def _vision_install_hint() -> str:
     """
     managed_kind = _managed_desktop_runtime_kind()
     if managed_kind == "runtime-override":
+        runtime_root = _managed_desktop_runtime_root()
         return (
             "Install the current Rapid-MLX Desktop.app first (its DMG ships a "
             "validated sidecar), then remove "
-            "~/Library/Application Support/Rapid/runtime-override/rapid-mlx "
+            f"{runtime_root} "
             "and relaunch so Desktop uses the bundled sidecar. Do not "
             "pip-install into the managed runtime override."
         )

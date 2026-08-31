@@ -86,6 +86,20 @@ def test_runtime_override_repair_hint_requires_removal_after_app_install(monkeyp
     assert " -m pip install" not in hint
 
 
+def test_runtime_override_repair_hint_uses_active_custom_home(monkeypatch):
+    monkeypatch.setattr(
+        mllm.sys,
+        "executable",
+        "/tmp/dogfood-home/Library/Application Support/Rapid/runtime-override/"
+        "rapid-mlx/python/bin/python3.12",
+    )
+
+    hint = mllm._vision_install_hint()
+
+    assert "/tmp/dogfood-home/Library/Application Support/Rapid/" in hint
+    assert "~/Library/Application Support" not in hint
+
+
 def test_managed_runtime_missing_dependency_never_recommends_pip(monkeypatch):
     monkeypatch.setattr(
         mllm.sys,
