@@ -211,6 +211,75 @@ def test_load_model_genuine_vlm_stays_on_mllm_lane(monkeypatch):
     assert server._engine.kwargs.get("force_text") is False
 
 
+def test_load_model_preflights_mllm_runtime_before_engine_construction(monkeypatch):
+    """Desktop/direct callers must fail before any model weights are touched."""
+    from vllm_mlx import server
+    from vllm_mlx.models import mllm
+
+    _stub_routing_globals(monkeypatch, server)
+    monkeypatch.setattr(
+        server,
+        "_resolve_serving_checkpoint",
+        lambda _name, **_kwargs: server._ServingCheckpoint(
+            model_path="publisher/vision-model",
+            load_path="/cache/vision-model",
+            auto_text_fallback=False,
+            lane_reason="vision_checkpoint",
+            is_mllm=True,
+        ),
+    )
+    constructed = []
+
+    class _MustNotConstruct:
+        def __init__(self, *args, **kwargs):
+            constructed.append((args, kwargs))
+
+    monkeypatch.setattr(server, "BatchedEngine", _MustNotConstruct)
+    monkeypatch.setattr(
+        mllm,
+        "_require_mlx_vlm",
+        lambda model_name=None: (_ for _ in ()).throw(
+            ImportError(f"vision runtime unavailable for {model_name}")
+        ),
+    )
+
+    with pytest.raises(ImportError, match="/cache/vision-model"):
+        server.load_model("publisher/vision-model", force_mllm=True)
+
+    assert constructed == []
+
+
+def test_load_model_explicit_text_lane_does_not_require_vision_runtime(monkeypatch):
+    """A supported explicit text-only route remains usable without mlx-vlm."""
+    from vllm_mlx import server
+    from vllm_mlx.models import mllm
+
+    _stub_routing_globals(monkeypatch, server)
+    monkeypatch.setattr(
+        server,
+        "_resolve_serving_checkpoint",
+        lambda _name, **_kwargs: server._ServingCheckpoint(
+            model_path="publisher/hybrid-model",
+            load_path="/cache/hybrid-model",
+            auto_text_fallback=False,
+            lane_reason="forced_text",
+            is_mllm=False,
+        ),
+    )
+    monkeypatch.setattr(
+        mllm,
+        "_require_mlx_vlm",
+        lambda model_name=None: (_ for _ in ()).throw(
+            AssertionError("text-only lane must not inspect mlx-vlm")
+        ),
+    )
+
+    server.load_model("publisher/hybrid-model", force_text=True)
+
+    assert server._engine is not None
+    assert server._engine.kwargs["force_text"] is True
+
+
 def test_load_model_threads_saved_cli_alias_into_checkpoint_resolution(monkeypatch):
     """CLI alias identity must survive its early alias-to-repo normalization."""
     from types import SimpleNamespace

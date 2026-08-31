@@ -1728,6 +1728,7 @@ class _ServingCheckpoint:
     load_path: str
     auto_text_fallback: bool
     lane_reason: str
+    is_mllm: bool = False
 
 
 def _resolve_serving_checkpoint(
@@ -1783,6 +1784,7 @@ def _resolve_serving_checkpoint(
         load_path=load_path,
         auto_text_fallback=decision.auto_text_fallback,
         lane_reason=decision.reason,
+        is_mllm=decision.is_mllm,
     )
 
 
@@ -2104,6 +2106,15 @@ def load_model(
         _engine_model_path = _serving_checkpoint.load_path
         _auto_text_fallback = _serving_checkpoint.auto_text_fallback
         _serving_lane_reason = _serving_checkpoint.lane_reason
+        # Desktop and direct ``server.load_model`` callers bypass cli.py's
+        # early optional-dependency guard. Enforce the same contract here,
+        # after metadata has selected the FINAL lane but before BatchedEngine
+        # can allocate model weights. A verified/explicit text lane does not
+        # need mlx-vlm; a vision lane must have the exact validated runtime.
+        if getattr(_serving_checkpoint, "is_mllm", False):
+            from .models.mllm import _require_mlx_vlm
+
+            _require_mlx_vlm(_serving_checkpoint.load_path)
 
     # A bare multi-variant repo has no useful config at its root. Resolve the
     # concrete checkpoint first, then derive every checkpoint-owned default
@@ -2446,6 +2457,14 @@ async def _load_dynamic_resident_model(
             profile_force_text or serving_checkpoint.auto_text_fallback
         )
         serving_lane_reason = serving_checkpoint.lane_reason
+        # Runtime residency is a second model-load entry point used by the
+        # Desktop control plane. Apply the same pre-weight vision guard as
+        # primary startup so a dynamically selected MLLM cannot become
+        # "ready" through a missing/broken/incompatible mlx-vlm stack.
+        if getattr(serving_checkpoint, "is_mllm", False):
+            from .models.mllm import _require_mlx_vlm
+
+            _require_mlx_vlm(serving_checkpoint.load_path)
     model_config = profile
     if model_config is None:
         from .model_auto_config import detect_model_config
