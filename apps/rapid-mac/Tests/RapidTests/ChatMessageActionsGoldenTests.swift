@@ -279,6 +279,9 @@ struct ChatMessageActionsGoldenTests {
         )
         try stage.press("ChatView.Message.CancelEdit.\(editSuffix)")
         try await stage.waitForIdentifier(editID)
+        // A wrongly-scheduled asynchronous send would leave the process a
+        // beat after Cancel; give it that beat so the assertion can catch it.
+        try await Task.sleep(nanoseconds: 300_000_000)
         #expect(
             !RecordingSSEProtocol.recordedPrompts().contains { $0.contains("cancelled edit must not send") },
             "cancelling a message edit sent the draft"

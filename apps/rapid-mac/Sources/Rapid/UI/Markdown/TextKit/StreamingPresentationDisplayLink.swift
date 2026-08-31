@@ -123,6 +123,7 @@ struct StreamingPresentationDisplayLink: NSViewRepresentable {
             guard needsFallback else {
                 fallbackTimer?.invalidate()
                 fallbackTimer = nil
+                lastFallbackFire = nil
                 return
             }
             guard fallbackTimer == nil else { return }
@@ -136,14 +137,24 @@ struct StreamingPresentationDisplayLink: NSViewRepresentable {
             }
             RunLoop.main.add(timer, forMode: .common)
             fallbackTimer = timer
+            lastFallbackFire = nil
         }
+
+        private var lastFallbackFire: TimeInterval?
 
         private func fallbackTimerDidFire() {
             guard needsFallback else {
                 reconcileFallback()
                 return
             }
-            onFrame(Self.fallbackInterval)
+            // Report the measured gap, not the nominal interval: a busy main
+            // run loop delays or coalesces timer firings, and the buffer
+            // paces reveal by the durations it is told, so under-reporting
+            // would reveal text slower than wall-clock.
+            let now = ProcessInfo.processInfo.systemUptime
+            let duration = lastFallbackFire.map { now - $0 } ?? Self.fallbackInterval
+            lastFallbackFire = now
+            onFrame(duration)
         }
 
         private func observeScreenChanges() {

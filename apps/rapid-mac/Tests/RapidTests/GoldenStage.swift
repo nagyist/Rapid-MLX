@@ -295,8 +295,10 @@ final class GoldenStage {
             // presentation) while other suites' main-actor work proceeds
             // undisturbed. A nested `RunLoop.main.run` here measurably
             // altered concurrent timing-sensitive tests' batching cadence
-            // when the package test suite runs parallel.
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            // when the package test suite runs parallel. The sleep's
+            // cancellation error propagates so a cancelled test stops
+            // polling instead of riding out the full timeout.
+            try await Task.sleep(nanoseconds: 20_000_000)
         }
         if condition() { return }
         throw StageError(description: "timed out waiting for \(what)")

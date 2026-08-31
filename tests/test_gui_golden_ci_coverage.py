@@ -98,11 +98,18 @@ def swift_suite_titles() -> set[str]:
     the manifest inventory and the code that honours it.
     """
 
+    # Commented-out code must not satisfy a coverage gate. A live but empty
+    # suite is out of scope for a source-level check; the Swift build itself
+    # is what keeps the named suite compiling and running.
     titles: set[str] = set()
     for path in SWIFT_TESTS.glob("*.swift"):
-        titles.update(
-            re.findall(r'@Suite\("Golden journey: ([a-z0-9-]+)"', path.read_text())
-        )
+        for line in path.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            match = re.match(r'@Suite\("Golden journey: ([a-z0-9-]+)"', stripped)
+            if match:
+                titles.add(match.group(1))
     return titles
 
 
