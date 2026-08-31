@@ -320,7 +320,10 @@ final class GoldenChatFake: @unchecked Sendable {
         /// Guards `stopped` AND every client callback: `stopLoading` flips
         /// the flag under the same lock the emitter holds while delivering,
         /// so no callback can land after the loading system said stop.
-        private let stateLock = NSLock()
+        /// Recursive because a client callback may synchronously re-enter
+        /// `stopLoading` on the delivering thread (e.g. a cancel triggered
+        /// by the bytes it just received); a plain lock would deadlock there.
+        private let stateLock = NSRecursiveLock()
         private var stopped = false
 
         override class func canInit(with request: URLRequest) -> Bool { true }

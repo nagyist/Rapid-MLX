@@ -41,6 +41,22 @@ struct ChatMathRenderingGoldenTests {
             !mathText.contains("Unrenderable math:"),
             "SwiftMath took the literal-source fallback"
         )
+        // Positive artifact per display formula: the rendered SwiftMath
+        // host exposes "Math: <latex>" as its accessibility label
+        // (`MathView`). Without these, dropping display-math views
+        // entirely would still satisfy every negative check above.
+        #expect(
+            mathText.contains("Math: \\int_{-\\infty}^{\\infty}"),
+            "the Gaussian integral was not rendered as a math node"
+        )
+        #expect(
+            mathText.contains("Math: a^{p-1}"),
+            "the bridged congruence was not rendered as a math node"
+        )
+        #expect(
+            mathText.contains("Math: \\begin{align}"),
+            "the bridged alignment was not rendered as a math node"
+        )
 
         // Turns 2 and 3: the code and table fixtures whose chrome the
         // appearance transition must preserve (#2056).

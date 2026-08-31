@@ -127,7 +127,9 @@ struct ChatSlowStreamStopGoldenTests {
             let tree = stage.tree()
             for node in tree {
                 let stripped = node.text.filter { !$0.isWhitespace }
-                if stripped == "`" || stripped == "``" {
+                // Any all-backtick row is a leaked fence — including the
+                // full "```" the fixture emits as one complete chunk.
+                if !stripped.isEmpty, stripped.allSatisfy({ $0 == "`" }) {
                     Issue.record("a forming code fence flickered into the streaming AX tree")
                     return
                 }
