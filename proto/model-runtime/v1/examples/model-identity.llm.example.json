@@ -2,8 +2,6 @@
   "schema_version": 1,
   "identity_strength": "registry_pinned",
   "pipeline_kind": "text_generation",
-  "display": {"alias": "qwen-27b-4bit", "name": "Qwen 27B 4-bit"},
-  "family": {"id": "qwen/qwen-27b", "architecture": "qwen", "parameter_count": 27000000000},
   "components": [{
     "component_id": "primary", "role": "primary",
     "source": {"kind": "huggingface", "repo_id": "example-org/qwen-27b-mlx-4bit", "resolved_revision": "0123456789abcdef0123456789abcdef01234567"},
