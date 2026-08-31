@@ -58,7 +58,7 @@ usage() {
     cat <<'EOF'
 Usage: gui-golden-flows.sh [--flow NAME] [--keep] [--update-baselines]
 
-Flows: fresh-install, cached-quickstart, cached-curated-tradeup, cached-variant-collapse, download-progress, settings-persistence, settings-mtp, chat-restore, restored-tools, chat-depth, launch-integrations,
+Flows: fresh-install, cached-quickstart, cached-curated-tradeup, cached-variant-collapse, download-progress, settings-persistence, settings-mtp, chat-restore, chat-depth, launch-integrations,
        model-crash-recovery, low-memory-choice,
        update-state, update-busy, campaign-banner, window-close-prompt, no-dead-controls, catalog-integrity,
        browse-all-destination, chat-document-attachment, chat-multimodal-attachments, image-generation, dictation, dictation-rc2-upgrade, audio-readiness, all
@@ -401,7 +401,7 @@ flow_requires_screen_recording() {
 # unattended without taking on any of that.
 flow_requires_peekaboo() {
     case "$FLOW" in
-        fresh-install|cached-quickstart|cached-curated-tradeup|cached-variant-collapse|download-progress|settings-persistence|settings-mtp|chat-restore|restored-tools|chat-depth|browse-all-destination|no-dead-controls|catalog-integrity|update-state|update-busy|campaign-banner|launch-integrations) return 1 ;;
+        fresh-install|cached-quickstart|cached-curated-tradeup|cached-variant-collapse|download-progress|settings-persistence|settings-mtp|chat-restore|chat-depth|browse-all-destination|no-dead-controls|catalog-integrity|update-state|update-busy|campaign-banner|launch-integrations) return 1 ;;
         model-switch-active-request|model-crash-recovery|low-memory-choice|chat-document-attachment|chat-multimodal-attachments|image-generation|dictation|dictation-rc2-upgrade|audio-readiness|window-close-prompt|resident-load-rejected) return 1 ;;
         *) return 0 ;;
     esac
@@ -2689,44 +2689,6 @@ flow_chat_restore() {
            | length == 0' "$OUT/search-new-chat-landed.json" >/dev/null \
         || die "New chat did not dismiss conversation search"
     log "  conversation Pin/Unpin and search Clear/Close/New chat all produced effects"
-    cleanup_persona
-}
-
-flow_restored_tools() {
-    log "restored conversation keeps deterministic web research"
-    start_persona restored-tools RAPID_GUI_WEB_SEARCH_FIXTURE=1
-    dismiss_first_run
-    start_model
-    send_prompt "What's a major news story from the last week?" restored-tools-first
-    wait_send_idle "$OUT/first-settled.json"
-    assert_tree_text "$OUT/first-settled.json" "Tool call web_search"
-    assert_tree_text "$OUT/first-settled.json" "Golden technology story"
-
-    relaunch_persona
-    dismiss_first_run
-    wait_identifier Sidebar.NewChat "$OUT/restored.json"
-    local conversation_id
-    conversation_id="$(jq -r '.data.ui_elements[] | (.identifier // "")
-        | select(test("^Sidebar\\.Conversation\\.[0-9A-Fa-f-]{36}$"))' \
-        "$OUT/restored.json" | head -1)"
-    [[ -n "$conversation_id" ]] || die "restored tool conversation row missing"
-    press "$OUT/restored.json" "$conversation_id" "$OUT/opened.json"
-    # Relaunch starts a fresh sidecar. The restored transcript can become
-    # interactive before that sidecar is ready, so sending immediately races
-    # the readiness gate and silently leaves the prompt in the composer.
-    wait_send_idle "$OUT/restored-ready.json"
-    send_prompt "What about technology? Find one concrete story and summarize it." restored-tools-followup
-    wait_send_idle "$OUT/followup-settled.json"
-    assert_tree_text "$OUT/followup-settled.json" "Golden technology story"
-
-    jq -s -e '[.[] | select(.event == "chat_request")
-        | select(.roles[-1] == "tool")
-        | select((.tools | index("web_search")) != null)] | length == 2' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "fresh/restored synthesis requests did not both carry web evidence and tools"
-    jq -s -e '[.[] | select(.event == "native_web_search_call")] | length == 2' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "the fake model did not natively choose web_search on both user turns"
     cleanup_persona
 }
 
@@ -5550,7 +5512,6 @@ case "$FLOW" in
     settings-persistence) flow_settings_persistence ;;
     settings-mtp) flow_settings_mtp ;;
     chat-restore) flow_chat_restore ;;
-    restored-tools) flow_restored_tools ;;
     chat-depth) flow_chat_depth ;;
     model-switch-active-request) flow_model_switch_active_request ;;
     model-crash-recovery) flow_model_crash_recovery ;;
@@ -5579,7 +5540,6 @@ case "$FLOW" in
         flow_settings_persistence
         flow_settings_mtp
         flow_chat_restore
-        flow_restored_tools
         flow_chat_depth
         flow_model_switch_active_request
         flow_model_crash_recovery

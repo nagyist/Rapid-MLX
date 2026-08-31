@@ -519,7 +519,6 @@ def test_peekaboo_requirement_is_default_deny():
         "download-progress",
         "settings-persistence",
         "settings-mtp",
-        "restored-tools",
         "chat-depth",
         "browse-all-destination",
         "no-dead-controls",

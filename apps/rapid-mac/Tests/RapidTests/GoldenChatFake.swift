@@ -44,6 +44,7 @@ final class GoldenChatFake: @unchecked Sendable {
         case chatCancelled(chunks: Int)
         case toolLoopCall(id: String)
         case toolLoopSynthesis(toolResults: Int)
+        case nativeWebSearchCall(id: String)
     }
 
     // MARK: - Fixtures (ported from fake-rapid-mlx.sh)
@@ -137,6 +138,14 @@ final class GoldenChatFake: @unchecked Sendable {
     /// (`FAKE_CONTENT_REPEAT`). Stop journeys set this high enough that a
     /// stream can never outrun the press racing to cancel it.
     var contentRepeat: Int = 1
+
+    /// The in-process `RAPID_GUI_WEB_SEARCH_FIXTURE`: when enabled and the
+    /// request advertises `web_search`, the fake "model" natively chooses
+    /// that tool once per user turn, then synthesizes normally after the app
+    /// appends the call's result. Deliberately not keyed to prompt keywords:
+    /// product routing belongs to the model's tool choice, never to
+    /// app-side regexes.
+    var nativeWebSearchFixture = false
 
     // MARK: - Recorded evidence
 
@@ -413,6 +422,39 @@ final class GoldenChatFake: @unchecked Sendable {
                 return
             }
 
+            // Native web-tool fixture (`RAPID_GUI_WEB_SEARCH_FIXTURE`): on
+            // each new user turn the fake model chooses the advertised
+            // `web_search` tool, then synthesizes normally once the app has
+            // appended that call's result.
+            if fake.nativeWebSearchFixture {
+                let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+                let messages = (object?["messages"] as? [[String: Any]]) ?? []
+                let advertisesWebSearch = ((object?["tools"] as? [[String: Any]]) ?? [])
+                    .contains {
+                        (($0["function"] as? [String: Any])?["name"] as? String) == "web_search"
+                    }
+                let lastUserIndex = messages.lastIndex { ($0["role"] as? String) == "user" }
+                if advertisesWebSearch, let lastUserIndex {
+                    let hasResultForTurn = messages[(lastUserIndex + 1)...]
+                        .contains { ($0["role"] as? String) == "tool" }
+                    if !hasResultForTurn {
+                        let callID = "golden_search_\(lastUserIndex)"
+                        deliver {
+                            $0.urlProtocol(
+                                self,
+                                didLoad: GoldenChatFake.sse(
+                                    GoldenChatFake.toolCallDelta(id: callID)
+                                )
+                            )
+                            $0.urlProtocol(self, didLoad: Data("data: [DONE]\n\n".utf8))
+                            $0.urlProtocolDidFinishLoading(self)
+                        }
+                        fake.record(event: .nativeWebSearchCall(id: callID))
+                        return
+                    }
+                }
+            }
+
             var contentEmitted = 0
             for reasoning in GoldenChatFake.reasoningChunks {
                 guard deliver({
@@ -475,6 +517,50 @@ struct GoldenChatSurface {
         fake: GoldenChatFake = GoldenChatFake(),
         tools: (any ToolRegistry)? = nil
     ) -> GoldenChatSurface {
+        let (server, chat) = assemble(fake: fake, tools: tools, conversationStoreURL: nil)
+        let view = ChatView(
+            viewModel: chat,
+            server: server,
+            alias: .constant(alias),
+            readiness: .ready(alias: alias)
+        )
+        .environment(DownloadManager())
+        .environment(QuickstartCoordinator())
+
+        let stage = GoldenStage(view)
+        return GoldenChatSurface(stage: stage, chat: chat, server: server, fake: fake)
+    }
+
+    /// The chat surface plus the real ``SidebarView``, composed the way
+    /// ``ContentView`` composes them (row press → `chat.selectConversation`)
+    /// — for restore journeys that must walk back into a persisted
+    /// conversation through the same rows a user presses. Passing a
+    /// `conversationStoreURL` turns persistence on against that store;
+    /// mounting a second surface over the same URL is the in-process
+    /// analog of the bash harness's `relaunch_persona`.
+    static func mountWithSidebar(
+        fake: GoldenChatFake = GoldenChatFake(),
+        tools: (any ToolRegistry)? = nil,
+        conversationStoreURL: URL
+    ) -> GoldenChatSurface {
+        let (server, chat) = assemble(
+            fake: fake,
+            tools: tools,
+            conversationStoreURL: conversationStoreURL
+        )
+        let view = SidebarChatHarnessView(chat: chat, server: server)
+            .environment(DownloadManager())
+            .environment(QuickstartCoordinator())
+
+        let stage = GoldenStage(view)
+        return GoldenChatSurface(stage: stage, chat: chat, server: server, fake: fake)
+    }
+
+    private static func assemble(
+        fake: GoldenChatFake,
+        tools: (any ToolRegistry)?,
+        conversationStoreURL: URL?
+    ) -> (ServerManager, ChatViewModel) {
         // The server publishes the fake's port so ChatViewModel's
         // before-send re-target (`client.baseURL = loopback(activePort)`)
         // lands back on this fake instead of a real engine port.
@@ -489,22 +575,10 @@ struct GoldenChatSurface {
             // enabled default regardless of this machine's real settings.
             toolDefaults: UserDefaults(suiteName: "golden-surface-\(UUID().uuidString)")!,
             server: server,
-            persistsConversations: false
+            persistsConversations: conversationStoreURL != nil,
+            conversationStoreURL: conversationStoreURL
         )
-        let downloads = DownloadManager()
-        let quickstart = QuickstartCoordinator()
-
-        let view = ChatView(
-            viewModel: chat,
-            server: server,
-            alias: .constant(alias),
-            readiness: .ready(alias: alias)
-        )
-        .environment(downloads)
-        .environment(quickstart)
-
-        let stage = GoldenStage(view)
-        return GoldenChatSurface(stage: stage, chat: chat, server: server, fake: fake)
+        return (server, chat)
     }
 
     /// `send_prompt` from the bash harness: type into the composer via AX
@@ -535,6 +609,42 @@ struct GoldenChatSurface {
             stage.tree().contains {
                 $0.id == "ChatView.SendOrStopButton" && $0.text == "Send message"
             }
+        }
+    }
+}
+
+/// Sidebar + chat detail in the same composition ``ContentView`` ships:
+/// row selection routes through `chat.selectConversation`, new-chat through
+/// `chat.newConversation`. The window-level affordances a borderless stage
+/// cannot host (toolbar search, native panels) stay with the bash/XCUI
+/// journeys that own them.
+private struct SidebarChatHarnessView: View {
+    @State private var section: SidebarSection = .chat
+    let chat: ChatViewModel
+    let server: ServerManager
+
+    var body: some View {
+        NavigationSplitView {
+            SidebarView(
+                selection: $section,
+                chat: chat,
+                onNewChat: {
+                    chat.newConversation()
+                    section = .chat
+                },
+                onSelectConversation: { id in
+                    chat.selectConversation(id)
+                    section = .chat
+                },
+                server: server
+            )
+        } detail: {
+            ChatView(
+                viewModel: chat,
+                server: server,
+                alias: .constant(GoldenChatSurface.alias),
+                readiness: .ready(alias: GoldenChatSurface.alias)
+            )
         }
     }
 }

@@ -91,7 +91,7 @@ journeys:
   - name: restored-tools
     group: chat
     risk: medium
-    driver: ax
+    driver: swift
     ci_tier: pr
     fixtures: [fake-sidecar, isolated-home]
     source_paths: [apps/rapid-mac/Sources/Rapid/Chat/, apps/rapid-mac/Sources/Rapid/Tools/]
