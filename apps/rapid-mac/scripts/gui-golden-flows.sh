@@ -939,8 +939,8 @@ settle_transcript_at_bottom() {
             && ! jq -e '.data.ui_elements[]?
                         | select(.identifier == "Transcript.JumpToBottom")' \
                 "$destination" >/dev/null \
-            && awk -v before="$before_value" -v current="$current_value" \
-                'BEGIN { exit !(current >= 0.99 || current > before + 0.02) }'; then
+            && awk -v current="$current_value" \
+                'BEGIN { exit !(current >= 0.99) }'; then
             if [[ -n "$previous_value" ]] \
                 && awk -v previous="$previous_value" -v current="$current_value" \
                     'BEGIN { delta = current - previous; if (delta < 0) delta = -delta; exit !(delta <= 0.001) }'; then

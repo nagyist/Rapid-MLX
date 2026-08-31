@@ -251,7 +251,7 @@ def test_transcript_settler_waits_for_physical_scroll_stability(tmp_path):
             calls=$((calls + 1))
         }}
         press() {{ :; }}
-        die() {{ printf '%s\\n' "$*" >&2; return 97; }}
+        die() {{ printf '%s\\n' "$*" >&2; exit 97; }}
         sleep() {{ :; }}
         {helper}
         settle_transcript_at_bottom "$fixture_dir/current.json" "$fixture_dir/press.json"
@@ -264,6 +264,60 @@ def test_transcript_settler_waits_for_physical_scroll_stability(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "5"
+
+
+def test_transcript_settler_rejects_a_stable_intermediate_position(tmp_path):
+    """Progress plus a hidden button is not proof that the tail was reached."""
+    source = HARNESS.read_text()
+    helper_body = source.split("settle_transcript_at_bottom() {", 1)[1].split("\n}", 1)[
+        0
+    ]
+    helper = f"settle_transcript_at_bottom() {{{helper_body}\n}}"
+
+    fixtures = [(0.25, True), (0.45, False)]
+    for index, (value, has_button) in enumerate(fixtures):
+        elements = [
+            {
+                "role": "AXScrollBar",
+                "value": value,
+                "bounds": {"x": 704, "width": 17, "height": 320},
+            }
+        ]
+        if has_button:
+            elements.append(
+                {
+                    "identifier": "Transcript.JumpToBottom",
+                    "bounds": {"x": 444.5, "width": 33, "height": 33},
+                }
+            )
+        (tmp_path / f"fixture-{index}.json").write_text(
+            json.dumps({"data": {"ui_elements": elements}})
+        )
+
+    script = textwrap.dedent(
+        f"""
+        set -u
+        fixture_dir={str(tmp_path)!r}
+        calls=0
+        see_main() {{
+            local destination="$1" index="$calls"
+            (( index > 1 )) && index=1
+            cp "$fixture_dir/fixture-$index.json" "$destination"
+            calls=$((calls + 1))
+        }}
+        press() {{ :; }}
+        die() {{ printf '%s\\n' "$*" >&2; exit 97; }}
+        sleep() {{ :; }}
+        {helper}
+        settle_transcript_at_bottom "$fixture_dir/current.json" "$fixture_dir/press.json"
+        """
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, check=False, text=True
+    )
+
+    assert completed.returncode == 97
+    assert "did not physically settle" in completed.stderr
 
 
 def test_each_fault_fails_with_its_own_message():
