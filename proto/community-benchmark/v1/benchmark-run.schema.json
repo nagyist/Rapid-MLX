@@ -54,7 +54,7 @@
       "type": "object", "additionalProperties": false, "required": ["id", "version", "digest"],
       "properties": {
         "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9._-]*$"},
-        "version": {"type": "integer", "minimum": 1},
+        "version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
         "digest": {"$ref": "#/$defs/sha256Digest"}
       }
     },
@@ -70,29 +70,29 @@
     "textCase": {
       "allOf": [{"$ref": "#/$defs/caseBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "warmup_rounds", "measured_rounds", "target_prompt_tokens", "target_output_tokens"], "properties": {
         "case_id": true, "warmup_rounds": true, "measured_rounds": true,
-        "target_prompt_tokens": {"type": "integer", "minimum": 1}, "target_output_tokens": {"type": "integer", "minimum": 1}
+        "target_prompt_tokens": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "target_output_tokens": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
       }}]
     },
     "vlmCase": {
       "allOf": [{"$ref": "#/$defs/caseBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "warmup_rounds", "measured_rounds", "media_kind", "media_count", "width", "height", "target_output_tokens"], "properties": {
         "case_id": true, "warmup_rounds": true, "measured_rounds": true,
         "media_kind": {"enum": ["image", "video"]}, "media_count": {"type": "integer", "minimum": 1, "maximum": 64},
-        "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}, "frames": {"type": "integer", "minimum": 1},
-        "target_prompt_tokens": {"type": "integer", "minimum": 1}, "target_output_tokens": {"type": "integer", "minimum": 1}
+        "width": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "height": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "frames": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "target_prompt_tokens": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "target_output_tokens": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
       }}]
     },
     "imageCase": {
       "allOf": [{"$ref": "#/$defs/caseBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "warmup_rounds", "measured_rounds", "mode", "width", "height", "steps", "guidance_millionths", "seed", "image_count"], "properties": {
         "case_id": true, "warmup_rounds": true, "measured_rounds": true,
-        "mode": {"enum": ["text_to_image", "image_to_image", "inpainting"]}, "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1},
-        "steps": {"type": "integer", "minimum": 1}, "guidance_millionths": {"type": "integer", "minimum": 0}, "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647}, "image_count": {"type": "integer", "minimum": 1, "maximum": 16}
+        "mode": {"enum": ["text_to_image", "image_to_image", "inpainting"]}, "width": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "height": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "steps": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "guidance_millionths": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647}, "image_count": {"type": "integer", "minimum": 1, "maximum": 16}
       }}]
     },
     "videoCase": {
       "allOf": [{"$ref": "#/$defs/caseBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "warmup_rounds", "measured_rounds", "mode", "width", "height", "frames", "fps_milli", "steps", "guidance_millionths", "seed"], "properties": {
         "case_id": true, "warmup_rounds": true, "measured_rounds": true,
-        "mode": {"enum": ["text_to_video", "image_to_video", "video_to_video"]}, "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}, "frames": {"type": "integer", "minimum": 1},
-        "fps_milli": {"type": "integer", "minimum": 1}, "steps": {"type": "integer", "minimum": 1}, "guidance_millionths": {"type": "integer", "minimum": 0}, "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+        "mode": {"enum": ["text_to_video", "image_to_video", "video_to_video"]}, "width": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "height": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "frames": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "fps_milli": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "steps": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "guidance_millionths": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647}
       }}]
     },
     "workloadCommon": {
@@ -100,7 +100,7 @@
       "required": ["protocol_id", "protocol_version", "protocol_strength", "protocol_digest", "task_type", "dataset", "concurrency", "cases"],
       "properties": {
         "protocol_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9._-]*$"},
-        "protocol_version": {"type": "integer", "minimum": 1}, "protocol_strength": {"enum": ["registered", "custom"]}, "protocol_digest": {"$ref": "#/$defs/sha256Digest"},
+        "protocol_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "protocol_strength": {"enum": ["registered", "custom"]}, "protocol_digest": {"$ref": "#/$defs/sha256Digest"},
         "task_type": {"$ref": "#/$defs/taskType"}, "dataset": {"$ref": "#/$defs/dataset"}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 4096}, "cases": {"type": "array", "minItems": 1, "maxItems": 64}
       }
     },
@@ -115,14 +115,14 @@
     "measurementBase": {
       "type": "object", "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed"],
       "properties": {
-        "case_id": {"type": "string", "minLength": 1, "maxLength": 64}, "round_index": {"type": "integer", "minimum": 1},
-        "total_duration_ms": {"type": "number", "minimum": 0}, "peak_active_memory_mib": {"type": "integer", "minimum": 0}, "completed": {"type": "boolean"}
+        "case_id": {"type": "string", "minLength": 1, "maxLength": 64}, "round_index": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "total_duration_ms": {"type": "number", "minimum": 0}, "peak_active_memory_mib": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "completed": {"type": "boolean"}
       }
     },
-    "textMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "prompt_tokens", "output_tokens", "ttft_ms", "decode_duration_ms"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "prompt_tokens": {"type": "integer", "minimum": 0}, "output_tokens": {"type": "integer", "minimum": 0}, "ttft_ms": {"type": "number", "minimum": 0}, "decode_duration_ms": {"type": "number", "minimum": 0}}}]},
-    "vlmMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "prompt_tokens", "output_tokens", "ttft_ms", "decode_duration_ms", "media_encode_duration_ms"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "prompt_tokens": {"type": "integer", "minimum": 0}, "output_tokens": {"type": "integer", "minimum": 0}, "ttft_ms": {"type": "number", "minimum": 0}, "decode_duration_ms": {"type": "number", "minimum": 0}, "media_encode_duration_ms": {"type": "number", "minimum": 0}}}]},
-    "imageMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "image_count", "width", "height"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "image_count": {"type": "integer", "minimum": 0}, "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}, "text_encode_duration_ms": {"type": "number", "minimum": 0}, "denoise_duration_ms": {"type": "number", "minimum": 0}, "vae_decode_duration_ms": {"type": "number", "minimum": 0}}}]},
-    "videoMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "frames", "width", "height"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "frames": {"type": "integer", "minimum": 0}, "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}, "text_encode_duration_ms": {"type": "number", "minimum": 0}, "denoise_duration_ms": {"type": "number", "minimum": 0}, "vae_decode_duration_ms": {"type": "number", "minimum": 0}}}]},
+    "textMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "prompt_tokens", "output_tokens", "ttft_ms", "decode_duration_ms"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "prompt_tokens": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "output_tokens": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "ttft_ms": {"type": "number", "minimum": 0}, "decode_duration_ms": {"type": "number", "minimum": 0}}}]},
+    "vlmMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "prompt_tokens", "output_tokens", "ttft_ms", "decode_duration_ms", "media_encode_duration_ms"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "prompt_tokens": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "output_tokens": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "ttft_ms": {"type": "number", "minimum": 0}, "decode_duration_ms": {"type": "number", "minimum": 0}, "media_encode_duration_ms": {"type": "number", "minimum": 0}}}]},
+    "imageMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "image_count", "width", "height"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "image_count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "width": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "height": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "text_encode_duration_ms": {"type": "number", "minimum": 0}, "denoise_duration_ms": {"type": "number", "minimum": 0}, "vae_decode_duration_ms": {"type": "number", "minimum": 0}}}]},
+    "videoMeasurement": {"allOf": [{"$ref": "#/$defs/measurementBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "round_index", "total_duration_ms", "peak_active_memory_mib", "completed", "frames", "width", "height"], "properties": {"case_id": true, "round_index": true, "total_duration_ms": true, "peak_active_memory_mib": true, "completed": true, "frames": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "width": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "height": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "text_encode_duration_ms": {"type": "number", "minimum": 0}, "denoise_duration_ms": {"type": "number", "minimum": 0}, "vae_decode_duration_ms": {"type": "number", "minimum": 0}}}]},
     "measurement": {"oneOf": [{"$ref": "#/$defs/textMeasurement"}, {"$ref": "#/$defs/vlmMeasurement"}, {"$ref": "#/$defs/imageMeasurement"}, {"$ref": "#/$defs/videoMeasurement"}]},
     "outcome": {
       "type": "object", "additionalProperties": false, "required": ["status"],
