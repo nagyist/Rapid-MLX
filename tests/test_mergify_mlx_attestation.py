@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -119,3 +120,51 @@ def test_unexpected_first_parent_commit_fails_closed(tmp_path):
             candidate_sha=malformed,
             cwd=repo,
         )
+
+
+def test_exact_source_sha_accepts_the_live_pull_request_check_shape(monkeypatch):
+    fixture = (
+        ROOT / "tests/fixtures/github-check-runs-2792-exact-head.json"
+    ).read_bytes()
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    monkeypatch.setattr(
+        attestation.urllib.request,
+        "urlopen",
+        lambda _request, timeout: Response(fixture),
+    )
+    assert attestation.exact_head_guard_succeeded(
+        "raullenchai/Rapid-MLX",
+        "fd384c93e2a8182a0547e24f098e3063bd4c9b2e",
+        "fixture-token",
+    )
+
+
+def test_check_for_a_different_sha_cannot_authorize_source(monkeypatch):
+    fixture = (
+        ROOT / "tests/fixtures/github-check-runs-2792-exact-head.json"
+    ).read_bytes()
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    monkeypatch.setattr(
+        attestation.urllib.request,
+        "urlopen",
+        lambda _request, timeout: Response(fixture),
+    )
+    assert not attestation.exact_head_guard_succeeded(
+        "raullenchai/Rapid-MLX",
+        "0000000000000000000000000000000000000000",
+        "fixture-token",
+    )

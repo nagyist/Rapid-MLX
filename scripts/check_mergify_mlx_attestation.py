@@ -208,7 +208,8 @@ def exact_head_guard_succeeded(repository: str, sha: str, token: str) -> bool:
     checks = [
         check
         for check in payload.get("check_runs", [])
-        if check.get("app", {}).get("slug") == "github-actions"
+        if check.get("head_sha") == sha
+        and check.get("app", {}).get("slug") == "github-actions"
     ]
     if not checks:
         return False
