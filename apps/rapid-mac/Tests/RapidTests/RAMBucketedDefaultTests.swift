@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Rapid
 
@@ -25,6 +26,20 @@ import Testing
 /// agree on its working-set number.
 @Suite("RAMBucketedDefault — RAM tier → recommended pick")
 struct RAMBucketedDefaultTests {
+
+    private func policyData() throws -> Data {
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<8 {
+            let candidate = directory.appendingPathComponent(
+                "vllm_mlx/model_recommendations.json"
+            )
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return try Data(contentsOf: candidate)
+            }
+            directory.deleteLastPathComponent()
+        }
+        throw CocoaError(.fileNoSuchFile)
+    }
 
     // MARK: - Primary alias per RAM (rounds DOWN to nearest floor)
 
@@ -206,6 +221,35 @@ struct RAMBucketedDefaultTests {
         for tier in RAMBucketedDefault.tiers {
             #expect(tier.picks.count == 2, "Tier \(tier.floorGB) GB must have exactly two picks")
         }
+    }
+
+    @Test("Atomic policy digest and unsupported execution semantics fail closed")
+    func atomicPolicyFailsClosed() throws {
+        let data = try policyData()
+        #expect(RAMBucketedDefault.parseRecommendationPolicy(data) != nil)
+
+        var tampered = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        tampered["machine_dimension"] = "available_memory_mib"
+        let staleDigestData = try JSONSerialization.data(withJSONObject: tampered)
+        #expect(RAMBucketedDefault.parseRecommendationPolicy(staleDigestData) == nil)
+
+        var tiers = try #require(tampered["tiers"] as? [[String: Any]])
+        var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
+        picks[0]["execution_preset_id"] = "preset/unsupported"
+        tiers[0]["picks"] = picks
+        tampered["tiers"] = tiers
+        tampered["machine_dimension"] = "physical_memory_mib"
+        guard let recomputedDigest = ModelCatalog.atomicObjectDigest(
+            tampered.filter { $0.key != "policy_digest" }
+        ) else {
+            Issue.record("test policy must be RCJ-addressable")
+            return
+        }
+        tampered["policy_digest"] = recomputedDigest
+        let unsupportedData = try JSONSerialization.data(withJSONObject: tampered)
+        #expect(RAMBucketedDefault.parseRecommendationPolicy(unsupportedData) == nil)
     }
 }
 
