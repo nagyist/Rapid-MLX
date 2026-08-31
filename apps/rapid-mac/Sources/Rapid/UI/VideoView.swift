@@ -90,6 +90,7 @@ struct VideoView: View {
 
     @State private var showingReferenceImporter = false
     @State private var pendingDeletion: VideoJob?
+    @State private var isSavingPreview = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -322,6 +323,7 @@ struct VideoView: View {
         HStack(spacing: RapidTheme.Space.sm) {
             Button { savePreview() } label: { Image(systemName: "square.and.arrow.down") }
                 .buttonStyle(.rapidTertiary)
+                .disabled(isSavingPreview)
                 .help("Save video")
                 .accessibilityLabel("Save video")
                 .accessibilityIdentifier("Video.Job.Save")
@@ -620,10 +622,16 @@ struct VideoView: View {
         panel.allowedContentTypes = [.mpeg4Movie]
         panel.nameFieldStringValue = "\(viewModel.selectedJob?.id ?? "rapid-video").mp4"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        do {
-            try VideoPreviewSaver.save(source: source, destination: destination)
-        } catch {
-            viewModel.errorMessage = "Rapid couldn't save the video to that location."
+        isSavingPreview = true
+        Task {
+            defer { isSavingPreview = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try VideoPreviewSaver.save(source: source, destination: destination)
+                }.value
+            } catch {
+                viewModel.errorMessage = "Rapid couldn't save the video to that location."
+            }
         }
     }
 

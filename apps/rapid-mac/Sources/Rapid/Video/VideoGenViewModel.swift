@@ -65,6 +65,9 @@ final class VideoGenViewModel {
     @ObservationIgnored private var pollingGeneration: UInt = 0
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private let pollingInterval: Duration
+    @ObservationIgnored private var missingActivePollCounts: [String: Int] = [:]
+    private var pendingCacheCleanupJobIDs = Set<String>()
+    private static let maximumMissingActivePolls = 5
 
     init(
         server: ServerManager,
@@ -126,6 +129,7 @@ final class VideoGenViewModel {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         return isServerReady
             && capabilities != nil
+            && isSelectedModelEligible
             && supportedModes.contains(mode)
             && !trimmed.isEmpty
             && sizePresets.contains(size)
@@ -135,7 +139,10 @@ final class VideoGenViewModel {
     }
 
     var hasActiveJobs: Bool {
-        jobs.contains { $0.status == .queued || $0.status == .inProgress }
+        jobs.contains {
+            ($0.status == .queued || $0.status == .inProgress)
+                && !pendingCacheCleanupJobIDs.contains($0.id)
+        }
     }
 
     /// Only a live matching server can prove that an active job is still
@@ -151,6 +158,7 @@ final class VideoGenViewModel {
         !isSubmitting
             && !isPreparing
             && !hasLiveActiveJobs
+            && pendingCacheCleanupJobIDs.isEmpty
             && (!isServerReady || jobsAreReconciled)
     }
 
@@ -377,6 +385,8 @@ final class VideoGenViewModel {
             jobs.removeAll { $0.id == job.id }
             jobs.insert(job, at: 0)
             jobsServerContext = context
+            missingActivePollCounts[job.id] = 0
+            pendingCacheCleanupJobIDs.remove(job.id)
             selectedJobID = job.id
             previewURL = nil
             prompt = ""
@@ -432,7 +442,7 @@ final class VideoGenViewModel {
 
     func delete(_ job: VideoJob) async {
         guard let context = currentServerContext,
-              jobsServerContext == context,
+              (jobsServerContext == context || pendingCacheCleanupJobIDs.contains(job.id)),
               job.status != .inProgress else { return }
         let contextGeneration = serverContextGeneration
         do {
@@ -442,6 +452,8 @@ final class VideoGenViewModel {
             guard requestIsCurrent(
                 context, contextGeneration: contextGeneration
             ) else { return }
+            pendingCacheCleanupJobIDs.remove(job.id)
+            missingActivePollCounts.removeValue(forKey: job.id)
             jobs.removeAll { $0.id == job.id }
             reconcileJobPolling()
             if selectedJobID == job.id {
@@ -453,6 +465,10 @@ final class VideoGenViewModel {
             guard requestIsCurrent(
                 context, contextGeneration: contextGeneration
             ) else { return }
+            if error as? VideoClientError == .cacheRemoval {
+                pendingCacheCleanupJobIDs.insert(job.id)
+                reconcileJobPolling()
+            }
             errorMessage = error.localizedDescription
         }
     }
@@ -462,6 +478,8 @@ final class VideoGenViewModel {
         capabilities = nil
         jobs = []
         jobsServerContext = nil
+        missingActivePollCounts = [:]
+        pendingCacheCleanupJobIDs = []
         jobsAreReconciled = false
         reconcileJobPolling()
         selectedJobID = nil
@@ -503,13 +521,35 @@ final class VideoGenViewModel {
         from serverJobs: [VideoJob],
         context: ServerRequestContext
     ) -> [VideoJob] {
-        guard jobsServerContext == context else { return serverJobs }
         let reportedIDs = Set(serverJobs.map(\.id))
-        let temporarilyMissingActiveJobs = jobs.filter {
-            ($0.status == .queued || $0.status == .inProgress)
-                && !reportedIDs.contains($0.id)
+        for id in reportedIDs {
+            missingActivePollCounts.removeValue(forKey: id)
         }
-        return serverJobs + temporarilyMissingActiveJobs
+        guard jobsServerContext == context else {
+            missingActivePollCounts = [:]
+            let pendingCleanup = jobs.filter {
+                pendingCacheCleanupJobIDs.contains($0.id)
+                    && !reportedIDs.contains($0.id)
+            }
+            return serverJobs + pendingCleanup
+        }
+        var retained: [VideoJob] = []
+        for job in jobs where !reportedIDs.contains(job.id) {
+            if pendingCacheCleanupJobIDs.contains(job.id) {
+                retained.append(job)
+            } else if job.status == .queued || job.status == .inProgress {
+                let misses = (missingActivePollCounts[job.id] ?? 0) + 1
+                if misses <= Self.maximumMissingActivePolls {
+                    missingActivePollCounts[job.id] = misses
+                    retained.append(job)
+                } else {
+                    missingActivePollCounts.removeValue(forKey: job.id)
+                }
+            } else {
+                missingActivePollCounts.removeValue(forKey: job.id)
+            }
+        }
+        return serverJobs + retained
     }
 
     private var currentServerContext: ServerRequestContext? {

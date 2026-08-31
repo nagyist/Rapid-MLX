@@ -87,6 +87,32 @@ struct VideoGenViewModelTests {
         #expect(viewModel.prompt.isEmpty)
     }
 
+    @Test("A running model that exceeds this Mac's memory remains ineligible")
+    func runningIneligibleModelCannotSubmit() async {
+        let model = ModelEntry(
+            alias: "ltx-2.3-mlx-q4", hfRepo: "org/ltx", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 64
+        )
+        let server = ServerManager(
+            testingState: .ready(alias: model.alias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            activeBearer: "test-bearer"
+        )
+        let viewModel = VideoGenViewModel(
+            server: server,
+            client: VideoFakeClient(),
+            physicalRAMGB: 32,
+            catalogLoader: { _ in [model] }
+        )
+        await viewModel.refreshCatalog()
+        await viewModel.refreshServerData()
+        viewModel.prompt = "A short scene"
+
+        #expect(viewModel.isServerReady)
+        #expect(!viewModel.isSelectedModelEligible)
+        #expect(!viewModel.canSubmit)
+    }
+
     @Test("A late response cannot repopulate a newly selected model")
     func staleCapabilitiesAreDiscarded() async throws {
         let first = ModelEntry(
@@ -219,6 +245,39 @@ struct VideoGenViewModelTests {
         #expect(await client.listCallCount() >= 3)
     }
 
+    @Test("A persistently missing active job expires after bounded polling")
+    func missingActiveJobEventuallyExpires() async throws {
+        let model = ModelEntry(
+            alias: "ltx-2.3-mlx-q4", hfRepo: "org/ltx", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 24
+        )
+        let client = VideoFakeClient()
+        let server = ServerManager(
+            testingState: .ready(alias: model.alias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            activeBearer: "test-bearer"
+        )
+        let viewModel = VideoGenViewModel(
+            server: server,
+            client: client,
+            physicalRAMGB: 32,
+            pollingInterval: .milliseconds(5),
+            catalogLoader: { _ in [model] }
+        )
+        await viewModel.refreshCatalog()
+        await viewModel.refreshServerData()
+        viewModel.prompt = "A fox runs through snow"
+        await viewModel.submit()
+
+        for _ in 0..<100 where viewModel.hasActiveJobs {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(!viewModel.hasActiveJobs)
+        #expect(viewModel.jobs.isEmpty)
+        #expect(await client.listCallCount() >= 7)
+    }
+
     @Test("A stale active job stops blocking global busy after a server switch")
     func staleJobIsNotGloballyBusy() async {
         let model = ModelEntry(
@@ -298,6 +357,7 @@ private actor VideoPollingClient: VideoClientProtocol {
 private actor VideoFakeClient: VideoClientProtocol {
     private var requests: [VideoCreateRequest] = []
     private var listFailures: Int
+    private var listCalls = 0
 
     init(listFailures: Int = 0) {
         self.listFailures = listFailures
@@ -328,6 +388,7 @@ private actor VideoFakeClient: VideoClientProtocol {
     }
 
     func list(port: Int, bearer: String?, limit: Int) async throws -> [VideoJob] {
+        listCalls += 1
         if listFailures > 0 {
             listFailures -= 1
             throw VideoClientError.transport("history unavailable")
@@ -340,6 +401,7 @@ private actor VideoFakeClient: VideoClientProtocol {
     }
 
     func recordedRequests() -> [VideoCreateRequest] { requests }
+    func listCallCount() -> Int { listCalls }
 
     nonisolated static func capabilitiesValue() throws -> VideoCapabilities {
         try JSONDecoder().decode(VideoCapabilities.self, from: Data(capabilitiesJSON.utf8))
