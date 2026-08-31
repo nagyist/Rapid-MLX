@@ -315,6 +315,91 @@ async def test_metadata_failure_keeps_completed_video_available(
     await video.delete_video(created["id"])
 
 
+@pytest.mark.asyncio
+async def test_shutdown_does_not_wait_for_blocked_metadata_persistence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video.configure_video_jobs(tmp_path / "videos")
+    video.start_video_jobs()
+    persistence_started = threading.Event()
+    release_persistence = threading.Event()
+
+    class FakeEngine:
+        model_name = "notapalindrome/ltx23-mlx-av-q4"
+
+        def generate(self, *, output_path: Path, **kwargs) -> None:
+            output_path.write_bytes(b"generated-mp4")
+
+    def block_persist(job) -> None:
+        persistence_started.set()
+        release_persistence.wait(timeout=5)
+
+    monkeypatch.setattr(video, "_video_engine", lambda: FakeEngine())
+    monkeypatch.setattr(video, "_persist_completed_job", block_persist)
+    created = await video.create_video(
+        prompt="Finish within shutdown budget",
+        model="ltx-2.3-mlx-q4",
+        seconds="1",
+        size="512x512",
+        seed=3,
+        input_reference=None,
+    )
+
+    try:
+        assert await asyncio.to_thread(persistence_started.wait, 1)
+        await asyncio.wait_for(video.shutdown_video_jobs(timeout=0), timeout=0.5)
+        assert (await video.retrieve_video(created["id"]))["status"] == "completed"
+    finally:
+        release_persistence.set()
+        for _ in range(100):
+            if not video._persistence_threads:
+                break
+            await asyncio.sleep(0.01)
+        assert not video._persistence_threads
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_output_symlink_swapped_after_restore(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "videos"
+    video.configure_video_jobs(store)
+    job = _completed_job("video_" + "9" * 32)
+    _write_completed_job(job)
+    video.start_video_jobs()
+
+    external = tmp_path / "private.txt"
+    external.write_bytes(b"server-readable-secret")
+    output = store / job.id / "output.mp4"
+    output.unlink()
+    output.symlink_to(external)
+
+    with pytest.raises(video.HTTPException) as exc:
+        await video.retrieve_video_content(job.id)
+
+    assert exc.value.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_nonregular_output_swapped_after_restore(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "videos"
+    video.configure_video_jobs(store)
+    job = _completed_job("video_" + "8" * 32)
+    _write_completed_job(job)
+    video.start_video_jobs()
+
+    output = store / job.id / "output.mp4"
+    output.unlink()
+    output.mkdir()
+
+    with pytest.raises(video.HTTPException) as exc:
+        await video.retrieve_video_content(job.id)
+
+    assert exc.value.status_code == 410
+
+
 def test_video_output_directory_rejects_a_file(tmp_path: Path) -> None:
     destination = tmp_path / "not-a-directory"
     destination.write_text("occupied", encoding="utf-8")

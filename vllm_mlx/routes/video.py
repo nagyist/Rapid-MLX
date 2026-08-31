@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -26,7 +27,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..middleware.auth import _verify_api_key_values, verify_api_key
 from ..model_aliases import resolve_profile
-from ._async_utils import run_to_completion
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ _jobs: dict[str, _VideoJob] = {}
 _tasks: dict[str, asyncio.Task] = {}
 _cleanup_tasks: set[asyncio.Task] = set()
 _generation_threads: set[threading.Thread] = set()
+_persistence_threads: set[threading.Thread] = set()
 _accepting_jobs = True
 _generation_gates: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Lock
@@ -238,7 +239,12 @@ def configure_video_jobs(output_dir: str | Path | None) -> Path:
     with _jobs_lock:
         active_tasks = [task for task in _tasks.values() if not task.done()]
         active_cleanup = [task for task in _cleanup_tasks if not task.done()]
-        if active_tasks or active_cleanup or _generation_threads:
+        if (
+            active_tasks
+            or active_cleanup
+            or _generation_threads
+            or _persistence_threads
+        ):
             raise RuntimeError("cannot reconfigure the video job store while jobs run")
         _jobs.clear()
         _tasks.clear()
@@ -429,7 +435,9 @@ async def shutdown_video_jobs(timeout: float = 30.0) -> None:
                 for job_id, task in _tasks.items():
                     if task in pending_set:
                         job = _jobs.get(job_id)
-                        if job is not None:
+                        if job is not None and not (
+                            job.generation_finished and job.output_path is not None
+                        ):
                             job.status = "failed"
                             job.error = {
                                 "code": "video_server_shutdown",
@@ -443,6 +451,61 @@ async def shutdown_video_jobs(timeout: float = 30.0) -> None:
             await asyncio.gather(*pending, return_exceptions=True)
     for job_id in cancelled_job_ids:
         await asyncio.to_thread(shutil.rmtree, _jobs_root / job_id, ignore_errors=True)
+
+
+async def _persist_completed_job_in_daemon_thread(job: _VideoJob) -> None:
+    """Persist a manifest without allowing slow storage to block shutdown.
+
+    Unlike generation, manifest persistence is safe to detach after the MP4 is
+    complete: the atomic temporary-file protocol leaves either the previous
+    complete record or no record. A daemon thread lets the server honor its
+    shutdown deadline even when an external volume stalls in ``fsync`` or
+    ``replace``.
+    """
+    loop = asyncio.get_running_loop()
+    completed = loop.create_future()
+
+    def finish(result: BaseException | None) -> None:
+        if completed.done():  # pragma: no cover - defensive duplicate callback
+            return
+        if result is None:
+            completed.set_result(None)
+        else:
+            completed.set_exception(result)
+
+    def target() -> None:
+        result: BaseException | None
+        try:
+            _persist_completed_job(job)
+        except Exception as exc:  # noqa: BLE001
+            result = exc
+        except BaseException:  # pragma: no cover - defensive thread boundary
+            result = RuntimeError("video job metadata worker terminated unexpectedly")
+        else:
+            result = None
+        finally:
+            with _jobs_lock:
+                _persistence_threads.discard(thread)
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(finish, result)
+
+    thread = threading.Thread(
+        target=target, name="rapid-mlx-video-persistence", daemon=True
+    )
+    with _jobs_lock:
+        _persistence_threads.add(thread)
+    thread.start()
+    try:
+        await asyncio.shield(completed)
+    except asyncio.CancelledError:
+        # If the server abandons this best-effort write at its shutdown
+        # deadline, consume a late worker exception without holding shutdown.
+        def consume_outcome(done: asyncio.Future) -> None:
+            if not done.cancelled():
+                done.exception()
+
+        completed.add_done_callback(consume_outcome)
+        raise
 
 
 async def _run_in_generation_thread(function, /, **kwargs) -> None:
@@ -678,6 +741,8 @@ async def _run_job(
     conditioning_strength: float | None,
 ) -> None:
     started = False
+    generation_completed = False
+    completed_job: _VideoJob | None = None
     output = _jobs_root / job.id / "output.mp4"
     generation_gate = _generation_gate_for_current_loop()
     is_cogvideox = getattr(engine, "video_family", "") == "cogvideox-fun"
@@ -731,9 +796,16 @@ async def _run_job(
             output_path=str(output),
             generation_finished=True,
         )
+        with _jobs_lock:
+            # Keep the job in progress until its atomic manifest commit
+            # finishes. That prevents normal retention from evicting its
+            # directory while the persistence thread still owns it.
+            job.output_path = completed_job.output_path
+            job.generation_finished = completed_job.generation_finished
+        generation_completed = True
         if _jobs_are_persistent:
             try:
-                await run_to_completion(_persist_completed_job, completed_job)
+                await _persist_completed_job_in_daemon_thread(completed_job)
             except OSError:
                 # The MP4 is already complete and remains downloadable for this
                 # process. Keep that user result available while making the
@@ -745,9 +817,16 @@ async def _run_job(
             job.status = completed_job.status
             job.progress = completed_job.progress
             job.completed_at = completed_job.completed_at
-            job.output_path = completed_job.output_path
-            job.generation_finished = completed_job.generation_finished
     except asyncio.CancelledError:
+        if generation_completed:
+            # The completed MP4 remains valid. Metadata persistence is atomic
+            # and may finish in its detached daemon thread after shutdown.
+            assert completed_job is not None
+            with _jobs_lock:
+                job.status = completed_job.status
+                job.progress = completed_job.progress
+                job.completed_at = completed_job.completed_at
+            raise
         with _jobs_lock:
             if job.status != "failed":
                 job.status = "failed"
@@ -1080,14 +1159,41 @@ async def retrieve_video_content(video_id: str):
     job = _get_job(video_id)
     if job.status != "completed" or job.output_path is None:
         raise HTTPException(status_code=409, detail="video is not completed")
-    # Open before releasing control. A concurrent delete/eviction may unlink
-    # the path, but the already-open descriptor remains streamable on macOS.
+    # Open relative to no-follow directory descriptors. This prevents a local
+    # process with access to the operator-owned store from swapping either the
+    # restored job directory or output file for a symlink between startup
+    # validation and download. O_NONBLOCK also prevents a substituted FIFO
+    # from stalling the event loop before fstat can reject it.
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:  # pragma: no cover - POSIX guard
+        raise HTTPException(status_code=410, detail="video content has expired")
+    base_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    root_fd = job_fd = output_fd = None
     try:
-        source = open(job.output_path, "rb")  # noqa: SIM115
-    except FileNotFoundError as exc:
+        root_fd = os.open(_jobs_root, base_flags | directory)
+        job_fd = os.open(job.id, base_flags | directory, dir_fd=root_fd)
+        output_fd = os.open(
+            "output.mp4",
+            base_flags | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=job_fd,
+        )
+        output_stat = os.fstat(output_fd)
+        if not stat.S_ISREG(output_stat.st_mode) or output_stat.st_size <= 0:
+            raise OSError("video output is not a non-empty regular file")
+        source = os.fdopen(output_fd, "rb")
+        output_fd = None
+    except OSError as exc:
         raise HTTPException(
             status_code=410, detail="video content has expired"
         ) from exc
+    finally:
+        if output_fd is not None:
+            os.close(output_fd)
+        if job_fd is not None:
+            os.close(job_fd)
+        if root_fd is not None:
+            os.close(root_fd)
 
     def chunks():
         try:
