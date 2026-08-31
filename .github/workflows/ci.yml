@@ -271,118 +271,16 @@ jobs:
       - name: Verify Mergify source-head attestations
         id: mergify-attestation
         if: steps.queue-info.outcome == 'success'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
           QUEUE_METADATA: ${{ steps.queue-info.outputs.queue_metadata }}
-        with:
-          script: |
-            let metadata;
-            try {
-              metadata = JSON.parse(process.env.QUEUE_METADATA || "");
-            } catch (error) {
-              core.setFailed(`Invalid Mergify queue metadata: ${error.message}`);
-              return;
-            }
-            const sourceNumbers = metadata.pull_requests
-              ?.map((source) => source.number)
-              .filter((number) => Number.isSafeInteger(number) && number > 0);
-            if (!sourceNumbers || sourceNumbers.length === 0 ||
-                sourceNumbers.length !== metadata.pull_requests.length ||
-                new Set(sourceNumbers).size !== sourceNumbers.length) {
-              core.setFailed("Trusted Mergify candidate has no source PR metadata");
-              return;
-            }
-
-            const candidateSha = context.payload.pull_request.head.sha;
-            const baseSha = metadata.checking_base_sha;
-            if (!/^[0-9a-f]{40}$/.test(baseSha || "")) {
-              core.setFailed("Trusted Mergify candidate has no checking_base_sha");
-              return;
-            }
-
-            const lineageResult = await exec.getExecOutput(
-              "git",
-              ["log", "--first-parent", "--format=%H%x09%s", `${baseSha}..${candidateSha}`],
-              {ignoreReturnCode: true, silent: true},
-            );
-            if (lineageResult.exitCode !== 0) {
-              core.setFailed("Cannot inspect the Mergify candidate first-parent lineage");
-              return;
-            }
-            const integrations = new Map();
-            for (const line of lineageResult.stdout.trim().split("\n")) {
-              if (!line) continue;
-              const [sha, ...subjectParts] = line.split("\t");
-              const match = subjectParts.join("\t").match(/^Merge of #(\d+)$/);
-              if (!match) continue;
-              const number = Number(match[1]);
-              if (integrations.has(number)) {
-                core.setFailed(`Candidate contains duplicate integrations for PR #${number}`);
-                return;
-              }
-              integrations.set(number, sha);
-            }
-            if (integrations.size !== sourceNumbers.length ||
-                sourceNumbers.some((number) => !integrations.has(number))) {
-              core.setFailed("Mergify metadata does not match candidate integration commits");
-              return;
-            }
-
-            for (const pull_number of sourceNumbers) {
-              const mergeSha = integrations.get(pull_number);
-              const parentsResult = await exec.getExecOutput(
-                "git",
-                ["show", "-s", "--format=%P", mergeSha],
-                {ignoreReturnCode: true, silent: true},
-              );
-              const parents = parentsResult.stdout.trim().split(/\s+/);
-              if (parentsResult.exitCode !== 0 || parents.length !== 2) {
-                core.setFailed(`Integration commit for PR #${pull_number} is not a two-parent merge`);
-                return;
-              }
-              const [previousCandidateSha, exactSourceSha] = parents;
-
-              const pyprojectDiff = await exec.exec(
-                "git",
-                ["diff", "--quiet", previousCandidateSha, mergeSha, "--", "pyproject.toml"],
-                {ignoreReturnCode: true},
-              );
-              if (pyprojectDiff > 1) {
-                core.setFailed(`Cannot inspect pyproject.toml integration for PR #${pull_number}`);
-                return;
-              }
-              if (pyprojectDiff === 0) {
-                continue;
-              }
-
-              const checks = await github.paginate(
-                github.rest.checks.listForRef,
-                {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: exactSourceSha,
-                  check_name: "mlx-bound-guard",
-                  filter: "latest",
-                  per_page: 100,
-                },
-              );
-              const guard = checks
-                .filter((check) => check.app?.slug === "github-actions")
-                .sort((left, right) => right.id - left.id)[0];
-              if (!guard || guard.status !== "completed" || guard.conclusion !== "success") {
-                core.setFailed(
-                  `Integrated source ${exactSourceSha} for PR #${pull_number} lacks a successful mlx-bound-guard`,
-                );
-                return;
-              }
-            }
-
-            core.setOutput("attested", "true");
-            core.info(`Verified mlx-bound-guard on source PRs: ${sourceNumbers.join(", ")}`);
+          REAL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/check_mergify_mlx_attestation.py
 
       - name: Guard mlx/mlx-lm/mlx-vlm version bounds
         env:
-          MLX_BOUND_BASE_REF: origin/${{ github.base_ref || 'main' }}
+          MLX_BOUND_BASE_REF: ${{ github.event.pull_request.base.sha }}
           MLX_BOUND_ATTESTED: ${{ steps.mergify-attestation.outputs.attested }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}

@@ -9,7 +9,6 @@ and the attestation check.
 from __future__ import annotations
 
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
@@ -333,58 +332,20 @@ class TestMergifyAttestationWorkflow:
             resolver["env"]["QUEUE_METADATA"]
             == "${{ steps.queue-info.outputs.queue_metadata }}"
         )
-        assert resolver["uses"].startswith("actions/github-script@")
+        assert resolver["env"]["REAL_BASE_SHA"] == (
+            "${{ github.event.pull_request.base.sha }}"
+        )
+        assert resolver["env"]["CANDIDATE_SHA"] == (
+            "${{ github.event.pull_request.head.sha }}"
+        )
+        assert resolver["run"] == "python scripts/check_mergify_mlx_attestation.py"
         assert job["permissions"] == {
             "checks": "read",
             "contents": "read",
         }
 
-    def test_real_queue_info_payload_drives_exact_source_lineage(self):
-        metadata = json.loads(
-            (_REPO_ROOT / "tests/fixtures/mergify-queue-info-batch.json").read_text()
-        )
-        assert metadata["checking_base_sha"] == (
-            "68817d9a40db187b53a1a0d76888c0283d03e116"
-        )
-        assert [source["number"] for source in metadata["pull_requests"]] == [
-            2812,
-            2810,
-            2821,
-            2826,
-        ]
-
-        resolver = next(
-            step
-            for step in self._job()["steps"]
-            if step.get("id") == "mergify-attestation"
-        )
-        script = resolver["with"]["script"]
-        assert "JSON.parse(process.env.QUEUE_METADATA" in script
-        assert "metadata.pull_requests" in script
-        assert "metadata.checking_base_sha" in script
-        assert "context.payload.pull_request.body" not in script
-
-    def test_candidate_resolver_binds_each_source_head_and_guard_result(self):
+    def test_guard_uses_the_immutable_event_base_and_resolver_output(self):
         job = self._job()
-        resolver = next(
-            step for step in job["steps"] if step.get("id") == "mergify-attestation"
-        )
-        script = resolver["with"]["script"]
-
-        assert "metadata.pull_requests" in script
-        assert "metadata.checking_base_sha" in script
-        assert '"--first-parent", "--format=%H%x09%s"' in script
-        assert "^Merge of #(\\d+)$" in script
-        assert '"show", "-s", "--format=%P", mergeSha' in script
-        assert "parents.length !== 2" in script
-        assert "const [previousCandidateSha, exactSourceSha] = parents" in script
-        assert 'previousCandidateSha, mergeSha, "--", "pyproject.toml"' in script
-        assert "github.rest.pulls.get" not in script
-        assert "ref: exactSourceSha" in script
-        assert 'check_name: "mlx-bound-guard"' in script
-        assert 'check.app?.slug === "github-actions"' in script
-        assert 'guard.conclusion !== "success"' in script
-
         guard_step = next(
             step
             for step in job["steps"]
@@ -393,6 +354,9 @@ class TestMergifyAttestationWorkflow:
         assert (
             guard_step["env"]["MLX_BOUND_ATTESTED"]
             == "${{ steps.mergify-attestation.outputs.attested }}"
+        )
+        assert guard_step["env"]["MLX_BOUND_BASE_REF"] == (
+            "${{ github.event.pull_request.base.sha }}"
         )
 
 
