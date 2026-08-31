@@ -8,18 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from vllm_mlx.spec_decode.mtp import qwen3_5_inject, qwen4_exp_inject
+from vllm_mlx.spec_decode.mtp import qwen3_5_inject
 
 ROOT = Path(__file__).resolve().parents[1]
-FAMILY_MODULES = (qwen4_exp_inject, qwen3_5_inject)
+FAMILY_MODULES = (qwen3_5_inject,)
 
 
 @pytest.mark.parametrize(
     "module,family,dynamic_join",
-    [
-        (qwen4_exp_inject, "qwen4_exp", False),
-        (qwen3_5_inject, "qwen3_5", True),
-    ],
+    [(qwen3_5_inject, "qwen3_5", True)],
 )
 def test_capability_descriptor_is_explicit_immutable_and_conservative(
     module, family, dynamic_join
@@ -63,7 +60,6 @@ def test_batch_forward_delegates_to_existing_recursive_hidden_path(module):
 @pytest.mark.parametrize(
     "relative_path,injected_class",
     [
-        ("vllm_mlx/spec_decode/mtp/qwen4_exp_inject.py", "_Qwen4ExpWithMTP"),
         ("vllm_mlx/spec_decode/mtp/qwen3_5_inject.py", "_Qwen3_5WithMTP"),
     ],
 )
@@ -95,6 +91,5 @@ def test_injected_class_exposes_descriptor_seam_and_separate_recursive_depth(
     assert "mtp_max_speculative_tokens" not in assignments
 
 
-def test_flash_and_qwen35_join_claims_remain_intentionally_asymmetric():
-    assert qwen4_exp_inject.BATCHED_MTP_CAPABILITY["dynamic_join"] is False
+def test_qwen35_attests_cycle_boundary_dynamic_join():
     assert qwen3_5_inject.BATCHED_MTP_CAPABILITY["dynamic_join"] is True

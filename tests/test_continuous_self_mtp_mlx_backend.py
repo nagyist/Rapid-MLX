@@ -16,6 +16,7 @@ from vllm_mlx.spec_decode.mtp.continuous_engine import (
     SelfMTPCachePair,
     SelfMTPLaneSpec,
     SelfMTPSampling,
+    abort_batched_self_mtp,
     attach_self_mtp_lanes,
     commit_batched_self_mtp,
     detach_self_mtp_lanes,
@@ -212,6 +213,49 @@ def test_k2_recursive_draft_target_verify_and_delivery_commit():
     assert [lane.ntoks for lane in batch.lanes] == [3, 4]
 
 
+def test_abort_restores_lane_and_cache_proposal_boundary():
+    runtime, _forward, _cache_events = _runtime()
+    detached0, _ = _prepare(runtime, 0, [1, 2])
+    detached1, _ = _prepare(runtime, 1, [5, 6])
+    batch = attach_self_mtp_lanes(None, [detached0, detached1])
+    target_cache = batch.caches.target[0]
+    draft_cache = batch.caches.draft[0]
+    target_cache.offset = 7
+    draft_cache.offset = 9
+    lane_boundaries = [
+        (
+            lane.cur,
+            lane.seed_hidden,
+            lane.token_prefix.copy(),
+            lane.ntoks,
+            lane.pending_hidden,
+            list(lane.pending_tokens),
+        )
+        for lane in batch.lanes
+    ]
+
+    proposal = propose_batched_self_mtp(batch)
+    # Simulate mutations made after verification but before delivery commits.
+    batch.lanes[0].cur = 31
+    batch.lanes[0].pending_tokens = [99]
+    target_cache.offset = 70
+    draft_cache.offset = 90
+
+    abort_batched_self_mtp(batch, proposal)
+
+    assert batch.proposal_open is False
+    assert target_cache.offset == 7
+    assert draft_cache.offset == 9
+    for lane, boundary in zip(batch.lanes, lane_boundaries):
+        cur, seed_hidden, token_prefix, ntoks, pending_hidden, pending_tokens = boundary
+        assert lane.cur == cur
+        assert lane.seed_hidden is seed_hidden
+        assert np.array_equal(lane.token_prefix, token_prefix)
+        assert lane.ntoks == ntoks
+        assert lane.pending_hidden is pending_hidden
+        assert lane.pending_tokens == pending_tokens
+
+
 def test_next_cycle_flushes_persistent_pending_pairs_before_new_drafts():
     runtime, forward, _events = _runtime()
     lane0, _ = _prepare(runtime, 0, [1, 2])
@@ -257,6 +301,28 @@ def test_terminal_delivery_prefix_updates_cur_seed_and_detach_flushes_debt():
     assert all(item.lane.pending_tokens == [] for item in detached)
 
 
+def test_one_token_remaining_uses_target_only_cycle():
+    runtime, forward, cache_events = _runtime()
+    detached, first = prepare_self_mtp_lane(
+        SelfMTPLaneSpec(uid=0, prompt=[1, 2], max_tokens=2, num_draft=2),
+        runtime,
+    )
+    batch = attach_self_mtp_lanes(None, [detached])
+
+    proposal = propose_batched_self_mtp(batch)
+    assert proposal.draft_depths == (0,)
+    assert proposal.accepted_lengths == (0,)
+    assert len(proposal.outputs[0]) == 1
+    assert proposal.outputs[0][0].from_draft is False
+    assert not [event for event in cache_events if event[0] == "trim"]
+
+    commit_batched_self_mtp(batch, proposal, emitted_counts=[1], terminal=[True])
+    assert batch.lanes[0].ntoks == 2
+    assert batch.lanes[0].cur == proposal.outputs[0][0].token
+    assert first.from_draft is False
+    assert [call[-1] for call in forward.calls if call[0] == "target"][-1] == 0
+
+
 def test_transformed_sampling_fails_closed_without_residual_hooks():
     runtime, _forward, _events = _runtime()
     runtime = ContinuousSelfMTPRuntime(
@@ -273,7 +339,7 @@ def test_transformed_sampling_fails_closed_without_residual_hooks():
         compute=runtime.compute,
         caches=runtime.caches,
     )
-    with pytest.raises(ContinuousSelfMTPUnsupported, match="residual hooks"):
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="per-lane RNG"):
         prepare_self_mtp_lane(
             SelfMTPLaneSpec(
                 uid=0,

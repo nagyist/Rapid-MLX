@@ -24,8 +24,7 @@ from .continuous_engine import (
 from .mlx_backend import RapidMLXSelfMTPBackend, RapidRaggedCacheAdapter
 from .ragged_cache import preflight_ragged_cache, trim_ragged_cache
 
-
-_SUPPORTED_FAMILIES = frozenset({"qwen3_5", "qwen4_exp"})
+_SUPPORTED_FAMILIES = frozenset({"qwen3_5"})
 
 
 def _unsupported(message: str) -> ContinuousSelfMTPUnsupportedError:
@@ -63,10 +62,6 @@ def _resolve_inner(model: Any, family: str) -> Any:
         from .qwen3_5_inject import _resolve_inner_text_model
 
         inner = _resolve_inner_text_model(model)
-    elif family == "qwen4_exp":
-        from .qwen4_exp_inject import _resolve_inner as resolve_qwen4_inner
-
-        inner = resolve_qwen4_inner(model)
     else:  # Guarded by descriptor validation; retained for direct testability.
         inner = None
     if inner is None:
@@ -76,7 +71,7 @@ def _resolve_inner(model: Any, family: str) -> Any:
 
 def _require_descriptor(
     descriptor: Mapping[str, Any],
-) -> tuple[str, str, bool]:
+) -> tuple[str, str]:
     family = descriptor.get("model_family")
     if not isinstance(family, str) or family not in _SUPPORTED_FAMILIES:
         raise _unsupported(f"unsupported model family: {family!r}")
@@ -103,10 +98,7 @@ def _require_descriptor(
     batch_forward_name = descriptor.get("batch_forward")
     if not isinstance(batch_forward_name, str) or not batch_forward_name:
         raise _unsupported("capability descriptor has no batch_forward method")
-    share_qsa_indices = descriptor.get("share_qsa_indices")
-    if not isinstance(share_qsa_indices, bool):
-        raise _unsupported("capability descriptor has no share_qsa_indices attestation")
-    return family, batch_forward_name, share_qsa_indices
+    return family, batch_forward_name
 
 
 def _require_target_abi(inner: Any) -> None:
@@ -130,7 +122,6 @@ def assemble_continuous_self_mtp_runtime(
     *,
     allow_dynamic_membership: bool = False,
     array_ops: Any = None,
-    residual_sampling: Any = None,
     logits_processor: Any = None,
     prefill_step_size: int = 512,
     speculation_rollback: bool = False,
@@ -144,7 +135,7 @@ def assemble_continuous_self_mtp_runtime(
     """
 
     descriptor = _descriptor_for(model)
-    family, batch_forward_name, share_qsa_indices = _require_descriptor(descriptor)
+    family, batch_forward_name = _require_descriptor(descriptor)
     inner = _resolve_inner(model, family)
     _require_target_abi(inner)
 
@@ -161,6 +152,10 @@ def assemble_continuous_self_mtp_runtime(
     if not callable(make_mtp_cache):
         raise _unsupported("injected make_mtp_cache is not callable")
 
+    from .ragged_cache import install_ragged_cache_rollback
+
+    install_ragged_cache_rollback(qwen4_state_cls=None, qsa_cls=None)
+
     def mtp_forward(hidden: Any, token_ids: Any, cache: Any, *, return_hidden: bool):
         # RapidForwardSeams always asks for hidden state.  The injected batched
         # method bakes that request into its contract and accepts no flag.
@@ -169,10 +164,7 @@ def assemble_continuous_self_mtp_runtime(
         return batch_forward(hidden, token_ids, cache)
 
     dynamic_membership = (
-        allow_dynamic_membership is True and descriptor.get("dynamic_join") is True
-    )
-    flash_dynamic_membership = dynamic_membership and (
-        descriptor.get("flash_dynamic_membership_attested") is True
+        allow_dynamic_membership and descriptor.get("dynamic_join") is True
     )
     capabilities = ContinuousSelfMTPCapabilities(
         target_return_hidden=descriptor.get("target_return_hidden") is True,
@@ -181,7 +173,7 @@ def assemble_continuous_self_mtp_runtime(
         ragged_rollback=descriptor.get("ragged_rollback") is True,
         atomic_cache_commit=descriptor.get("atomic_cache_commit") is True,
         dynamic_membership=dynamic_membership,
-        flash_dynamic_membership_attested=flash_dynamic_membership,
+        flash_dynamic_membership_attested=False,
     )
     missing = capabilities.missing_fixed_core()
     if missing:  # Defensive: future capability additions remain fail-closed.
@@ -199,9 +191,7 @@ def assemble_continuous_self_mtp_runtime(
             target_cache_factory=lambda: _make_prompt_cache(inner),
             draft_cache_factory=make_mtp_cache,
             array_ops=array_ops,
-            residual_sampling=residual_sampling,
             logits_processor=logits_processor,
-            share_qsa_indices=share_qsa_indices,
             prefill_step_size=prefill_step_size,
             speculation_rollback=speculation_rollback,
         ),

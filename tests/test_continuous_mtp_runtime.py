@@ -22,14 +22,13 @@ def _descriptor(family: str = "qwen3_5", **changes):
         "model_family": family,
         "batch_forward": "mtp_batch_forward",
         "recursive_draft_depth": 2,
-        "share_qsa_indices": family == "qwen4_exp",
         "fixed_membership": True,
         "target_return_hidden": True,
         "mtp_return_hidden": True,
         "confirmed_target_forward": True,
         "ragged_rollback": True,
         "atomic_cache_commit": True,
-        "dynamic_join": family == "qwen3_5",
+        "dynamic_join": True,
         "flash_dynamic_membership_attested": False,
         "quantized_cache": False,
         "windowed_cache": False,
@@ -116,7 +115,6 @@ def test_assembler_resolves_inner_model_and_wires_forward_and_cache_seams(
     assert runtime.capabilities.missing_fixed_core() == ()
     assert runtime.capabilities.dynamic_membership is False
     assert runtime.compute.prefill_step_size == 17
-    assert runtime.compute.share_qsa_indices is False
 
     assert runtime.forwards.target("ids", "target-kv", n_confirmed=2) == (
         "target-logits",
@@ -159,7 +157,7 @@ def test_speculation_rollback_is_opt_in_and_reaches_the_backend(monkeypatch):
     assert enabled.compute.speculation_rollback is True
 
 
-def test_dynamic_membership_requires_both_policy_and_descriptor_attestation():
+def test_dynamic_membership_requires_policy_and_dense_attestation():
     inner = _InjectedTextModel()
     enabled = runtime_module.assemble_continuous_self_mtp_runtime(
         inner,
@@ -168,53 +166,23 @@ def test_dynamic_membership_requires_both_policy_and_descriptor_attestation():
     )
     policy_off = runtime_module.assemble_continuous_self_mtp_runtime(
         inner,
-        allow_dynamic_membership=False,
         array_ops=_ArrayOpsStub(),
     )
-    unattested_inner = _InjectedTextModel(_descriptor(dynamic_join=False))
-    unattested = runtime_module.assemble_continuous_self_mtp_runtime(
-        unattested_inner,
-        allow_dynamic_membership=True,
-        array_ops=_ArrayOpsStub(),
-    )
-    flash_inner = _InjectedTextModel(
-        _descriptor(flash_dynamic_membership_attested=True)
-    )
-    flash_attested = runtime_module.assemble_continuous_self_mtp_runtime(
-        flash_inner,
-        allow_dynamic_membership=True,
-        array_ops=_ArrayOpsStub(),
-    )
-    flash_policy_off = runtime_module.assemble_continuous_self_mtp_runtime(
-        flash_inner,
-        allow_dynamic_membership=False,
-        array_ops=_ArrayOpsStub(),
-    )
-
     assert enabled.capabilities.dynamic_membership is True
     assert policy_off.capabilities.dynamic_membership is False
-    assert unattested.config.allow_dynamic_membership is True
-    assert unattested.capabilities.dynamic_membership is False
-    assert enabled.capabilities.flash_dynamic_membership_attested is False
-    assert flash_attested.capabilities.flash_dynamic_membership_attested is True
-    assert flash_policy_off.capabilities.flash_dynamic_membership_attested is False
 
 
-def test_qwen4_uses_its_injector_resolver_and_qsa_policy():
+def test_qwen4_is_not_attested_by_the_dense_adapter():
     descriptor = _descriptor("qwen4_exp")
     inner = _InjectedTextModel(descriptor)
     inner.model_type = "qwen4_exp_text"
     outer = _OuterModel(inner)
 
-    runtime = runtime_module.assemble_continuous_self_mtp_runtime(
-        outer,
-        allow_dynamic_membership=True,
-        array_ops=_ArrayOpsStub(),
-    )
-
-    assert runtime.config.architecture == "qwen4_exp"
-    assert runtime.compute.share_qsa_indices is True
-    assert runtime.capabilities.dynamic_membership is False
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="unsupported model"):
+        runtime_module.assemble_continuous_self_mtp_runtime(
+            outer,
+            array_ops=_ArrayOpsStub(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -232,7 +200,6 @@ def test_qwen4_uses_its_injector_resolver_and_qsa_policy():
         ({"windowed_cache": True}, "windowed_cache"),
         ({"xtc": True}, "xtc"),
         ({"batch_forward": None}, "batch_forward"),
-        ({"share_qsa_indices": None}, "share_qsa_indices"),
         ({"model_family": "unknown"}, "unsupported model family"),
     ],
 )
@@ -274,11 +241,10 @@ def test_missing_injected_surfaces_and_target_abi_fail_closed():
 def test_outer_and_resolved_inner_descriptors_must_match():
     inner = _InjectedTextModel()
     outer = _OuterModel(inner)
-    outer.batched_mtp_capability = _descriptor(dynamic_join=False)
+    outer.batched_mtp_capability = _descriptor(protocol_version=2)
 
     with pytest.raises(ContinuousSelfMTPUnsupportedError, match="descriptors disagree"):
         runtime_module.assemble_continuous_self_mtp_runtime(
             outer,
-            allow_dynamic_membership=True,
             array_ops=_ArrayOpsStub(),
         )
