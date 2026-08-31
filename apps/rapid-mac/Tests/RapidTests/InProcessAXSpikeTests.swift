@@ -2,137 +2,103 @@ import AppKit
 import SwiftUI
 import Testing
 
-/// SPIKE (golden-flow sink pilot): prove that a SwiftUI view mounted in a
-/// never-shown ``NSWindow`` exposes a walkable accessibility hierarchy and
-/// honors ``accessibilityPerformPress()`` — the two capabilities the
-/// AX-driven golden flows rely on via the out-of-process driver. Both
-/// holding in-process means chat-shard journeys can run inside
-/// `swift test` without launching the app or taking the OS foreground.
-///
-/// Two non-obvious ingredients, discovered empirically (macOS 26):
-///
-/// 1. A bare ``NSHostingView`` — even inside a window — reports zero AX
-///    children. SwiftUI materializes its ``AccessibilityNode`` tree only
-///    when it believes an assistive client is attached, which the
-///    `accessibilityEnhancedUserInterface` KVC toggle simulates (the same
-///    flag VoiceOver sets over the AX wire; snapshot-testing tools use the
-///    UIKit twin for the same purpose).
-/// 2. The materialized children are `SwiftUI.AccessibilityNode` instances,
-///    which implement the AX getters/actions but are NOT KVC-compliant and
-///    do not conform to ``NSAccessibilityProtocol``. They must be driven
-///    through `responds(to:)`/`perform(_:)`.
+/// Contract tests for ``GoldenStage``: the stage must expose a walkable AX
+/// tree, deliver presses into real SwiftUI action closures, surface state
+/// changes back through the tree, and materialize sheet and popover
+/// windows — all without the window ever being visible or key. Sunk golden
+/// flows depend on exactly these guarantees, so a macOS update that breaks
+/// one should fail here, in a test that names the broken ingredient,
+/// rather than inside a ported product journey.
 @MainActor
-private final class SpikeModel: ObservableObject {
+private final class StageProbeModel: ObservableObject {
     @Published var label = "before-press"
+    @Published var showsPopover = false
+    @Published var showsSheet = false
     var pressed = false
 }
 
-private struct SpikeView: View {
-    @ObservedObject var model: SpikeModel
+private struct StageProbeView: View {
+    @ObservedObject var model: StageProbeModel
 
     var body: some View {
         VStack {
             Text(model.label)
-                .accessibilityIdentifier("Spike.Label")
+                .accessibilityIdentifier("StageProbe.Label")
             Button("Press Me") {
                 model.pressed = true
                 model.label = "after-press"
             }
-            .accessibilityIdentifier("Spike.Button")
+            .accessibilityIdentifier("StageProbe.Button")
+            Button("Popover") { model.showsPopover.toggle() }
+                .accessibilityIdentifier("StageProbe.PopoverAnchor")
+                .popover(isPresented: $model.showsPopover) {
+                    Text("popover-content")
+                        .accessibilityIdentifier("StageProbe.PopoverContent")
+                        .padding()
+                }
+            Button("Sheet") { model.showsSheet = true }
+                .accessibilityIdentifier("StageProbe.SheetAnchor")
+                .sheet(isPresented: $model.showsSheet) {
+                    Button("Done") { model.showsSheet = false }
+                        .accessibilityIdentifier("StageProbe.SheetDone")
+                        .padding()
+                }
+            TextField("Draft", text: .constant(""))
+                .accessibilityIdentifier("StageProbe.Field")
         }
-        .frame(width: 300, height: 200)
-    }
-}
-
-/// Selector-based AX surface reader for SwiftUI's private node class.
-@MainActor
-private enum AXProbe {
-    static func string(_ obj: NSObject, _ selector: String) -> String {
-        let sel = NSSelectorFromString(selector)
-        guard obj.responds(to: sel), let result = obj.perform(sel) else { return "" }
-        return (result.takeUnretainedValue() as? String) ?? ""
-    }
-
-    static func children(_ obj: NSObject) -> [NSObject] {
-        let sel = NSSelectorFromString("accessibilityChildren")
-        guard obj.responds(to: sel), let result = obj.perform(sel) else { return [] }
-        return (result.takeUnretainedValue() as? [NSObject]) ?? []
-    }
-
-    static func find(_ obj: NSObject, id target: String) -> NSObject? {
-        if string(obj, "accessibilityIdentifier") == target { return obj }
-        for child in children(obj) {
-            if let hit = find(child, id: target) { return hit }
-        }
-        return nil
-    }
-
-    /// (identifier, role, text) triples in depth-first order — the same
-    /// currency the bash flows' `see_main` JSON captures.
-    static func walk(_ obj: NSObject, into out: inout [(id: String, role: String, text: String)]) {
-        let id = string(obj, "accessibilityIdentifier")
-        let role = string(obj, "accessibilityRole")
-        var text = ""
-        let valueSel = NSSelectorFromString("accessibilityValue")
-        if obj.responds(to: valueSel), let value = obj.perform(valueSel) {
-            text = (value.takeUnretainedValue() as? String) ?? ""
-        }
-        if text.isEmpty { text = string(obj, "accessibilityLabel") }
-        if !id.isEmpty || !text.isEmpty {
-            out.append((id: id, role: role, text: text))
-        }
-        for child in children(obj) {
-            walk(child, into: &out)
-        }
+        .frame(width: 400, height: 300)
     }
 }
 
 @MainActor
-@Suite("In-process AX spike")
+@Suite("GoldenStage contract", .serialized)
 struct InProcessAXSpikeTests {
-    @Test("Never-shown window exposes AX identifiers and presses in-process")
-    func offscreenHostExposesAXAndPress() {
-        let model = SpikeModel()
-        let host = NSHostingView(rootView: SpikeView(model: model))
-        host.frame = CGRect(x: 0, y: 0, width: 300, height: 200)
-        // The window is created but never ordered in: no screen presence,
-        // no foreground, no Dock churn — the property the sink depends on.
-        let window = NSWindow(
-            contentRect: host.frame,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = host
-        host.layoutSubtreeIfNeeded()
+    @Test("The stage walks identifiers, presses, and observes state changes")
+    func walkPressObserve() async throws {
+        let model = StageProbeModel()
+        let stage = GoldenStage(StageProbeView(model: model), size: CGSize(width: 400, height: 300))
 
-        // Ingredient 1: simulate an attached assistive client, then give
-        // SwiftUI one runloop turn to build its AccessibilityNode tree.
-        NSApplication.shared.setValue(true, forKey: "accessibilityEnhancedUserInterface")
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        let ids = stage.identifiers()
+        #expect(ids.contains("StageProbe.Label"), "AX tree missing label: \(ids)")
+        #expect(ids.contains("StageProbe.Button"), "AX tree missing button: \(ids)")
+        #expect(stage.treeText().contains("before-press"))
 
-        var tree: [(id: String, role: String, text: String)] = []
-        AXProbe.walk(host, into: &tree)
-        let ids = tree.map(\.id)
-        #expect(ids.contains("Spike.Label"), "label identifier missing from AX tree: \(tree)")
-        #expect(ids.contains("Spike.Button"), "button identifier missing from AX tree: \(tree)")
-        #expect(tree.contains { $0.text.contains("before-press") },
-                "label text missing from AX tree: \(tree)")
+        try stage.press("StageProbe.Button")
+        #expect(model.pressed, "press did not reach the SwiftUI action closure")
+        try await stage.waitForText("after-press")
+    }
 
-        guard let button = AXProbe.find(host, id: "Spike.Button") else {
-            Issue.record("button not findable by identifier")
-            return
+    @Test("Sheets materialize as walkable windows and dismiss on press")
+    func sheetRoundTrip() async throws {
+        let model = StageProbeModel()
+        let stage = GoldenStage(StageProbeView(model: model), size: CGSize(width: 400, height: 300))
+
+        try stage.press("StageProbe.SheetAnchor")
+        try await stage.waitForIdentifier("StageProbe.SheetDone")
+        try stage.press("StageProbe.SheetDone")
+        try await stage.waitForIdentifierGone("StageProbe.SheetDone")
+        #expect(!model.showsSheet)
+    }
+
+    @Test("Popovers materialize because the stage window is ordered in")
+    func popoverRoundTrip() async throws {
+        let model = StageProbeModel()
+        let stage = GoldenStage(StageProbeView(model: model), size: CGSize(width: 400, height: 300))
+
+        try stage.press("StageProbe.PopoverAnchor")
+        try await stage.waitForIdentifier("StageProbe.PopoverContent")
+        try stage.press("StageProbe.PopoverAnchor")
+        try await stage.waitForIdentifierGone("StageProbe.PopoverContent")
+    }
+
+    @Test("setValue drives text fields the way the AX driver's set-value does")
+    func setValueOnField() async throws {
+        let model = StageProbeModel()
+        let stage = GoldenStage(StageProbeView(model: model), size: CGSize(width: 400, height: 300))
+
+        try stage.setValue("typed via AX", for: "StageProbe.Field")
+        try await stage.wait(for: "field value") {
+            stage.value(of: "StageProbe.Field") == "typed via AX"
         }
-        let pressSel = NSSelectorFromString("accessibilityPerformPress")
-        #expect(button.responds(to: pressSel), "AccessibilityNode lost accessibilityPerformPress")
-        _ = button.perform(pressSel)
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-        #expect(model.pressed, "press action did not reach the SwiftUI action closure")
-
-        host.layoutSubtreeIfNeeded()
-        var after: [(id: String, role: String, text: String)] = []
-        AXProbe.walk(host, into: &after)
-        #expect(after.contains { $0.text.contains("after-press") },
-                "state change did not surface in the re-walked AX tree: \(after)")
     }
 }
