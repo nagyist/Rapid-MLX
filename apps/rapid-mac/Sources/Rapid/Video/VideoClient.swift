@@ -259,7 +259,7 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
               frames.offset <= frames.maximum,
               workload.metric == "pixel_frames",
               workload.maximum > 0,
-              !workload.dimensionRounding.isEmpty,
+              workload.dimensionRounding == "multiple_of_64",
               validInput else {
             throw VideoClientError.invalidResponse
         }
@@ -338,6 +338,7 @@ struct VideoCreateRequest: Sendable, Equatable {
 enum VideoClientError: Error, LocalizedError, Equatable {
     case notReady
     case http(status: Int, message: String?)
+    case cacheRemoval
     case invalidJobID
     case invalidResponse
     case transport(String)
@@ -348,6 +349,8 @@ enum VideoClientError: Error, LocalizedError, Equatable {
             return "The video model isn't running yet."
         case let .http(status, message):
             return message ?? "Video request failed (HTTP \(status))."
+        case .cacheRemoval:
+            return "Rapid couldn't remove the cached video. Check file access and try again."
         case .invalidJobID:
             return "The video server returned an invalid job identifier."
         case .invalidResponse:
@@ -381,6 +384,9 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
     var cacheDirectory: URL = FileManager.default.urls(
         for: .cachesDirectory, in: .userDomainMask
     )[0].appendingPathComponent("Rapid/VideoPreviews", isDirectory: true)
+    var removeCachedItem: @Sendable (URL) throws -> Void = {
+        try FileManager.default.removeItem(at: $0)
+    }
 
     func capabilities(port: Int, bearer: String?) async throws -> VideoCapabilities {
         let value: VideoCapabilities = try await decode(
@@ -440,10 +446,16 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
 
     func delete(id: String, port: Int, bearer: String?) async throws {
         let cached = try cacheURL(for: id)
+        if FileManager.default.fileExists(atPath: cached.path) {
+            do {
+                try removeCachedItem(cached)
+            } catch {
+                throw VideoClientError.cacheRemoval
+            }
+        }
         var request = request(path: "v1/videos/\(id)", port: port, bearer: bearer)
         request.httpMethod = "DELETE"
         _ = try await send(request)
-        try? FileManager.default.removeItem(at: cached)
     }
 
     func content(id: String, port: Int, bearer: String?) async throws -> URL {

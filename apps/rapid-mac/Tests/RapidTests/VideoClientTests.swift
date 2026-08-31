@@ -55,6 +55,20 @@ struct VideoClientTests {
         }
     }
 
+    @Test("Unsupported workload rounding fails closed")
+    func unsupportedRoundingFailsClosed() async {
+        let client = makeClient()
+        let json = Self.capabilitiesJSON.replacingOccurrences(
+            of: #""dimension_rounding":"multiple_of_64""#,
+            with: #""dimension_rounding":"floor""#
+        )
+        VideoStubProtocol.response = (200, Data(json.utf8))
+
+        await #expect(throws: VideoClientError.invalidResponse) {
+            _ = try await client.capabilities(port: 8123, bearer: nil)
+        }
+    }
+
     @Test("Image input follows advertised formats and acceptance")
     func imageInputUsesCapabilityContract() throws {
         let jpegOnly = Self.capabilitiesJSON.replacingOccurrences(
@@ -169,6 +183,32 @@ struct VideoClientTests {
         await #expect(throws: VideoClientError.invalidJobID) {
             _ = try await client.content(id: "../another-job", port: 8123, bearer: "secret")
         }
+        #expect(VideoStubProtocol.requests.isEmpty)
+    }
+
+    @Test("Cache cleanup failure keeps the server job available for retry")
+    func cacheCleanupFailureStopsDelete() async throws {
+        VideoStubProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [VideoStubProtocol.self]
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "rapid-video-delete-tests-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let id = "video_0123456789abcdef0123456789abcdef"
+        let cached = directory.appendingPathComponent(try VideoClient.cacheFileName(for: id))
+        try Data("video".utf8).write(to: cached)
+        let client = VideoClient(
+            session: URLSession(configuration: configuration),
+            cacheDirectory: directory,
+            removeCachedItem: { _ in throw CocoaError(.fileWriteNoPermission) }
+        )
+
+        await #expect(throws: VideoClientError.cacheRemoval) {
+            try await client.delete(id: id, port: 8123, bearer: nil)
+        }
+        #expect(FileManager.default.fileExists(atPath: cached.path))
         #expect(VideoStubProtocol.requests.isEmpty)
     }
 
