@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -878,7 +878,8 @@ class MLLMBatchGenerator:
         ):
             return None
 
-        full_ids = [int(token) for token in request.input_ids.reshape(-1).tolist()]
+        raw_ids = cast(list[Any], request.input_ids.reshape(-1).tolist())
+        full_ids = [int(token) for token in raw_ids]
         request.full_prompt_token_ids = full_ids
         if len(full_ids) < 2:
             self._prefix_cache_misses += 1
@@ -906,7 +907,7 @@ class MLLMBatchGenerator:
             prefix_len,
             len(full_ids) - prefix_len,
         )
-        return warm_cache
+        return cast(list[Any], warm_cache)
 
     def _store_exact_text_prefix(
         self,
@@ -924,6 +925,10 @@ class MLLMBatchGenerator:
             or prefix_len > len(request.full_prompt_token_ids)
         ):
             return
+        # mlx-vlm's exact-cache API deep-clones and evaluates every supported
+        # cache entry synchronously before returning.  The live request cache
+        # can therefore continue prefill/generation without moving this stored
+        # boundary snapshot forward.
         cache.store_exact_cache(
             request.full_prompt_token_ids[:prefix_len],
             prompt_cache,

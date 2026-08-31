@@ -146,6 +146,9 @@ class _ChunkRecordingModel:
     def __call__(self, input_ids, cache=None, **kwargs):
         seqlen = input_ids.shape[1]
         self.calls.append((seqlen, kwargs))
+        for entry in cache or ():
+            if hasattr(entry, "tokens_seen"):
+                entry.tokens_seen += seqlen
 
         class _Out:
             pass
@@ -161,6 +164,7 @@ class _FakeCache:
 
     def __init__(self):
         self.state_reads = 0
+        self.tokens_seen = 0
 
     @property
     def state(self):
@@ -1829,6 +1833,7 @@ class _ExactPrefixCache:
         self.prefix_len = prefix_len
         self.lookups = []
         self.stores = []
+        self.store_state_at_call = []
         self.clears = 0
 
     def lookup_exact_cache(self, token_ids, *, extra_hash):
@@ -1837,6 +1842,12 @@ class _ExactPrefixCache:
 
     def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash):
         self.stores.append((list(token_ids), prompt_cache, extra_hash))
+        # The production APC manager synchronously deep-clones cache state.
+        # Record that state now so later mutations of the live cache cannot
+        # make this test accidentally validate the final prompt boundary.
+        self.store_state_at_call.append(
+            tuple(getattr(entry, "tokens_seen", None) for entry in prompt_cache)
+        )
         return True
 
     def stats_snapshot(self):
@@ -1918,6 +1929,8 @@ def test_text_prefill_captures_exact_cache_at_stable_template_boundary():
     # generation suffix, then the one-token logits forward.
     assert [seqlen for seqlen, _kwargs in model.calls] == [14, 5, 1]
     assert manager.stores == [(list(range(14)), cache, 17)]
+    assert manager.store_state_at_call == [(14,)]
+    assert cache[0].tokens_seen == 20
 
 
 def test_exact_prefix_cache_never_looks_up_or_stores_image_request():

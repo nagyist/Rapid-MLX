@@ -2086,7 +2086,7 @@ class MLLMScheduler:
 
     def get_stats(self) -> dict[str, Any]:
         """Get scheduler statistics."""
-        stats = {
+        stats: dict[str, Any] = {
             # Abort ownership ends after the event-loop queue receives its
             # terminal object, not when the worker removes scheduler state.
             "num_waiting": len(self.waiting) + len(self._aborted_queue_ids),
