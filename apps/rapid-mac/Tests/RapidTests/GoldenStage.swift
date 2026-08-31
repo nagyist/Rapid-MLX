@@ -46,6 +46,14 @@ final class GoldenStage {
     private let window: NSWindow
     private let host: NSView
 
+    /// `accessibilityEnhancedUserInterface` is process-global, so stages
+    /// reference-count it: the first live stage records the pre-existing
+    /// value and turns it on, the last one restores what it found. Without
+    /// this every stage would leave the whole test process permanently in
+    /// assistive-client mode.
+    private static var liveStageCount = 0
+    private static var enhancedUIWasEnabled = false
+
     /// Default per-wait budget. Generous relative to the tens of
     /// milliseconds a settled tree usually takes, tiny relative to the
     /// bash flows' multi-second polling loops.
@@ -69,7 +77,15 @@ final class GoldenStage {
         self.window = window
         self.host = host
 
-        NSApplication.shared.setValue(true, forKey: "accessibilityEnhancedUserInterface")
+        if Self.liveStageCount == 0 {
+            let current = NSApplication.shared
+                .value(forKey: "accessibilityEnhancedUserInterface") as? Bool
+            Self.enhancedUIWasEnabled = current ?? false
+            NSApplication.shared.setValue(
+                true, forKey: "accessibilityEnhancedUserInterface"
+            )
+        }
+        Self.liveStageCount += 1
         host.layoutSubtreeIfNeeded()
         Self.turnRunLoop()
     }
@@ -77,6 +93,12 @@ final class GoldenStage {
     deinit {
         let window = self.window
         Task { @MainActor in
+            Self.liveStageCount -= 1
+            if Self.liveStageCount == 0, !Self.enhancedUIWasEnabled {
+                NSApplication.shared.setValue(
+                    false, forKey: "accessibilityEnhancedUserInterface"
+                )
+            }
             window.orderOut(nil)
             window.close()
         }
@@ -194,6 +216,65 @@ final class GoldenStage {
         let sel = NSSelectorFromString("accessibilityValue")
         guard node.responds(to: sel), let result = node.perform(sel) else { return nil }
         return result.takeUnretainedValue() as? String
+    }
+
+    // MARK: - Scrolling
+
+    /// The stage's first scroll position as a 0 (top) … 1 (bottom) fraction —
+    /// the same currency as the AX driver's scroll-bar value that the bash
+    /// flows asserted on. Nil while nothing on the stage scrolls.
+    func scrollFraction() -> Double? {
+        guard let scrollView = firstScrollView(),
+              let document = scrollView.documentView else { return nil }
+        let clip = scrollView.contentView
+        let travel = document.bounds.height - clip.bounds.height
+        guard travel > 0 else { return nil }
+        let fromTop = (clip.bounds.minY - document.bounds.minY) / travel
+        let clamped = max(0, min(1, fromTop))
+        return document.isFlipped ? clamped : 1 - clamped
+    }
+
+    /// Programmatic analog of the AX driver's `set-scroll-value`. The scroll
+    /// arrives unbracketed by live-scroll notifications — exactly what a
+    /// legacy mouse wheel produces — which the transcript's follow-mode probe
+    /// deliberately treats as user intent.
+    func setScrollFraction(_ fraction: Double) throws {
+        guard let scrollView = firstScrollView(),
+              let document = scrollView.documentView else {
+            throw StageError(description: "setScrollFraction: no scroll view on the stage")
+        }
+        let clip = scrollView.contentView
+        let travel = document.bounds.height - clip.bounds.height
+        guard travel > 0 else {
+            throw StageError(description: "setScrollFraction: stage content does not scroll")
+        }
+        let fromTop = document.isFlipped ? fraction : 1 - fraction
+        let proposed = NSRect(
+            origin: NSPoint(
+                x: clip.bounds.minX,
+                y: document.bounds.minY + travel * fromTop
+            ),
+            size: clip.bounds.size
+        )
+        clip.scroll(to: clip.constrainBoundsRect(proposed).origin)
+        scrollView.reflectScrolledClipView(clip)
+        Self.turnRunLoop()
+    }
+
+    private func firstScrollView() -> NSScrollView? {
+        for window in stageWindows() {
+            guard let root = window.contentView else { continue }
+            if let hit = Self.firstScrollView(in: root) { return hit }
+        }
+        return nil
+    }
+
+    private static func firstScrollView(in view: NSView) -> NSScrollView? {
+        if let scrollView = view as? NSScrollView { return scrollView }
+        for subview in view.subviews {
+            if let hit = firstScrollView(in: subview) { return hit }
+        }
+        return nil
     }
 
     // MARK: - Waiting

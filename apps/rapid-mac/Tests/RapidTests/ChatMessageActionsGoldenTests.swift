@@ -38,6 +38,24 @@ struct ChatMessageActionsGoldenTests {
             " golden", " journey", " has", " something", " to", " assert", " on.",
         ]
 
+        /// The fake sidecar shapes its answer by prompt keywords; mirror the
+        /// one shape this suite needs: `shape:long` yields an answer taller
+        /// than the stage viewport so scroll journeys have somewhere to go.
+        static let longReplyChunks: [String] =
+            (1...48).map { paragraph in
+                "Paragraph \(paragraph) of the long settled answer that "
+                    + "overflows the stage viewport.\n\n"
+            } + ["END-OF-LONG-ANSWER"]
+
+        private static func chunks(forPromptIn body: Data) -> [String] {
+            guard
+                let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                let messages = object["messages"] as? [[String: Any]],
+                let prompt = messages.last(where: { ($0["role"] as? String) == "user" })?["content"] as? String
+            else { return replyChunks }
+            return prompt.contains("shape:long") ? longReplyChunks : replyChunks
+        }
+
         static func reset() {
             lock.lock()
             bodies = []
@@ -71,6 +89,7 @@ struct ChatMessageActionsGoldenTests {
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
         override func startLoading() {
+            var chunks = Self.replyChunks
             if let stream = request.httpBodyStream {
                 stream.open()
                 var body = Data()
@@ -85,6 +104,7 @@ struct ChatMessageActionsGoldenTests {
                 Self.lock.lock()
                 Self.bodies.append(body)
                 Self.lock.unlock()
+                chunks = Self.chunks(forPromptIn: body)
             }
 
             let response = HTTPURLResponse(
@@ -94,7 +114,7 @@ struct ChatMessageActionsGoldenTests {
                 headerFields: ["Content-Type": "text/event-stream"]
             )!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            for chunk in Self.replyChunks {
+            for chunk in chunks {
                 let payload: [String: Any] = [
                     "choices": [["delta": ["content": chunk], "finish_reason": NSNull()]]
                 ]
@@ -169,21 +189,25 @@ struct ChatMessageActionsGoldenTests {
         }
     }
 
-    static func waitForSettledReply(on stage: GoldenStage) async throws {
-        try await stage.waitForText("deterministic content")
-        // The reply streams in many chunks; settle on the final words so
-        // later assertions see the finished turn, not a partial one.
-        try await stage.waitForText("to assert on.")
-        // `wait_send_idle` from the bash harness: the drained text can land
-        // a beat before the stream formally completes, and several message
-        // actions (Edit, Retry) are disabled while streaming — a press on a
-        // disabled control no-ops silently. The send button relabelling
-        // back from "Stop generating" is the AX-visible idle signal.
+    /// `wait_send_idle` from the bash harness: the drained text can land a
+    /// beat before the stream formally completes, and several message
+    /// actions (Edit, Retry) are disabled while streaming — a press on a
+    /// disabled control no-ops silently. The send button relabelling back
+    /// from "Stop generating" is the AX-visible idle signal.
+    static func waitForSendIdle(on stage: GoldenStage) async throws {
         try await stage.wait(for: "composer to settle into a ready, non-streaming state") {
             stage.tree().contains {
                 $0.id == "ChatView.SendOrStopButton" && $0.text == "Send message"
             }
         }
+    }
+
+    static func waitForSettledReply(on stage: GoldenStage) async throws {
+        try await stage.waitForText("deterministic content")
+        // The reply streams in many chunks; settle on the final words so
+        // later assertions see the finished turn, not a partial one.
+        try await stage.waitForText("to assert on.")
+        try await Self.waitForSendIdle(on: stage)
     }
 
     // MARK: - The journey
@@ -209,7 +233,25 @@ struct ChatMessageActionsGoldenTests {
             return
         }
 
-        // Copy response fills the pasteboard.
+        // Copy response fills the pasteboard. The general pasteboard belongs
+        // to whoever runs this suite, so snapshot it and put their contents
+        // back afterwards.
+        let savedPasteboardItems = (NSPasteboard.general.pasteboardItems ?? []).map {
+            item -> NSPasteboardItem in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        }
+        defer {
+            NSPasteboard.general.clearContents()
+            if !savedPasteboardItems.isEmpty {
+                NSPasteboard.general.writeObjects(savedPasteboardItems)
+            }
+        }
         NSPasteboard.general.clearContents()
         try stage.press(copyID)
         try await stage.wait(for: "pasteboard content after Copy") {
@@ -268,6 +310,38 @@ struct ChatMessageActionsGoldenTests {
         }
         try await Self.waitForSettledReply(on: stage)
         #expect(stage.treeText().contains("saved edited message prompt"))
+    }
+
+    @Test("Jump to latest returns a settled transcript to its tail")
+    func jumpToLatestOnSettledTranscript() async throws {
+        let mounted = Self.mountChatSurface()
+        let stage = mounted.stage
+
+        // #1904 regression shape: a long, fully settled answer, moved away
+        // from its tail. Jump to latest used to re-pin the follow flag but
+        // leave the transcript physically scrolled up, because nothing was
+        // streaming and no document-frame change would ever fire again.
+        try await Self.sendPrompt("shape:long finished answer for jump-to-bottom", on: stage)
+        try await stage.waitForText("END-OF-LONG-ANSWER")
+        try await Self.waitForSendIdle(on: stage)
+        try await stage.wait(for: "the settled transcript to rest at its tail") {
+            (stage.scrollFraction() ?? 0) > 0.97
+        }
+        let bottom = try #require(stage.scrollFraction())
+
+        try stage.setScrollFraction(0)
+        try await stage.waitForIdentifier("Transcript.JumpToBottom")
+        let scrolled = try #require(stage.scrollFraction())
+        #expect(
+            scrolled < bottom - 0.02,
+            "scroll fixture did not move away from the settled transcript tail"
+        )
+
+        try stage.press("Transcript.JumpToBottom")
+        try await stage.wait(for: "the transcript to return to its tail") {
+            (stage.scrollFraction() ?? 0) > scrolled + 0.02
+        }
+        try await stage.waitForIdentifierGone("Transcript.JumpToBottom")
     }
 
     @Test("Model info opens from its anchor, dismisses, and can reopen")
