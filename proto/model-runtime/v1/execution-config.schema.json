@@ -60,10 +60,14 @@
       "properties": {
         "method": {"enum": ["none", "mtp", "draft_model", "dflash", "ddtree", "dspark", "suffix"]},
         "max_draft_tokens": {"type": "integer", "minimum": 1, "maximum": 64},
+        "assistant_source": {"enum": ["embedded_head", "external_model"], "description": "For MTP, whether predictions come from weights embedded in the target model or a separately identified assistant model."},
         "draft_model_identity_digest": {"$ref": "#/$defs/sha256Digest"}
       },
       "allOf": [
-        {"if": {"properties": {"method": {"const": "none"}}}, "then": {"not": {"anyOf": [{"required": ["max_draft_tokens"]}, {"required": ["draft_model_identity_digest"]}]}}, "else": {"required": ["max_draft_tokens"]}},
+        {"if": {"properties": {"method": {"const": "none"}}}, "then": {"not": {"anyOf": [{"required": ["max_draft_tokens"]}, {"required": ["assistant_source"]}, {"required": ["draft_model_identity_digest"]}]}}, "else": {"required": ["max_draft_tokens"]}},
+        {"if": {"properties": {"method": {"const": "mtp"}}}, "then": {"required": ["assistant_source"]}, "else": {"not": {"required": ["assistant_source"]}}},
+        {"if": {"properties": {"method": {"const": "mtp"}, "assistant_source": {"const": "external_model"}}, "required": ["method", "assistant_source"]}, "then": {"required": ["draft_model_identity_digest"]}},
+        {"if": {"properties": {"method": {"const": "mtp"}, "assistant_source": {"const": "embedded_head"}}, "required": ["method", "assistant_source"]}, "then": {"not": {"required": ["draft_model_identity_digest"]}}},
         {"if": {"properties": {"method": {"enum": ["draft_model", "dflash", "ddtree", "dspark"]}}}, "then": {"required": ["draft_model_identity_digest"]}}
       ]
     },

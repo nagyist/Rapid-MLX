@@ -355,6 +355,38 @@ def test_mtp_and_quantized_kv_require_reproducibility_fields(schemas, registry) 
     assert "bits_x2" in messages
 
 
+def test_external_mtp_assistant_requires_identity_and_changes_config_digest(
+    schemas, registry
+) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "execution.text.example.json")
+    speculative = example["task"]["language"]["speculative_decoding"]
+    speculative["assistant_source"] = "external_model"
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+
+    speculative["draft_model_identity_digest"] = "sha256:" + "a" * 64
+    _validator(schemas["execution-config.schema.json"], registry).validate(example)
+    projection = {key: example[key] for key in ("task_type", "resources", "task")}
+    before = _digest(projection)
+    speculative["draft_model_identity_digest"] = "sha256:" + "b" * 64
+    assert _digest(projection) != before
+
+
+def test_embedded_mtp_rejects_external_assistant_identity(schemas, registry) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "execution.text.example.json")
+    example["task"]["language"]["speculative_decoding"][
+        "draft_model_identity_digest"
+    ] = "sha256:" + "a" * 64
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+
+
 def test_kv_precision_fields_are_mutually_consistent(schemas, registry) -> None:
     example = _load(RUNTIME_ROOT / "examples" / "execution.text.example.json")
     cache = example["task"]["language"]["kv_cache"]
