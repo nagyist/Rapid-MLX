@@ -1437,25 +1437,56 @@ press() {
 # that real confirmation branch before it can use a wire event or readiness
 # state as its independent proof.  Keep the action generic because Quickstart
 # presents its warning inside onboarding with a different AX identifier.
+memory_confirmation_enabled() {
+    local tree="$1" identifier="$2"
+    jq -e --arg id "$identifier" \
+       '.data.ui_elements[]?
+        | select(.identifier == $id and .enabled == true)' \
+       "$tree" >/dev/null
+}
+
+memory_confirmation_signature() {
+    local tree="$1" identifier="$2"
+    jq -cS --arg id "$identifier" \
+       '.data.ui_elements[]?
+        | select(.identifier == $id and .enabled == true)
+        | {identifier, label, title, value, description, help}' \
+       "$tree" | head -1
+}
+
 confirm_memory_warning_from_tree() {
-    local tree="$1" evidence="$2"
-    shift 2
-    local identifiers=("$@") identifier
-    if [[ "${#identifiers[@]}" == 0 ]]; then
-        identifiers=(MemoryWarning.Confirm)
-    fi
-    for identifier in "${identifiers[@]}"; do
-        if jq -e --arg id "$identifier" \
-               '.data.ui_elements[]?
-                | select(.identifier == $id and .enabled == true)' \
-               "$tree" >/dev/null; then
-            "$AX_DRIVER" click-center "$APP_PID" "$identifier" > "$evidence" \
-                || die "$identifier was visible but could not be confirmed"
-            log "  confirmed hosted-runner memory warning through $identifier"
-            return 0
+    local tree="$1" evidence="$2" identifier="$3"
+    memory_confirmation_enabled "$tree" "$identifier" || return 1
+    # The live AX tree can change between observation and click while the
+    # app revalidates memory. Treat that as a retryable transition, not a
+    # product failure; the next poll will inspect the new tree.
+    "$AX_DRIVER" click-center "$APP_PID" "$identifier" > "$evidence" \
+        || return 1
+    log "  confirmed hosted-runner memory warning through $identifier"
+}
+
+# Report visibility/click state through globals so Bash 3.2 callers can keep
+# one semantic-presentation latch per AX identifier without namerefs or eval.
+# A warning that remains mounted is clicked once. Disappearance re-arms it;
+# a changed label/message also counts as a new presentation so a tight warning
+# restored as unsafe by activation-time memory revalidation can be confirmed.
+follow_memory_confirmation_edge() {
+    local tree="$1" evidence="$2" previous_signature="$3" identifier="$4"
+    local signature=""
+    MEMORY_CONFIRMATION_SIGNATURE="$previous_signature"
+    MEMORY_CONFIRMATION_VISIBLE=0
+    MEMORY_CONFIRMATION_CLICKED=0
+    if memory_confirmation_enabled "$tree" "$identifier"; then
+        MEMORY_CONFIRMATION_VISIBLE=1
+        signature="$(memory_confirmation_signature "$tree" "$identifier")"
+        if [[ -n "$signature" && "$signature" != "$previous_signature" ]] \
+            && confirm_memory_warning_from_tree "$tree" "$evidence" "$identifier"; then
+            MEMORY_CONFIRMATION_SIGNATURE="$signature"
+            MEMORY_CONFIRMATION_CLICKED=1
         fi
-    done
-    return 1
+    else
+        MEMORY_CONFIRMATION_SIGNATURE=""
+    fi
 }
 
 round_trip_toggle() {
@@ -1727,6 +1758,7 @@ baseline() {
 # button, so a single dump can be a hybrid of two states.
 wait_send_idle() {
     local destination="$1" attempts="${2:-160}" stable=0
+    local memory_confirmation_signature=""
     local confirmation_evidence="${destination%.json}-memory-confirm.json"
     for ((i=0; i<attempts; i++)); do
         see_main "$destination"
@@ -1735,8 +1767,11 @@ wait_send_idle() {
         # hosted runner.  Waiting for an idle composer means this journey has
         # already requested the model, so follow the explicit confirmation
         # branch before continuing to wait for independent UI readiness.
-        if confirm_memory_warning_from_tree \
-            "$destination" "$confirmation_evidence"; then
+        follow_memory_confirmation_edge \
+            "$destination" "$confirmation_evidence" \
+            "$memory_confirmation_signature" MemoryWarning.Confirm
+        memory_confirmation_signature="$MEMORY_CONFIRMATION_SIGNATURE"
+        if [[ "$MEMORY_CONFIRMATION_VISIBLE" == 1 ]]; then
             stable=0
             sleep 0.25
             continue
@@ -4205,7 +4240,13 @@ wait_fake_event() {
 wait_fake_event_after_start() {
     local predicate="$1" what="$2" prefix="$3"
     shift 3
-    local confirmation_identifiers=("$@") i
+    local confirmation_identifiers=("$@") confirmation_signatures=() i j
+    if [[ "${#confirmation_identifiers[@]}" == 0 ]]; then
+        confirmation_identifiers=(MemoryWarning.Confirm)
+    fi
+    for ((j=0; j<${#confirmation_identifiers[@]}; j++)); do
+        confirmation_signatures[$j]=""
+    done
     for ((i=0; i<240; i++)); do
         if [[ -s "$OUT/fake-events.jsonl" ]] \
            && jq -e -s "any(.[]; $predicate)" \
@@ -4213,10 +4254,15 @@ wait_fake_event_after_start() {
             return 0
         fi
         see_main "$OUT/${prefix}-after-start.json"
-        confirm_memory_warning_from_tree \
-            "$OUT/${prefix}-after-start.json" \
-            "$OUT/${prefix}-memory-confirm.json" \
-            "${confirmation_identifiers[@]}" || true
+        for ((j=0; j<${#confirmation_identifiers[@]}; j++)); do
+            follow_memory_confirmation_edge \
+                "$OUT/${prefix}-after-start.json" \
+                "$OUT/${prefix}-memory-confirm.json" \
+                "${confirmation_signatures[$j]}" \
+                "${confirmation_identifiers[$j]}"
+            confirmation_signatures[$j]="$MEMORY_CONFIRMATION_SIGNATURE"
+            [[ "$MEMORY_CONFIRMATION_CLICKED" == 0 ]] || break
+        done
         sleep 0.25
     done
     die "$what"
