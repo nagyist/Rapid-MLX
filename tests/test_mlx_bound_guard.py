@@ -303,6 +303,11 @@ class TestMergifyAttestationWorkflow:
 
     def test_candidate_resolver_is_limited_to_trusted_same_repo_mergify_prs(self):
         job = self._job()
+        checkout = next(
+            step
+            for step in job["steps"]
+            if step.get("uses", "").startswith("actions/checkout@")
+        )
         setup = next(
             step
             for step in job["steps"]
@@ -322,6 +327,8 @@ class TestMergifyAttestationWorkflow:
             in condition
         )
         assert "startsWith(github.head_ref, 'mergify/merge-queue/')" in condition
+        assert checkout["with"]["fetch-depth"] == "0"
+        assert checkout["with"]["ref"] == ("${{ github.event.pull_request.head.sha }}")
         assert setup["uses"].startswith("Mergifyio/setup-cli@")
         assert len(setup["uses"].split("@", 1)[1]) == 40
         assert setup["with"]["mergify_cli_version"] == "2026.8.28.1"
