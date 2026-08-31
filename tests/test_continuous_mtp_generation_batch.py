@@ -189,6 +189,37 @@ def test_initial_tokens_are_emitted_once_and_terminal_detaches_whole_cohort():
     assert caches.calls[-1] == ("detach", (0, 1), ())
 
 
+def test_max_tokens_one_closes_on_initial_without_forming_proposal() -> None:
+    runtime, compute, _caches = _runtime()
+    batch = generation.ContinuousMTPGenerationBatch.create(
+        [_spec(1, max_tokens=1), _spec(2, max_tokens=1)], runtime
+    )
+
+    burst = batch.next_burst()
+
+    assert burst.initial is True
+    assert all(emission.finish_reason == "length" for emission in burst.emissions)
+    assert batch.closed is True
+    assert not any(call[0] == "propose" for call in compute.calls)
+
+
+def test_max_tokens_two_commits_target_only_b1_and_detaches() -> None:
+    runtime, compute, _caches = _runtime()
+    compute.queued_outputs.append([(_target(111),)])
+    batch = generation.ContinuousMTPGenerationBatch.create(
+        [_spec(1, max_tokens=2)], runtime
+    )
+    batch.next_burst()
+
+    burst = batch.next_burst()
+
+    assert burst.emitted_counts == (1,)
+    assert burst.emissions[0].token_ids == (111,)
+    assert burst.emissions[0].finish_reason == "length"
+    assert burst.terminal_detaches[0].token_ids == (101, 111)
+    assert batch.closed is True
+
+
 def test_one_proposal_burst_commits_exact_stop_prefix_then_extracts_caches():
     runtime, compute, _caches = _runtime()
     compute.queued_outputs.append([(_draft(111), _target(112)), (_target(212),)])
