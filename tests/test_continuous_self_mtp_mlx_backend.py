@@ -199,8 +199,7 @@ def test_k2_recursive_draft_target_verify_and_delivery_commit():
     verify = [call for call in forward.calls if call[0] == "target"][-1]
     assert verify[1].tolist() == [[3, 4, 5], [7, 8, 9]]
     assert verify[-1] == 2  # Rapid n_confirmed ABI for a K=2 verify.
-    assert ("trim", (1, 0), {"verify_size": 3, "validate": False}) in cache_events
-    assert ("trim", (2, 2), {"verify_size": 3, "validate": False}) in cache_events
+    assert not [event for event in cache_events if event[0] == "trim"]
 
     commit_batched_self_mtp(
         batch,
@@ -211,6 +210,8 @@ def test_k2_recursive_draft_target_verify_and_delivery_commit():
     assert [lane.cur for lane in batch.lanes] == [19, 10]
     assert [lane.pending_tokens for lane in batch.lanes] == [[3, 4], [7, 8, 9]]
     assert [lane.ntoks for lane in batch.lanes] == [3, 4]
+    assert ("trim", (1, 0), {"verify_size": 3, "validate": False}) in cache_events
+    assert ("trim", (2, 2), {"verify_size": 3, "validate": False}) in cache_events
 
 
 def test_abort_restores_lane_and_cache_proposal_boundary():
