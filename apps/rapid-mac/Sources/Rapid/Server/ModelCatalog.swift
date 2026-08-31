@@ -143,6 +143,17 @@ struct ModelEntry: Identifiable, Hashable, Sendable {
 /// short-lived subprocesses concurrently. Cancellation propagates to the
 /// children via ``Task.checkCancellation`` between phases.
 enum ModelCatalog {
+    /// Aliases whose complete generation and encoding closure is present in
+    /// the signed Desktop sidecar. Exact names make a new engine alias fail
+    /// closed until its runtime has been bundled and smoke-tested here.
+    static let packagedVideoAliases: Set<String> = [
+        "ltx-2.3-mlx-q4",
+        "wan2.2-i2v-a14b-q8",
+        "wan2.2-t2v-a14b-bf16",
+        "wan2.2-ti2v-5b-bf16",
+        "wan2.2-ti2v-5b-q8",
+    ]
+
     static let maxAliasBytes = 128
     static let maxHuggingFaceRepoBytes = 192
     static let maxSubprocessStdoutBytes = 1_048_576
@@ -693,7 +704,9 @@ enum ModelCatalog {
         )
         let models = await modelsTask
         guard models.succeeded else { return [] }
-        let rows = parseVideoRowsJSON(models.stdout)
+        let rows = parseVideoRowsJSON(models.stdout).filter {
+            packagedVideoAliases.contains($0.alias)
+        }
         let cachedByRepo = Dictionary(
             (await cachedTask).compactMap { _, repo, size -> (String, String?)? in
                 guard let repo else { return nil }

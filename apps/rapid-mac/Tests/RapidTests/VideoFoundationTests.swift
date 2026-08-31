@@ -36,12 +36,12 @@ struct VideoFoundationTests {
         let script = """
         #!/bin/sh
         if [ "$1" = "models" ]; then
-          printf '%s' '{"text":[],"audio":[],"image":[],"video":[{"alias":"wan-ti2v","hf_path":"org/wan","video_modes":["text-to-video","image-to-video"],"min_memory_gb":32}]}'
+          printf '%s' '{"text":[],"audio":[],"image":[],"video":[{"alias":"ltx-2.3-mlx-q4","hf_path":"org/ltx","video_modes":["text-to-video","image-to-video"],"min_memory_gb":24},{"alias":"cogvideox-fun-5b-q4","hf_path":"org/cog","video_modes":["text-to-video"],"min_memory_gb":24},{"alias":"ltx-2.5-mlx-q8","hf_path":"org/ltx25","video_modes":["text-to-video","image-to-video"],"min_memory_gb":24}]}'
         else
           cat <<'EOF'
         Cached models (1 on disk)
         Alias       HF repo   Size
-        (unmapped)  org/wan   9.5 GiB
+        (unmapped)  org/ltx   9.5 GiB
         EOF
         fi
         """
@@ -50,11 +50,13 @@ struct VideoFoundationTests {
 
         let entries = await ModelCatalog.videoEntries(binary: binary, hubCacheOverride: nil)
         let entry = try #require(entries.first)
+        #expect(entries.count == 1)
+        #expect(entry.alias == "ltx-2.3-mlx-q4")
         #expect(entry.kind == .video)
         #expect(entry.cached)
         #expect(entry.sizeOnDisk == "9.5 GiB")
         #expect(entry.videoCapabilities == [.textToVideo, .imageToVideo])
-        #expect(entry.minimumMemoryGB == 32)
+        #expect(entry.minimumMemoryGB == 24)
     }
 
     @Test("Video artifacts honor HOME isolation")

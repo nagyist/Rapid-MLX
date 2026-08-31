@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -93,13 +94,46 @@ def encode_rgb_video(frames, output_path: str | Path, fps: int) -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_file,
             )
-            if process.stdin is None:  # pragma: no cover - guaranteed by PIPE
+            stdin = process.stdin
+            if stdin is None:  # pragma: no cover - guaranteed by PIPE
                 raise VideoEncodingError("ffmpeg input pipe is unavailable")
-            for frame in pixels:
-                process.stdin.write(np.ascontiguousarray(frame).tobytes())
-            process.stdin.close()
-            process.stdin = None
-            return_code = process.wait(timeout=120)
+            writer_errors: list[BaseException] = []
+
+            def stream_frames() -> None:
+                try:
+                    for frame in pixels:
+                        stdin.write(np.ascontiguousarray(frame).tobytes())
+                except (OSError, ValueError) as exc:
+                    writer_errors.append(exc)
+                finally:
+                    try:
+                        stdin.close()
+                    except OSError:
+                        pass
+
+            # Supervise pipe writes from this thread so the same deadline
+            # covers a VideoToolbox/ffmpeg stall while stdin is still full.
+            writer = threading.Thread(
+                target=stream_frames,
+                name="rapid-video-encoder-input",
+                daemon=True,
+            )
+            writer.start()
+            try:
+                return_code = process.wait(timeout=120)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                writer.join(timeout=5)
+                raise VideoEncodingError(
+                    "ffmpeg timed out while encoding video"
+                ) from exc
+            writer.join(timeout=5)
+            if writer.is_alive():
+                raise VideoEncodingError("ffmpeg input writer did not stop")
             if return_code != 0:
                 stderr_file.seek(0, os.SEEK_END)
                 size = stderr_file.tell()
@@ -109,6 +143,10 @@ def encode_rgb_video(frames, output_path: str | Path, fps: int) -> None:
                     f"ffmpeg exited with status {return_code}"
                     + (f": {detail}" if detail else "")
                 )
+            if writer_errors:
+                raise VideoEncodingError(
+                    f"ffmpeg input failed: {type(writer_errors[0]).__name__}"
+                ) from writer_errors[0]
             if (
                 temporary is None
                 or not temporary.is_file()
@@ -124,6 +162,9 @@ def encode_rgb_video(frames, output_path: str | Path, fps: int) -> None:
         finally:
             if process is not None and process.poll() is None:
                 process.kill()
-                process.wait()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

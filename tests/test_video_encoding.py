@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import subprocess
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +70,50 @@ def test_encode_streams_frames_and_atomically_replaces_output(
     assert output.read_bytes() == b"mp4"
     assert len(created["bytes"]) == frames.nbytes
     assert created["timeout"] == 120
+
+
+def test_encode_timeout_kills_process_and_unblocks_a_stalled_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killed = threading.Event()
+
+    class BlockingInput:
+        def write(self, _data):
+            killed.wait()
+            raise BrokenPipeError
+
+        def close(self):
+            pass
+
+    class StalledProcess:
+        def __init__(self, *_args, **_kwargs):
+            self.stdin = BlockingInput()
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("ffmpeg", timeout)
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            killed.set()
+
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/bundle/bin/ffmpeg"
+    )
+    monkeypatch.setattr("vllm_mlx.video.encoding.subprocess.Popen", StalledProcess)
+
+    with pytest.raises(VideoEncodingError, match="timed out"):
+        encode_rgb_video(
+            np.zeros((2, 4, 4, 3), dtype=np.uint8), tmp_path / "result.mp4", 8
+        )
+
+    assert killed.is_set()
+    assert not list(tmp_path.glob("*.encoding.mp4"))
 
 
 @pytest.mark.parametrize(
