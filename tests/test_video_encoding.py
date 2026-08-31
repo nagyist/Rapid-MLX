@@ -90,18 +90,14 @@ def test_encode_timeout_kills_process_and_unblocks_a_stalled_pipe(
     class StalledProcess:
         def __init__(self, *_args, **_kwargs):
             self.stdin = BlockingInput()
-            self.returncode = None
 
         def wait(self, timeout=None):
-            if self.returncode is None:
-                raise subprocess.TimeoutExpired("ffmpeg", timeout)
-            return self.returncode
+            raise subprocess.TimeoutExpired("ffmpeg", timeout)
 
         def poll(self):
-            return self.returncode
+            return None
 
         def kill(self):
-            self.returncode = -9
             killed.set()
 
     monkeypatch.setattr(
@@ -116,6 +112,230 @@ def test_encode_timeout_kills_process_and_unblocks_a_stalled_pipe(
 
     assert killed.is_set()
     assert not list(tmp_path.glob("*.encoding.mp4"))
+
+
+def test_encode_rejects_missing_encoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: None)
+
+    with pytest.raises(VideoEncodingError, match="ffmpeg is unavailable"):
+        encode_rgb_video(
+            np.zeros((1, 4, 4, 3), dtype=np.uint8), tmp_path / "result.mp4", 8
+        )
+
+
+def test_encode_tolerates_stdin_close_error_after_all_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stdin_closed = threading.Event()
+
+    class CloseFailsInput(io.BytesIO):
+        def close(self) -> None:
+            stdin_closed.set()
+            raise OSError("already closed")
+
+    class SuccessfulProcess:
+        def __init__(self, command, **_kwargs):
+            self.command = command
+            self.stdin = CloseFailsInput()
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            assert stdin_closed.wait(timeout=1)
+            Path(self.command[-1]).write_bytes(b"mp4")
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/bundle/bin/ffmpeg"
+    )
+    monkeypatch.setattr("vllm_mlx.video.encoding.subprocess.Popen", SuccessfulProcess)
+    output = tmp_path / "result.mp4"
+
+    encode_rgb_video(np.zeros((1, 4, 4, 3), dtype=np.uint8), output, 8)
+
+    assert output.read_bytes() == b"mp4"
+
+
+def test_encode_rejects_writer_that_does_not_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class CompletedProcess:
+        def __init__(self, *_args, **_kwargs):
+            self.stdin = io.BytesIO()
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    class StuckWriter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/bundle/bin/ffmpeg"
+    )
+    monkeypatch.setattr("vllm_mlx.video.encoding.subprocess.Popen", CompletedProcess)
+    monkeypatch.setattr("vllm_mlx.video.encoding.threading.Thread", StuckWriter)
+
+    with pytest.raises(VideoEncodingError, match="writer did not stop"):
+        encode_rgb_video(
+            np.zeros((1, 4, 4, 3), dtype=np.uint8), tmp_path / "result.mp4", 8
+        )
+
+
+def test_encode_surfaces_encoder_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stdin_closed = threading.Event()
+
+    class ClosingInput(io.BytesIO):
+        def close(self) -> None:
+            stdin_closed.set()
+
+    class FailedProcess:
+        def __init__(self, *_args, **kwargs):
+            self.stdin = ClosingInput()
+            self.stderr = kwargs["stderr"]
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            assert stdin_closed.wait(timeout=1)
+            self.stderr.write(b"encoder failed")
+            self.stderr.flush()
+            self.returncode = 7
+            return 7
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/bundle/bin/ffmpeg"
+    )
+    monkeypatch.setattr("vllm_mlx.video.encoding.subprocess.Popen", FailedProcess)
+
+    with pytest.raises(VideoEncodingError, match="status 7: encoder failed"):
+        encode_rgb_video(
+            np.zeros((1, 4, 4, 3), dtype=np.uint8), tmp_path / "result.mp4", 8
+        )
+
+
+def test_encode_surfaces_pipe_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stdin_closed = threading.Event()
+
+    class BrokenInput:
+        def write(self, _data):
+            raise BrokenPipeError
+
+        def close(self):
+            stdin_closed.set()
+
+    class Process:
+        def __init__(self, *_args, **_kwargs):
+            self.stdin = BrokenInput()
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            assert stdin_closed.wait(timeout=1)
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/bundle/bin/ffmpeg"
+    )
+    monkeypatch.setattr("vllm_mlx.video.encoding.subprocess.Popen", Process)
+
+    with pytest.raises(VideoEncodingError, match="input failed: BrokenPipeError"):
+        encode_rgb_video(
+            np.zeros((1, 4, 4, 3), dtype=np.uint8), tmp_path / "result.mp4", 8
+        )
+
+
+def test_encode_rejects_empty_encoder_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stdin_closed = threading.Event()
+
+    class ClosingInput(io.BytesIO):
+        def close(self) -> None:
+            stdin_closed.set()
+
+    class EmptyOutputProcess:
+        def __init__(self, *_args, **_kwargs):
+            self.stdin = ClosingInput()
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            assert stdin_closed.wait(timeout=1)
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/bundle/bin/ffmpeg"
+    )
+    monkeypatch.setattr("vllm_mlx.video.encoding.subprocess.Popen", EmptyOutputProcess)
+
+    with pytest.raises(VideoEncodingError, match="without an MP4 output"):
+        encode_rgb_video(
+            np.zeros((1, 4, 4, 3), dtype=np.uint8), tmp_path / "result.mp4", 8
+        )
+
+
+def test_encode_wraps_process_launch_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_launch(*_args, **_kwargs):
+        raise OSError("launch denied")
+
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/bundle/bin/ffmpeg"
+    )
+    monkeypatch.setattr("vllm_mlx.video.encoding.subprocess.Popen", fail_launch)
+
+    with pytest.raises(VideoEncodingError, match="encoding failed: OSError"):
+        encode_rgb_video(
+            np.zeros((1, 4, 4, 3), dtype=np.uint8), tmp_path / "result.mp4", 8
+        )
 
 
 @pytest.mark.parametrize(
