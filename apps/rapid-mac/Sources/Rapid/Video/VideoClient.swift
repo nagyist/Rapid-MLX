@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum VideoJobStatus: String, Codable, Sendable, Hashable {
@@ -206,9 +207,10 @@ struct VideoCreateRequest: Sendable, Equatable {
     let referenceMIMEType: String?
 }
 
-enum VideoClientError: Error, LocalizedError {
+enum VideoClientError: Error, LocalizedError, Equatable {
     case notReady
     case http(status: Int, message: String?)
+    case invalidJobID
     case invalidResponse
     case transport(String)
 
@@ -218,6 +220,8 @@ enum VideoClientError: Error, LocalizedError {
             return "The video model isn't running yet."
         case let .http(status, message):
             return message ?? "Video request failed (HTTP \(status))."
+        case .invalidJobID:
+            return "The video server returned an invalid job identifier."
         case .invalidResponse:
             return "The video server returned an invalid response."
         case let .transport(message):
@@ -282,7 +286,9 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
                 )
             }
         )
-        return try await decode(request)
+        let job: VideoJob = try await decode(request)
+        guard Self.isValidJobID(job.id) else { throw VideoClientError.invalidJobID }
+        return job
     }
 
     func list(port: Int, bearer: String?, limit: Int = 30) async throws -> [VideoJob] {
@@ -295,18 +301,22 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         applyBearer(&request, bearer)
         let envelope: ListEnvelope = try await decode(request)
+        guard envelope.data.allSatisfy({ Self.isValidJobID($0.id) }) else {
+            throw VideoClientError.invalidJobID
+        }
         return envelope.data
     }
 
     func delete(id: String, port: Int, bearer: String?) async throws {
+        let cached = try cacheURL(for: id)
         var request = request(path: "v1/videos/\(id)", port: port, bearer: bearer)
         request.httpMethod = "DELETE"
         _ = try await send(request)
-        try? FileManager.default.removeItem(at: cacheURL(for: id))
+        try? FileManager.default.removeItem(at: cached)
     }
 
     func content(id: String, port: Int, bearer: String?) async throws -> URL {
-        let destination = cacheURL(for: id)
+        let destination = try cacheURL(for: id)
         if FileManager.default.fileExists(atPath: destination.path) { return destination }
         try FileManager.default.createDirectory(
             at: cacheDirectory,
@@ -353,14 +363,56 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
             append("\r\n")
         }
         if let file {
+            let fileName = escapedMultipartFilename(file.name)
             append("--\(boundary)\r\n")
-            append("Content-Disposition: form-data; name=\"\(file.field)\"; filename=\"\(file.name)\"\r\n")
+            append("Content-Disposition: form-data; name=\"\(file.field)\"; filename=\"\(fileName)\"\r\n")
             append("Content-Type: \(file.mime)\r\n\r\n")
             body.append(file.data)
             append("\r\n")
         }
         append("--\(boundary)--\r\n")
         return body
+    }
+
+    /// Multipart quoted strings must not let a local filename terminate the
+    /// header or inject another one. Preserve the user-visible name while
+    /// escaping quoted-string delimiters and replacing control bytes.
+    static func escapedMultipartFilename(_ value: String) -> String {
+        let source = value.isEmpty ? "reference.png" : value
+        var escaped = ""
+        for character in source {
+            if character.unicodeScalars.contains(where: {
+                $0.value < 0x20 || $0.value == 0x7F
+            }) {
+                escaped.append("_")
+            } else {
+                if character == "\"" || character == "\\" {
+                    escaped.append("\\")
+                }
+                escaped.append(character)
+            }
+        }
+        return escaped
+    }
+
+    static func cacheFileName(for id: String) throws -> String {
+        guard isValidJobID(id) else {
+            throw VideoClientError.invalidJobID
+        }
+        let digest = SHA256.hash(data: Data(id.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(digest).mp4"
+    }
+
+    private static func isValidJobID(_ id: String) -> Bool {
+        !id.isEmpty && id.utf8.count <= 128
+            && id.utf8.allSatisfy {
+                ($0 >= 48 && $0 <= 57)
+                    || ($0 >= 65 && $0 <= 90)
+                    || ($0 >= 97 && $0 <= 122)
+                    || $0 == 45 || $0 == 95
+            }
     }
 
     private struct ListEnvelope: Decodable { let data: [VideoJob] }
@@ -432,8 +484,7 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
         }
     }
 
-    private func cacheURL(for id: String) -> URL {
-        let safe = id.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
-        return cacheDirectory.appendingPathComponent("\(safe).mp4")
+    private func cacheURL(for id: String) throws -> URL {
+        cacheDirectory.appendingPathComponent(try Self.cacheFileName(for: id))
     }
 }

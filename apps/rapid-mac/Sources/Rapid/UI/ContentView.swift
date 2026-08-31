@@ -580,7 +580,7 @@ struct ContentView: View {
         return .init(
             isBusy: chat.isStreaming
                 || imageGen.isGenerating
-                || video.hasActiveJobs
+                || video.hasLiveActiveJobs
                 || video.isSubmitting
                 || video.isPreparing
                 || dictationIsBusy,

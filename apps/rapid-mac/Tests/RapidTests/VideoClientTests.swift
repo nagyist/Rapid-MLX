@@ -76,6 +76,67 @@ struct VideoClientTests {
         }
     }
 
+    @Test("Multipart filenames cannot inject headers")
+    func multipartFilenameEscaping() {
+        let body = VideoClient.multipartBody(
+            boundary: "test-boundary",
+            fields: [],
+            file: (
+                field: "input_reference",
+                name: "fox\"\\\r\nX-Injected: yes.png",
+                mime: "image/png",
+                data: Data()
+            )
+        )
+        let text = String(decoding: body, as: UTF8.self)
+
+        #expect(text.contains(#"filename="fox\"\\_X-Injected: yes.png""#))
+        #expect(!text.contains("\r\nX-Injected:"))
+    }
+
+    @Test("Preview cache keys preserve complete validated job identity")
+    func previewCacheIdentity() throws {
+        let dashed = try VideoClient.cacheFileName(for: "a-b")
+        let plain = try VideoClient.cacheFileName(for: "ab")
+
+        #expect(dashed != plain)
+        #expect(dashed.hasSuffix(".mp4"))
+        #expect(throws: VideoClientError.invalidJobID) {
+            _ = try VideoClient.cacheFileName(for: "a/b")
+        }
+        #expect(throws: VideoClientError.invalidJobID) {
+            _ = try VideoClient.cacheFileName(for: "")
+        }
+    }
+
+    @Test("Invalid job IDs fail before a cache or network lookup")
+    func invalidJobIDStopsContentLookup() async {
+        let client = makeClient()
+
+        await #expect(throws: VideoClientError.invalidJobID) {
+            _ = try await client.content(id: "../another-job", port: 8123, bearer: "secret")
+        }
+        #expect(VideoStubProtocol.requests.isEmpty)
+    }
+
+    @Test("Reference loader rejects an oversized file before allocating it")
+    func oversizedReferenceIsRejected() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "rapid-video-reference-tests-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("oversized.png")
+        _ = FileManager.default.createFile(atPath: source.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.truncate(atOffset: UInt64(VideoClient.maxReferenceBytes + 1))
+        try handle.close()
+
+        #expect(throws: VideoReferenceLoaderError.tooLarge) {
+            _ = try VideoReferenceLoader.load(from: source)
+        }
+    }
+
     @Test("Failed save leaves an existing destination untouched")
     func failedSavePreservesDestination() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(

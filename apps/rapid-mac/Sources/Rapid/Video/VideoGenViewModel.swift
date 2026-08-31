@@ -60,11 +60,15 @@ final class VideoGenViewModel {
     @ObservationIgnored private var serverRefreshGeneration: UInt = 0
     @ObservationIgnored private var loadedServerContext: ServerRequestContext?
     @ObservationIgnored private var previewGeneration: UInt = 0
+    @ObservationIgnored private var pollingGeneration: UInt = 0
+    @ObservationIgnored private var pollingTask: Task<Void, Never>?
+    @ObservationIgnored private let pollingInterval: Duration
 
     init(
         server: ServerManager,
         client: any VideoClientProtocol = VideoClient(),
         physicalRAMGB: Double = MacHardware.detect().physicalRAMGB,
+        pollingInterval: Duration = .seconds(1),
         catalogLoader: @escaping (URL) async -> [ModelEntry] = {
             await ModelCatalog.videoEntries(binary: $0)
         }
@@ -72,6 +76,7 @@ final class VideoGenViewModel {
         self.server = server
         self.client = client
         self.physicalRAMGB = physicalRAMGB
+        self.pollingInterval = pollingInterval
         self.catalogLoader = catalogLoader
     }
 
@@ -124,6 +129,13 @@ final class VideoGenViewModel {
 
     var hasActiveJobs: Bool {
         jobs.contains { $0.status == .queued || $0.status == .inProgress }
+    }
+
+    /// Only a live matching server can prove that an active job is still
+    /// progressing. Stale history from a stopped or switched process must not
+    /// block app shutdown or update coordination indefinitely.
+    var hasLiveActiveJobs: Bool {
+        currentServerContext != nil && hasActiveJobs
     }
 
     func isModelEligible(_ model: ModelEntry) -> Bool {
@@ -253,6 +265,7 @@ final class VideoGenViewModel {
                 ) else { return }
                 jobs = newJobs
                 reconcileSelection()
+                reconcileJobPolling()
             } catch {
                 guard requestIsCurrent(
                     context,
@@ -288,6 +301,10 @@ final class VideoGenViewModel {
             if selectedJob?.status == .completed, previous != .completed {
                 await loadSelectedPreview()
             }
+            // Stop the owner task only after a newly-completed preview has
+            // finished downloading; cancelling it earlier would cancel that
+            // URLSession request along with the polling loop.
+            reconcileJobPolling()
         } catch {
             // Poll failures are transient during a model stop/restart. The
             // explicit refresh/start actions surface actionable errors.
@@ -326,6 +343,7 @@ final class VideoGenViewModel {
             previewURL = nil
             prompt = ""
             seed = Int.random(in: 1...999_999)
+            reconcileJobPolling()
         } catch {
             guard requestIsCurrent(
                 context, contextGeneration: contextGeneration
@@ -380,6 +398,7 @@ final class VideoGenViewModel {
                 context, contextGeneration: contextGeneration
             ) else { return }
             jobs.removeAll { $0.id == job.id }
+            reconcileJobPolling()
             if selectedJobID == job.id {
                 selectedJobID = jobs.first?.id
                 previewURL = nil
@@ -397,6 +416,7 @@ final class VideoGenViewModel {
         invalidateServerContext()
         capabilities = nil
         jobs = []
+        reconcileJobPolling()
         selectedJobID = nil
         previewURL = nil
         referenceImage = nil
@@ -447,6 +467,38 @@ final class VideoGenViewModel {
         loadedServerContext = nil
         isRefreshing = false
         isLoadingPreview = false
+        reconcileJobPolling()
+    }
+
+    /// Polling belongs to the long-lived view model, not the Video view. Jobs
+    /// therefore keep progressing when the user visits another tab or hides
+    /// the experimental surface. A server switch cancels the loop and leaves
+    /// history intact for reconciliation if that video model is started again.
+    private func reconcileJobPolling() {
+        guard hasLiveActiveJobs else {
+            pollingGeneration &+= 1
+            pollingTask?.cancel()
+            pollingTask = nil
+            return
+        }
+        guard pollingTask == nil else { return }
+        pollingGeneration &+= 1
+        let generation = pollingGeneration
+        let interval = pollingInterval
+        pollingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    break
+                }
+                guard let self else { break }
+                await self.pollJobs()
+                guard self.hasLiveActiveJobs else { break }
+            }
+            guard let self, self.pollingGeneration == generation else { return }
+            self.pollingTask = nil
+        }
     }
 
     private func requestIsCurrent(

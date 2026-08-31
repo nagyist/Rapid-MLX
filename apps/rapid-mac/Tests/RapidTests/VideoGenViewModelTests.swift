@@ -123,6 +123,117 @@ struct VideoGenViewModelTests {
         #expect(viewModel.capabilities == nil)
         #expect(viewModel.jobs.isEmpty)
     }
+
+    @Test("Active jobs keep polling without a mounted Video view")
+    func pollingOutlivesView() async throws {
+        let model = ModelEntry(
+            alias: "ltx-2.3-mlx-q4", hfRepo: "org/ltx", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 24
+        )
+        let client = VideoPollingClient()
+        let server = ServerManager(
+            testingState: .ready(alias: model.alias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            activeBearer: "test-bearer"
+        )
+        let viewModel = VideoGenViewModel(
+            server: server,
+            client: client,
+            physicalRAMGB: 32,
+            pollingInterval: .milliseconds(5),
+            catalogLoader: { _ in [model] }
+        )
+        await viewModel.refreshCatalog()
+        await viewModel.refreshServerData()
+        viewModel.prompt = "A fox runs through snow"
+
+        await viewModel.submit()
+        #expect(viewModel.hasLiveActiveJobs)
+
+        for _ in 0..<100 where viewModel.hasActiveJobs {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(viewModel.jobs.first?.status == .completed)
+        #expect(!viewModel.hasLiveActiveJobs)
+        #expect(viewModel.previewURL?.lastPathComponent == "finished.mp4")
+        #expect(await client.listCallCount() >= 2)
+    }
+
+    @Test("A stale active job stops blocking global busy after a server switch")
+    func staleJobIsNotGloballyBusy() async {
+        let model = ModelEntry(
+            alias: "ltx-2.3-mlx-q4", hfRepo: "org/ltx", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 24
+        )
+        let server = ServerManager(
+            testingState: .ready(alias: model.alias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            activeBearer: "test-bearer"
+        )
+        let viewModel = VideoGenViewModel(
+            server: server,
+            client: VideoFakeClient(),
+            physicalRAMGB: 32,
+            pollingInterval: .seconds(60),
+            catalogLoader: { _ in [model] }
+        )
+        await viewModel.refreshCatalog()
+        await viewModel.refreshServerData()
+        viewModel.prompt = "A fox runs through snow"
+        await viewModel.submit()
+        #expect(viewModel.hasLiveActiveJobs)
+
+        server._testSetState(.ready(alias: "chat-model"))
+        await viewModel.serverStateDidChange()
+
+        #expect(viewModel.hasActiveJobs)
+        #expect(!viewModel.hasLiveActiveJobs)
+    }
+}
+
+private actor VideoPollingClient: VideoClientProtocol {
+    private var listCalls = 0
+
+    func capabilities(port: Int, bearer: String?) async throws -> VideoCapabilities {
+        try VideoFakeClient.capabilitiesValue()
+    }
+
+    func create(
+        _ request: VideoCreateRequest,
+        port: Int,
+        bearer: String?
+    ) async throws -> VideoJob {
+        Self.job(status: .queued, progress: 0)
+    }
+
+    func list(port: Int, bearer: String?, limit: Int) async throws -> [VideoJob] {
+        listCalls += 1
+        return listCalls == 1 ? [] : [Self.job(status: .completed, progress: 100)]
+    }
+
+    func delete(id: String, port: Int, bearer: String?) async throws {}
+
+    func content(id: String, port: Int, bearer: String?) async throws -> URL {
+        URL(fileURLWithPath: "/tmp/finished.mp4")
+    }
+
+    func listCallCount() -> Int { listCalls }
+
+    private nonisolated static func job(status: VideoJobStatus, progress: Int) -> VideoJob {
+        VideoJob(
+            id: "video_0123456789abcdef0123456789abcdef",
+            model: "ltx-2.3-mlx-q4",
+            prompt: "A fox runs through snow",
+            seconds: "1",
+            size: "512x512",
+            status: status,
+            progress: progress,
+            createdAt: 123,
+            completedAt: status == .completed ? 456 : nil,
+            error: nil
+        )
+    }
 }
 
 private actor VideoFakeClient: VideoClientProtocol {

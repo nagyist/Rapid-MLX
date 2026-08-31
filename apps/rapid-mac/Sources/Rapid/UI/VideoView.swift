@@ -3,6 +3,42 @@ import AVKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum VideoReferenceLoaderError: Error, Equatable {
+    case notRegularFile
+    case tooLarge
+}
+
+enum VideoReferenceLoader {
+    static func load(
+        from url: URL,
+        fileManager: FileManager = .default,
+        maximumBytes: Int = VideoClient.maxReferenceBytes
+    ) throws -> Data {
+        let (readLimit, overflowed) = maximumBytes.addingReportingOverflow(1)
+        guard maximumBytes >= 0, !overflowed else {
+            throw VideoReferenceLoaderError.tooLarge
+        }
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw VideoReferenceLoaderError.notRegularFile
+        }
+        guard let byteCount = (attributes[.size] as? NSNumber)?.uint64Value,
+              byteCount <= UInt64(maximumBytes) else {
+            throw VideoReferenceLoaderError.tooLarge
+        }
+
+        // Read at most one byte past the contract even if the file grows
+        // between metadata inspection and the read.
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: readLimit) ?? Data()
+        guard data.count <= maximumBytes else {
+            throw VideoReferenceLoaderError.tooLarge
+        }
+        return data
+    }
+}
+
 enum VideoPreviewSaver {
     static func save(
         source: URL,
@@ -64,13 +100,6 @@ struct VideoView: View {
         .onChange(of: server.state) { _, _ in
             Task { await viewModel.serverStateDidChange() }
         }
-        .task(id: viewModel.hasActiveJobs) {
-            guard viewModel.hasActiveJobs else { return }
-            while !Task.isCancelled, viewModel.hasActiveJobs {
-                try? await Task.sleep(for: .seconds(1))
-                await viewModel.pollJobs()
-            }
-        }
         .fileImporter(
             isPresented: $showingReferenceImporter,
             allowedContentTypes: [.png, .jpeg, .webP],
@@ -123,6 +152,7 @@ struct VideoView: View {
 
             if let url = viewModel.previewURL {
                 VideoPlaybackView(url: url)
+                    .id(url)
                     .clipShape(RoundedRectangle(cornerRadius: RapidTheme.Radius.panel, style: .continuous))
                     .overlay(alignment: .topTrailing) { resultActions }
             } else if let job = viewModel.selectedJob {
@@ -190,8 +220,8 @@ struct VideoView: View {
                     ProgressView().controlSize(.small)
                     Button("Cancel Download") { downloads.cancelDownload(alias: model.alias) }
                         .buttonStyle(.rapidSecondary)
+                        .accessibilityIdentifier("Video.CancelDownload")
                 }
-                .accessibilityIdentifier("Video.CancelDownload")
             } else if !model.cached {
                 Button("Download \(model.alias)") {
                     _ = downloads.startDownload(alias: model.alias, hfPath: model.hfRepo)
@@ -510,11 +540,7 @@ struct VideoView: View {
             guard let url = try result.get().first else { return }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            guard data.count <= VideoClient.maxReferenceBytes else {
-                viewModel.errorMessage = "Reference images must be 20 MB or smaller."
-                return
-            }
+            let data = try VideoReferenceLoader.load(from: url)
             guard NSImage(data: data) != nil else {
                 viewModel.errorMessage = "Choose a valid JPEG, PNG, or WebP image."
                 return
@@ -524,6 +550,8 @@ struct VideoView: View {
                 : ext == "webp" ? "image/webp" : "image/png"
             viewModel.setReference(.init(data: data, fileName: url.lastPathComponent, mimeType: mime))
             viewModel.errorMessage = nil
+        } catch VideoReferenceLoaderError.tooLarge {
+            viewModel.errorMessage = "Reference images must be 20 MB or smaller."
         } catch {
             viewModel.errorMessage = "Rapid couldn't open that reference image."
         }
