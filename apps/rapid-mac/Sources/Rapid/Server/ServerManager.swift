@@ -293,6 +293,13 @@ final class ServerManager {
         MemoryProbe.snapshot()
     }
 
+    /// App-owned video artifact root. Overridable only so admission tests do
+    /// not write into the developer's real Application Support directory.
+    @ObservationIgnored
+    internal var videoArtifactsDirectoryProvider: @Sendable () -> URL = {
+        ApplicationSupportLocator.videoArtifactsDirectory()
+    }
+
     /// Orders overlapping timer and foreground refreshes. Sampling happens
     /// off the main actor, so a slower older probe must not overwrite a newer
     /// decision after actor re-entry.
@@ -423,10 +430,13 @@ final class ServerManager {
         minimumMemoryGB: Double?
     ) async -> Bool {
         let memorySnapshot = memorySnapshotProvider()
+        let estimatedFootprintGB = Self.videoEstimatedFootprintGB(
+            minimumMemoryGB: minimumMemoryGB
+        )
         guard Self.videoMemoryFloorSatisfied(
             minimumMemoryGB: minimumMemoryGB,
             snapshot: memorySnapshot
-        ) else {
+        ), let estimatedFootprintGB else {
             if let minimumMemoryGB,
                minimumMemoryGB.isFinite,
                minimumMemoryGB > 0,
@@ -446,7 +456,7 @@ final class ServerManager {
             }
             return false
         }
-        let outputDirectory = ApplicationSupportLocator.videoArtifactsDirectory()
+        let outputDirectory = videoArtifactsDirectoryProvider()
         do {
             try FileManager.default.createDirectory(
                 at: outputDirectory,
@@ -461,7 +471,7 @@ final class ServerManager {
         return await ensureServing(
             alias: alias,
             hfPath: hfPath,
-            estimatedMemoryGB: nil,
+            estimatedMemoryGB: estimatedFootprintGB,
             residencyEligible: false,
             videoOutputDirectory: outputDirectory.path
         )
@@ -481,6 +491,20 @@ final class ServerManager {
               let snapshot else { return false }
         let totalMemoryGB = Double(snapshot.totalBytes) / Double(1 << 30)
         return totalMemoryGB >= minimumMemoryGB
+    }
+
+    /// Convert a catalog whole-machine floor into the model-process working
+    /// set used by the live-pressure guard. Desktop's established hardware
+    /// policy reserves 20% of physical memory for macOS and other apps, so a
+    /// model whose minimum supported Mac has `N` GB receives an `0.8 × N` GB
+    /// process budget. This keeps capacity eligibility and live use distinct.
+    nonisolated static func videoEstimatedFootprintGB(
+        minimumMemoryGB: Double?
+    ) -> Double? {
+        guard let minimumMemoryGB,
+              minimumMemoryGB.isFinite,
+              minimumMemoryGB > 0 else { return nil }
+        return minimumMemoryGB * MacHardware.modelUsableMemoryFraction
     }
 
     func isModelResident(_ alias: String) -> Bool {

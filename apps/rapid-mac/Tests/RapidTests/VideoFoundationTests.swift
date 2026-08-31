@@ -96,5 +96,48 @@ struct VideoFoundationTests {
             minimumMemoryGB: 32,
             snapshot: nil
         ))
+        let estimated = ServerManager.videoEstimatedFootprintGB(
+            minimumMemoryGB: 24
+        ) ?? 0
+        #expect(abs(estimated - 19.2) < 0.001)
+        #expect(ServerManager.videoEstimatedFootprintGB(minimumMemoryGB: nil) == nil)
+    }
+
+    @MainActor
+    @Test("Video startup applies the catalog working set to live admission")
+    func videoStartupUsesCatalogWorkingSetForAdmission() async throws {
+        let gib = UInt64(1) << 30
+        let artifacts = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-video-admission-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: artifacts) }
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true")
+        )
+        server.videoArtifactsDirectoryProvider = { artifacts }
+        server.memorySnapshotProvider = {
+            MemoryProbe.Snapshot(
+                totalBytes: 32 * gib,
+                usedBytes: 20 * gib
+            )
+        }
+
+        let load = Task {
+            await server.ensureVideoServing(
+                alias: "ltx-2.3-mlx-q4",
+                hfPath: "notapalindrome/ltx23-mlx-av-q4",
+                minimumMemoryGB: 24
+            )
+        }
+        for _ in 0 ..< 300 where server.pendingMemoryWarning == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingMemoryWarning)
+        #expect(warning.severity == .unsafe)
+        #expect(abs(warning.footprintGB - 19.2) < 0.001)
+        #expect(warning.videoOutputDirectory == artifacts.path)
+
+        server.cancelPendingMemoryLoad(warning)
+        #expect(await load.value == false)
     }
 }
