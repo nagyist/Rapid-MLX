@@ -322,6 +322,79 @@ def test_transcript_settler_waits_when_jump_button_is_initially_absent(tmp_path)
     assert completed.stdout.strip() == "3"
 
 
+def test_transcript_settler_accepts_stable_visible_tail_after_scrollbar_hides(tmp_path):
+    """A short reply can fit after Jump and make AppKit remove its overlay bar."""
+    source = HARNESS.read_text()
+    helper_body = source.split("settle_transcript_at_bottom() {", 1)[1].split("\n}", 1)[
+        0
+    ]
+    helper = f"settle_transcript_at_bottom() {{{helper_body}\n}}"
+
+    fixture_dir = tmp_path / "fixtures"
+    fixture_dir.mkdir()
+    initial_elements = [
+        {
+            "role": "AXButton",
+            "identifier": "ChatView.SendOrStopButton",
+            "bounds": {"x": 658, "y": 546, "width": 28, "height": 28},
+        },
+        {
+            "role": "AXScrollBar",
+            "value": 0.25,
+            "bounds": {"x": 704, "y": 171, "width": 16, "height": 318},
+        },
+        {"role": "AXButton", "identifier": "Transcript.JumpToBottom"},
+    ]
+    settled_elements = [
+        {
+            "role": "AXButton",
+            "identifier": "ChatView.SendOrStopButton",
+            "bounds": {"x": 658, "y": 546, "width": 28, "height": 28},
+        },
+        {
+            "role": "AXScrollArea",
+            "bounds": {"x": 201, "y": 171, "width": 519, "height": 318},
+        },
+        {
+            "role": "AXButton",
+            "identifier": "ChatView.Message.Retry.00000000-0000-0000-0000-000000000000",
+            "bounds": {"x": 277, "y": 383, "width": 24, "height": 24},
+        },
+    ]
+    for index, elements in enumerate(
+        (initial_elements, settled_elements, settled_elements)
+    ):
+        (fixture_dir / f"fixture-{index}.json").write_text(
+            json.dumps({"data": {"ui_elements": elements}})
+        )
+
+    script = textwrap.dedent(
+        f"""
+        set -euo pipefail
+        fixture_dir={str(fixture_dir)!r}
+        index=0
+        calls=0
+        see_main() {{
+            cp "$fixture_dir/fixture-$index.json" "$1"
+            (( index < 2 )) && index=$((index + 1)) || true
+            calls=$((calls + 1))
+        }}
+        press() {{ :; }}
+        die() {{ printf '%s\n' "$*" >&2; exit 97; }}
+        sleep() {{ :; }}
+        {helper}
+        settle_transcript_at_bottom "$fixture_dir/current.json" "$fixture_dir/press.json"
+        printf '%s\n' "$calls"
+        """
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, check=False, text=True
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "3"
+
+
 def test_transcript_settler_rejects_a_stable_intermediate_position(tmp_path):
     """Progress plus a hidden button is not proof that the tail was reached."""
     source = HARNESS.read_text()

@@ -924,25 +924,48 @@ settle_transcript_at_bottom() {
         press "$destination" Transcript.JumpToBottom "$press_result" \
             || die "transcript was not at its tail and Jump to latest was not pressable"
     fi
-    local previous_value="" stable_samples=0
+    local previous_tail_key="" stable_samples=0
     for _ in {1..60}; do
         see_main "$destination"
-        local current_value
+        local current_value tail_marker_visible tail_key=""
         current_value="$(jq -r --argjson scroll_x "$scroll_x" '
             [.data.ui_elements[]?
              | select(.role == "AXScrollBar"
                       and (.value | type) == "number"
                       and ((.bounds.x - $scroll_x) | fabs) < 1)
              | .value] | first // empty' "$destination")"
+        # AppKit may remove an overlay scrollbar once a short transcript fits
+        # entirely inside its viewport. In that state, the last assistant
+        # action row being fully visible is stronger physical evidence than a
+        # scrollbar value that no longer exists.
+        tail_marker_visible="$(jq -r '
+            ([.data.ui_elements[]?
+              | select(.role == "AXScrollArea"
+                       and .bounds.x > 200
+                       and .bounds.width > 300
+                       and .bounds.height > 100)]
+             | sort_by(.bounds.width) | last) as $transcript
+            | if $transcript == null then false else
+                ([.data.ui_elements[]?
+                  | select((.identifier // "")
+                           | startswith("ChatView.Message.Retry."))
+                  | select(.bounds.y >= $transcript.bounds.y
+                           and (.bounds.y + .bounds.height)
+                               <= ($transcript.bounds.y + $transcript.bounds.height))]
+                 | length) > 0
+              end' "$destination")"
         if [[ -n "$current_value" ]] \
-            && ! jq -e '.data.ui_elements[]?
-                        | select(.identifier == "Transcript.JumpToBottom")' \
-                "$destination" >/dev/null \
             && awk -v current="$current_value" \
                 'BEGIN { exit !(current >= 0.99) }'; then
-            if [[ -n "$previous_value" ]] \
-                && awk -v previous="$previous_value" -v current="$current_value" \
-                    'BEGIN { delta = current - previous; if (delta < 0) delta = -delta; exit !(delta <= 0.001) }'; then
+            tail_key="$current_value"
+        elif [[ -z "$current_value" && "$tail_marker_visible" == "true" ]]; then
+            tail_key="assistant-tail-visible"
+        fi
+        if [[ -n "$tail_key" ]] \
+            && ! jq -e '.data.ui_elements[]?
+                        | select(.identifier == "Transcript.JumpToBottom")' \
+                "$destination" >/dev/null; then
+            if [[ "$previous_tail_key" == "$tail_key" ]]; then
                 stable_samples=$((stable_samples + 1))
             else
                 stable_samples=1
@@ -953,7 +976,7 @@ settle_transcript_at_bottom() {
         else
             stable_samples=0
         fi
-        previous_value="$current_value"
+        previous_tail_key="$tail_key"
         sleep 0.1
     done
     die "Jump to latest did not physically settle the transcript at its tail"
