@@ -2863,7 +2863,7 @@ def test_install_mtp_vendored_carries_seeded_rng_after_priming(monkeypatch):
             top_k=0,
             min_p=0.0,
             seed=1234,
-        )
+        ),
     )
     ok = _install_mtp_vendored(
         batch_gen,
