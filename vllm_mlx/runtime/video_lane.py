@@ -474,7 +474,9 @@ class VideoEngine:
                             "(iw-ow)/2:(ih-oh)/2"
                         ),
                         "-c:v",
-                        "libx264",
+                        "h264_videotoolbox",
+                        "-pix_fmt",
+                        "yuv420p",
                         "-c:a",
                         "copy",
                         str(cropped),

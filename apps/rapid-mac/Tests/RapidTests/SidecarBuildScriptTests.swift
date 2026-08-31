@@ -196,8 +196,10 @@ struct SidecarBuildScriptTests {
                 "The standalone encoder is a signed Mach-O too.")
         #expect(script.contains(#"assert importlib.util.find_spec("cv2") is None"#))
         #expect(script.contains(#"assert importlib.util.find_spec("imageio") is None"#))
-        #expect(script.contains("encode_rgb_video(np.zeros((2, 16, 16, 3)"),
+        #expect(script.contains("encode_rgb_video(np.zeros((2, 32, 16, 3)"),
                 "The build must produce a real MP4 with the packaged encoder.")
+        #expect(script.contains("VideoEngine._crop_generated_output("),
+                "The smoke must exercise the aligned-to-requested crop path too.")
         #expect(script.contains(#"cp "$FFMPEG_TAR" "$STAGE/licenses/sources/ffmpeg-${FFMPEG_VERSION}.tar.xz""#),
                 "The complete corresponding FFmpeg source must travel with the executable.")
     }

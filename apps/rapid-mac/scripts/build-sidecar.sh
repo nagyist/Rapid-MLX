@@ -1184,14 +1184,23 @@ import numpy as np
 import mlx_video
 from mlx_video import generate_video_with_audio
 from mlx_video.generate_wan import generate_video
+from vllm_mlx.runtime.video_lane import VideoEngine
 from vllm_mlx.video.encoding import encode_rgb_video
 assert importlib.util.find_spec("cv2") is None
 assert importlib.util.find_spec("imageio") is None
 with tempfile.TemporaryDirectory() as directory:
     output = Path(directory) / "smoke.mp4"
-    encode_rgb_video(np.zeros((2, 16, 16, 3), dtype=np.uint8), output, 2)
+    encode_rgb_video(np.zeros((2, 32, 16, 3), dtype=np.uint8), output, 2)
+    VideoEngine._crop_generated_output(
+        output_path=output,
+        width=16,
+        height=32,
+        output_width=16,
+        output_height=16,
+        family="smoke",
+    )
     assert output.stat().st_size > 0
-print("mlx_video minimal runtime + VideoToolbox encode OK")' 2>&1)" || {
+print("mlx_video minimal runtime + VideoToolbox encode/crop OK")' 2>&1)" || {
         echo "ERR: bundled video runtime or encoder smoke failed:" >&2
         echo "$VIDEO_OUT" >&2
         exit 3
