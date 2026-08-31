@@ -425,6 +425,15 @@ def test_failed_outcome_is_structured_without_measurements(schemas, registry) ->
     )
 
 
+def test_completed_outcome_rejects_incomplete_measurement(schemas, registry) -> None:
+    run = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    run["measurements"][0]["completed"] = False
+    errors = list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(run)
+    )
+    assert any(list(error.absolute_path)[-1:] == ["completed"] for error in errors)
+
+
 def test_registered_protocols_and_datasets_match_digests(schemas, registry) -> None:
     workload_schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
