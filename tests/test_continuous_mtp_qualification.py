@@ -38,9 +38,9 @@ def _args(model: str, payload: str, *, force: bool = False) -> SimpleNamespace:
     ("alias", "tier"),
     [
         ("qwen3.5-4b-4bit", "blocked"),
-        ("qwen3.5-9b-4bit", "verified"),
-        ("qwen3.6-27b-4bit", "verified"),
-        ("qwen3.8-27b-4bit", "verified"),
+        ("qwen3.5-9b-4bit", "blocked"),
+        ("qwen3.6-27b-4bit", "blocked"),
+        ("qwen3.8-27b-4bit", "blocked"),
         ("qwen3.5-9b-8bit", "unknown"),
     ],
 )
@@ -52,14 +52,16 @@ def test_catalog_records_only_exact_measured_artifacts(alias: str, tier: str) ->
     assert profile.mtp_continuous_batching_tier == tier
 
 
-def test_verified_alias_can_request_continuous_mtp_without_force() -> None:
-    from vllm_mlx.cli import _normalize_speculative_config_or_exit
+def test_verified_tier_can_request_continuous_mtp_without_force(monkeypatch) -> None:
+    from vllm_mlx import cli
+
+    monkeypatch.setattr(cli, "_alias_continuous_mtp_tier", lambda _model: "verified")
 
     args = _args(
         "qwen3.5-9b-4bit",
         '{"method":"mtp","continuous_batching":true}',
     )
-    _normalize_speculative_config_or_exit(args)
+    cli._normalize_speculative_config_or_exit(args)
 
     assert args.mtp_continuous_batching is True
     assert args.mtp_continuous_batching_tier == "verified"
@@ -70,6 +72,7 @@ def test_verified_alias_can_request_continuous_mtp_without_force() -> None:
     ("alias", "tier", "message"),
     [
         ("qwen3.5-4b-4bit", "blocked", "failed paired output qualification"),
+        ("qwen3.5-9b-4bit", "blocked", "failed paired output qualification"),
         (
             "qwen3.5-9b-8bit",
             "unknown",
@@ -270,3 +273,21 @@ def test_qualification_benchmark_dry_run_is_network_free() -> None:
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["planned_requests"] == 6
+    assert len(set(payload["lane_prompt_sha256"].values())) == 3
+
+
+def test_qualification_prompts_are_lane_specific_and_stable() -> None:
+    import importlib.util
+
+    script = (
+        Path(__file__).resolve().parents[1] / "bench" / "bench_continuous_mtp_server.py"
+    )
+    spec = importlib.util.spec_from_file_location("continuous_mtp_bench", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    prompts = [module._prompt_for_lane(lane) for lane in range(4)]
+    assert len(set(prompts)) == 4
+    assert prompts == [module._prompt_for_lane(lane) for lane in range(4)]
