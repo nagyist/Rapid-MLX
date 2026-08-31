@@ -1666,11 +1666,6 @@ def _ensure_routing_config(model_name: str) -> None:
     """
     from .model_metadata import read_model_metadata
 
-    # Config already readable (warm cache / local checkpoint dir) -> the routing
-    # probe has real evidence; skip the prefetch so warm starts and the unit
-    # suite never download.
-    if read_model_metadata(model_name) is not None:
-        return
     # A local path the user pointed us at: trust their files. If a config is
     # genuinely absent the engine's own loader surfaces it with its own
     # message; we must not try to "download" a filesystem path.
@@ -1787,14 +1782,28 @@ def _resolve_serving_checkpoint(
             preflight_path = model_path
         else:
             preflight_path = _prefetch_routing_metadata(model_name)
-            preflight_decision = resolve_serving_lane_decision(
-                preflight_path,
-                vision_min_memory_gb=(
-                    profile.vision_min_memory_gb if profile is not None else None
-                ),
-                requested_spec_decode=requested_spec_decode,
+            # Config-only evidence is not enough to reject startup: a VLM-style
+            # config can wrap a text-only single-file fork.  Only a readable
+            # tensor index/header that positively proves multimodal weights is
+            # safe to act on before the complete checkpoint is materialized.
+            from .model_metadata import (
+                checkpoint_has_multimodal_weights,
+                read_model_metadata,
             )
-            preflight_is_mllm = getattr(preflight_decision, "is_mllm", False)
+
+            preflight_metadata = read_model_metadata(preflight_path)
+            preflight_is_mllm = bool(
+                preflight_metadata is not None
+                and checkpoint_has_multimodal_weights(
+                    (
+                        Path(preflight_metadata.snapshot_dir)
+                        if preflight_metadata.snapshot_dir is not None
+                        else None
+                    ),
+                    getattr(preflight_metadata, "config", None),
+                )
+                is True
+            )
         if preflight_is_mllm:
             from .models.mllm import _require_mlx_vlm
 

@@ -119,7 +119,6 @@ def test_load_model_tracks_explicit_served_model_name(monkeypatch, served, expec
     # #2518: no config prefetch — the repo id is a label for the stub engine.
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
     monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
-    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
 
     server.load_model("mlx-community/Qwen3.5-9B-4bit", served_model_name=served)
 
@@ -291,8 +290,9 @@ def test_load_model_explicit_text_lane_does_not_require_vision_runtime(monkeypat
 
 def test_metadata_preflight_rejects_before_subfolder_weight_download(monkeypatch):
     """A subfolder VLM must fail before its complete checkpoint is fetched."""
-    from vllm_mlx import server
-    from vllm_mlx.api import utils as api_utils
+    from types import SimpleNamespace
+
+    from vllm_mlx import model_metadata, server
     from vllm_mlx.models import mllm
 
     monkeypatch.setattr(
@@ -300,8 +300,14 @@ def test_metadata_preflight_rejects_before_subfolder_weight_download(monkeypatch
         "_prefetch_routing_metadata",
         lambda _name: "/cache/metadata-only/vision-model",
     )
-    monkeypatch.setattr(api_utils, "is_mllm_model", lambda _name: True)
-    monkeypatch.setattr(api_utils, "mllm_backbone_cache_mode", lambda _name: None)
+    monkeypatch.setattr(
+        model_metadata,
+        "read_model_metadata",
+        lambda _name: SimpleNamespace(snapshot_dir="/cache/metadata-only", config={}),
+    )
+    monkeypatch.setattr(
+        model_metadata, "checkpoint_has_multimodal_weights", lambda *_args: True
+    )
     monkeypatch.setattr(
         "vllm_mlx.utils.tokenizer._resolve_subfolder_checkpoint",
         lambda _name: (_ for _ in ()).throw(
@@ -317,6 +323,42 @@ def test_metadata_preflight_rejects_before_subfolder_weight_download(monkeypatch
     )
 
     with pytest.raises(ImportError, match="metadata-only"):
+        server._resolve_serving_checkpoint("publisher/vision-alias")
+
+
+def test_inconclusive_metadata_preflight_defers_runtime_rejection(monkeypatch):
+    """Config-only evidence may be a text-only single-file fork."""
+    from types import SimpleNamespace
+
+    from vllm_mlx import model_metadata, server
+    from vllm_mlx.models import mllm
+
+    monkeypatch.setattr(
+        server,
+        "_prefetch_routing_metadata",
+        lambda _name: "/cache/metadata-only/vision-model",
+    )
+    monkeypatch.setattr(
+        model_metadata,
+        "read_model_metadata",
+        lambda _name: SimpleNamespace(snapshot_dir="/cache/metadata-only", config={}),
+    )
+    monkeypatch.setattr(
+        model_metadata, "checkpoint_has_multimodal_weights", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        mllm,
+        "_require_mlx_vlm",
+        lambda _name=None: (_ for _ in ()).throw(
+            AssertionError("inconclusive metadata must not reject before weights")
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.utils.tokenizer._resolve_subfolder_checkpoint",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("full resolution reached")),
+    )
+
+    with pytest.raises(RuntimeError, match="full resolution reached"):
         server._resolve_serving_checkpoint("publisher/vision-alias")
 
 
@@ -647,21 +689,25 @@ def test_ensure_routing_config_succeeds_when_prefetch_materializes(monkeypatch):
     assert state["materialized"] is True
 
 
-def test_ensure_routing_config_skips_prefetch_when_config_already_readable(monkeypatch):
-    """Warm cache / local checkpoint: config already readable → no download is
-    attempted (keeps warm starts and the unit suite fully offline)."""
+def test_ensure_routing_config_completes_remote_snapshot_with_readable_config(
+    monkeypatch,
+):
+    """A metadata-only remote snapshot must still materialize its weights."""
     from vllm_mlx import cli as cli_mod
     from vllm_mlx import model_metadata as mm
     from vllm_mlx import server
 
     monkeypatch.setattr(mm, "read_model_metadata", lambda name: object())
 
-    def _must_not_run(name):  # pragma: no cover - asserted never called
-        raise AssertionError("prefetch must be skipped when config is readable")
+    downloaded = []
 
-    monkeypatch.setattr(cli_mod, "_ensure_model_downloaded", _must_not_run)
+    def _complete_snapshot(name):
+        downloaded.append(name)
+
+    monkeypatch.setattr(cli_mod, "_ensure_model_downloaded", _complete_snapshot)
 
     server._ensure_routing_config("mlx-community/Qwen3.5-9B-4bit")
+    assert downloaded == ["mlx-community/Qwen3.5-9B-4bit"]
 
 
 def test_ensure_routing_config_propagates_disk_gate_systemexit(monkeypatch):
