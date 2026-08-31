@@ -186,7 +186,7 @@ def test_fresh_install_settles_transcript_before_structural_baseline():
 
     assert 'select(.identifier == "Transcript.JumpToBottom")' in helper
     assert 'press "$destination" Transcript.JumpToBottom "$press_result"' in helper
-    assert 'sleep 0.1' in helper
+    assert "sleep 0.1" in helper
     assert 'die "Jump to latest did not settle the transcript at its tail"' in helper
 
     banner = fresh_install.index("wait_identifier TelemetryConsent.PostValueBanner")
