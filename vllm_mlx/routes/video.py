@@ -578,7 +578,12 @@ async def _persist_completed_job_in_daemon_thread(job: _VideoJob) -> None:
     )
     with _jobs_lock:
         _persistence_threads.add(thread)
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        with _jobs_lock:
+            _persistence_threads.discard(thread)
+        raise
     try:
         await asyncio.shield(completed)
     except asyncio.CancelledError:
@@ -890,7 +895,7 @@ async def _run_job(
         if _jobs_are_persistent:
             try:
                 await _persist_completed_job_in_daemon_thread(completed_job)
-            except OSError:
+            except (OSError, RuntimeError):
                 # The MP4 is already complete and remains downloadable for this
                 # process. Keep that user result available while making the
                 # durability loss visible to operators.

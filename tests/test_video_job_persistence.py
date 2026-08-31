@@ -509,6 +509,49 @@ async def test_metadata_failure_keeps_completed_video_available(
 
 
 @pytest.mark.asyncio
+async def test_persistence_thread_start_failure_keeps_completed_video(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = tmp_path / "videos"
+    video.configure_video_jobs(store)
+    video.start_video_jobs()
+
+    class FakeEngine:
+        model_name = "notapalindrome/ltx23-mlx-av-q4"
+
+        def generate(self, *, output_path: Path, **kwargs) -> None:
+            output_path.write_bytes(b"generated-mp4")
+
+    original_start = video.threading.Thread.start
+
+    def fail_persistence_start(thread: threading.Thread) -> None:
+        if thread.name == "rapid-mlx-video-persistence":
+            raise RuntimeError("cannot start thread")
+        original_start(thread)
+
+    monkeypatch.setattr(video, "_video_engine", lambda: FakeEngine())
+    monkeypatch.setattr(video.threading.Thread, "start", fail_persistence_start)
+    created = await video.create_video(
+        prompt="Keep output after thread exhaustion",
+        model="ltx-2.3-mlx-q4",
+        seconds="1",
+        size="512x512",
+        seed=8,
+        input_reference=None,
+    )
+
+    assert (await _wait_for_completion(created["id"]))["status"] == "completed"
+    assert not video._persistence_threads
+    assert "Unable to persist completed video job metadata" in caplog.text
+    response = await video.retrieve_video_content(created["id"])
+    assert (
+        b"".join([chunk async for chunk in response.body_iterator]) == b"generated-mp4"
+    )
+    await asyncio.sleep(0)
+    assert video.configure_video_jobs(store) == store.resolve()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_does_not_wait_for_blocked_metadata_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
