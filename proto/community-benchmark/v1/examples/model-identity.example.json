@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "identity_strength": "registry_pinned",
+  "display": {
+    "alias": "qwen-27b-4bit",
+    "name": "Qwen 27B 4-bit"
+  },
+  "family": {
+    "id": "qwen/qwen-27b",
+    "architecture": "qwen",
+    "parameter_count": 27000000000
+  },
+  "source": {
+    "kind": "huggingface",
+    "repo_id": "example-org/qwen-27b-mlx-4bit",
+    "resolved_revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "artifact": {
+    "format": "mlx-safetensors",
+    "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "manifest_basis": "huggingface_tree",
+    "config_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tokenizer_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "total_size_bytes": 19400000000
+  },
+  "quantization": {
+    "kind": "weights",
+    "method": "affine",
+    "weight_bits": 4,
+    "group_size": 64,
+    "base_dtype": "bfloat16"
+  },
+  "identity_digest": "sha256:0b54d4978f76985a8810b1eb9eebec0d3aa5bff8fec44a084224aa85d66ba34f"
+}
