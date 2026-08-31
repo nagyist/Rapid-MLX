@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -65,10 +66,29 @@ def _reject_floats(value: object) -> None:
             _reject_floats(child)
 
 
+def _normalize_nfc(value: object) -> object:
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, list):
+        return [_normalize_nfc(child) for child in value]
+    if isinstance(value, dict):
+        normalized: dict[str, object] = {}
+        for key, child in value.items():
+            normalized_key = unicodedata.normalize("NFC", key)
+            if normalized_key in normalized:
+                raise ValueError("RCJ-1 key collision after NFC normalization")
+            normalized[normalized_key] = _normalize_nfc(child)
+        return normalized
+    return value
+
+
 def _canonical(value: object) -> bytes:
     _reject_floats(value)
     return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        _normalize_nfc(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode()
 
 
@@ -139,6 +159,17 @@ def test_launch_modality_benchmark_examples_validate(schemas, registry, kind) ->
     assert example["model"]["pipeline_kind"] == f"{kind}_generation"
     assert example["execution"]["task_type"] == f"{kind}_generation"
     assert example["workload"]["task_type"] == f"{kind}_generation"
+
+
+def test_benchmark_run_rejects_cross_object_task_mismatch(schemas, registry) -> None:
+    example = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    example["execution"] = _load(
+        RUNTIME_ROOT / "examples" / "execution.video.example.json"
+    )
+    errors = list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
+    )
+    assert any(list(error.absolute_path)[:1] == ["execution"] for error in errors)
 
 
 def test_vlm_workload_and_measurement_union_is_reachable(schemas, registry) -> None:
@@ -342,5 +373,7 @@ def test_canonical_json_handles_unicode_and_rejects_float_exponents() -> None:
         _canonical(value).decode()
         == '{"path":"模型/权重.safetensors","size_bytes":123}'
     )
+    assert _canonical({"name": "é"}) == _canonical({"name": "e\u0301"})
+    assert _digest({"name": "é"}) == _digest({"name": "e\u0301"})
     with pytest.raises(TypeError, match="forbids floating-point"):
         _canonical({"temperature": 0.7, "tiny": 1e-7})
