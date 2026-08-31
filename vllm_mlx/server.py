@@ -3530,7 +3530,10 @@ Examples:
         _preflight_vision_runtime(
             args.model,
             force_mllm=getattr(args, "mllm", False),
-            force_text=getattr(args, "no_mllm", False),
+            force_text=(
+                getattr(args, "no_mllm", False)
+                or bool(_early_profile is not None and _early_profile.is_text_only)
+            ),
             requested_spec_decode=_early_spec_decode,
         )
 
