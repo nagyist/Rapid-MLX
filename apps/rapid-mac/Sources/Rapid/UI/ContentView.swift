@@ -216,9 +216,7 @@ struct ContentView: View {
                ContentView.shouldSyncChatAlias(
                    serving: serving,
                    catalogEntries: catalogEntries,
-                   knownMediaAliases: Set(
-                       audio.audioModels.map(\.alias) + imageGen.imageModels.map(\.alias)
-                   ),
+                   knownMediaAliases: knownNonChatAliases,
                    section: section
                ) {
                 alias = serving
@@ -953,6 +951,7 @@ struct ContentView: View {
                 viewModel: chat,
                 server: server,
                 alias: $alias,
+                knownNonChatAliases: knownNonChatAliases,
                 readiness: readiness,
                 supportsImageInput: imageAvailability.isAvailable,
                 imageInputUnavailableMessage: imageAvailability.unavailableMessage,
@@ -1124,11 +1123,32 @@ struct ContentView: View {
         section: SidebarSection
     ) -> Bool {
         guard section == .chat else { return false }
-        guard !knownMediaAliases.contains(serving) else { return false }
-        guard let entry = catalogEntries.first(where: { $0.alias == serving }) else {
-            return true
+        if let entry = catalogEntries.first(where: {
+            $0.alias.caseInsensitiveCompare(serving) == .orderedSame
+        }) {
+            return ModelSelectionPurpose.chat.accepts(entry)
         }
-        return entry.kind == .chat
+        return !knownMediaAliases.contains(where: {
+            $0.caseInsensitiveCompare(serving) == .orderedSame
+        })
+    }
+
+    /// The chat catalog intentionally omits every media row, so aliases from
+    /// independently loaded media catalogs close that negative-information
+    /// gap. Dictation's persisted selection is included directly: it can
+    /// start before ``AudioView`` ever mounts, which is the timing that used
+    /// to let `qwen3-asr` masquerade as an unknown custom chat model.
+    private var knownNonChatAliases: Set<String> {
+        Set(
+            audio.audioModels.map(\.alias)
+                + imageGen.imageModels.map(\.alias)
+                + [
+                    audio.selectedTranscriptionAlias,
+                    audio.selectedSpeechAlias,
+                    imageGen.selectedAlias,
+                    dictation.modelAlias,
+                ]
+        ).filter { !$0.isEmpty }
     }
 
     /// True when the Quickstart sheet is up AND owns the pending
