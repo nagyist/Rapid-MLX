@@ -204,9 +204,17 @@ final class ChatViewModel {
             // A turn just ended (stream finished, failed, or was stopped) —
             // snapshot the final exchange into history + disk. Covers every
             // completion path without hooking each one.
-            if oldValue && !isStreaming { persistActive() }
+            if oldValue && !isStreaming {
+                persistActive()
+                scheduleMemoryExtraction()
+            }
         }
     }
+
+    /// The model alias used for the most recent turn, captured at
+    /// ``beginAssistantTurn`` so the background memory extractor can
+    /// address the same engine after the stream finishes.
+    private var lastTurnAlias: String?
     /// Most recent transport / parse error. Cleared on the next ``send``.
     /// Shown as a banner above the compose bar so the user knows what
     /// went wrong without scraping the log tail.
@@ -246,6 +254,12 @@ final class ChatViewModel {
     /// Global custom instructions shared with Settings.
     let customInstructions: CustomInstructionsConfig
 
+    /// Persistent memory entries. Injected into the system prompt and
+    /// updated by the background extractor after each completed turn.
+    /// Optional so unit tests can construct a viewmodel without a real
+    /// memory store; production wires this from ``RapidApp.init``.
+    let memoryStore: MemoryStore?
+
     /// v0.5.1: live handle on the embedded server so the chat loop can
     /// resolve `request.model` against the alias currently being served
     /// instead of trusting the picker bar's state. Mirrors the global
@@ -265,6 +279,7 @@ final class ChatViewModel {
         toolDefaults: UserDefaults = .standard,
         sampling: SamplingConfig? = nil,
         customInstructions: CustomInstructionsConfig? = nil,
+        memoryStore: MemoryStore? = nil,
         server: ServerManager? = nil,
         persistsConversations: Bool = true,
         conversationStoreURL: URL? = nil,
@@ -275,6 +290,7 @@ final class ChatViewModel {
         self.toolDefaults = toolDefaults
         self.sampling = sampling
         self.customInstructions = customInstructions ?? CustomInstructionsConfig()
+        self.memoryStore = memoryStore
         self.server = server
         self.persistsConversations = persistsConversations
         self.conversationStoreURL = conversationStoreURL
@@ -792,6 +808,56 @@ final class ChatViewModel {
         return true
     }
 
+    /// Fires a detached background task to review the completed exchange
+    /// and upsert any durable facts into ``memoryStore``. Called from the
+    /// ``isStreaming`` didSet when a turn ends; never blocks the UI or
+    /// competes with an active stream because it runs on a separate task.
+    private func scheduleMemoryExtraction() {
+        guard let memoryStore, memoryStore.isEnabled else { return }
+        guard let alias = lastTurnAlias else { return }
+        guard messages.count >= 2 else { return }
+        let conversationID = activeConversationID
+        let turnMessages: [(role: String, content: String)] = messages
+            .filter { $0.role == .user || $0.role == .assistant }
+            .map { (role: $0.role.rawValue, content: $0.content) }
+        let baseURL = client.baseURL
+
+        Task { [weak self] in
+            // The network call hops off MainActor via URLSession's async
+            // implementation; we only return to the main actor for the
+            // store mutation below.
+            guard !Task.isCancelled else { return }
+            let extractor = MemoryExtractor(
+                baseURL: baseURL,
+                bearerToken: nil
+            )
+            do {
+                let operations = try await extractor.extract(
+                    model: alias,
+                    messages: turnMessages
+                )
+                for operation in operations {
+                    switch operation {
+                    case .add(let content):
+                        memoryStore.upsert(content: content, conversationID: conversationID)
+                    case .remove(let content):
+                        let matching = memoryStore.entries.first {
+                            $0.content.localizedCaseInsensitiveContains(content)
+                                || content.localizedCaseInsensitiveContains($0.content)
+                        }
+                        if let match = matching {
+                            memoryStore.remove(id: match.id)
+                        }
+                    }
+                }
+            } catch {
+                // Memory extraction is best-effort; a failure here is
+                // invisible to the user and logged only if diagnostics
+                // capture it. The next completed turn gets another chance.
+            }
+        }
+    }
+
     /// Append the user message, open a placeholder assistant row, and
     /// kick off the streaming task. The text field clears immediately on
     /// the caller's side.
@@ -849,6 +915,7 @@ final class ChatViewModel {
         lastError = nil
         lastFailureKind = nil
         lastFailureAlias = nil
+        lastTurnAlias = alias
         isStreaming = true
 
         let epoch = conversationEpoch
@@ -857,6 +924,7 @@ final class ChatViewModel {
         // multi-round tool exchange.
         let globalInstruction = customInstructions.global
         let chatInstruction = conversationInstructions
+        let memoryContext = memoryStore?.formattedForPrompt()
         inflight = Task { [weak self] in
             guard let self else { return }
 
@@ -922,7 +990,8 @@ final class ChatViewModel {
                 epoch: epoch,
                 supportsImageInput: supportsImageInput,
                 globalInstruction: globalInstruction,
-                conversationInstruction: chatInstruction
+                conversationInstruction: chatInstruction,
+                memoryContext: memoryContext
             )
         }
     }
@@ -1850,7 +1919,8 @@ final class ChatViewModel {
         epoch: Int,
         supportsImageInput: Bool,
         globalInstruction: String = "",
-        conversationInstruction: String = ""
+        conversationInstruction: String = "",
+        memoryContext: String? = nil
     ) async {
         var currentPlaceholder = initialPlaceholder
         defer {
@@ -1924,6 +1994,7 @@ final class ChatViewModel {
                 to: history,
                 ambientPreamble: ambientPreamble,
                 dateContext: ChatViewModel.currentDateTimeContext(),
+                memoryContext: memoryContext,
                 global: globalInstruction,
                 conversation: conversationInstruction
             )
@@ -2333,6 +2404,7 @@ final class ChatViewModel {
         to messages: [ChatMessage],
         ambientPreamble: String?,
         dateContext: String? = nil,
+        memoryContext: String? = nil,
         global: String,
         conversation: String
     ) -> [ChatMessage] {
@@ -2344,6 +2416,9 @@ final class ChatViewModel {
         // rides below it because it is valid regardless of tool presence.
         var parts = [ambientPreamble, dateContext, existing]
             .compactMap { $0.flatMap(normalizedInstruction) }
+        if let memoryContext, let memory = normalizedInstruction(memoryContext) {
+            parts.append(memory)
+        }
         if let global = normalizedInstruction(global) {
             parts.append("""
             [GLOBAL USER INSTRUCTIONS]
@@ -2372,6 +2447,7 @@ final class ChatViewModel {
     /// automatic context cannot drift from what Rapid sends.
     nonisolated static func effectiveSystemPrompt(
         dateContext: String? = nil,
+        memoryContext: String? = nil,
         global: String,
         conversation: String
     ) -> String {
@@ -2379,6 +2455,7 @@ final class ChatViewModel {
             to: [],
             ambientPreamble: nil,
             dateContext: dateContext ?? currentDateTimeContext(),
+            memoryContext: memoryContext,
             global: global,
             conversation: conversation
         ).first?.content ?? ""
