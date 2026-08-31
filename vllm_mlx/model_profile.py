@@ -29,7 +29,7 @@ also avoids an import cycle: ``model_auto_config`` already imports
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 # NOTE: deliberately NO ``from __future__ import annotations`` here. The
 # out-of-band-routing guard (tests/test_no_out_of_band_routing.py) inspects
@@ -56,6 +56,8 @@ from typing import Literal
 # in cli.py / routes/models.py so the surface-level UX (info, ls, chat)
 # doesn't silently expose LLM-only columns on a non-LLM alias.
 Modality = Literal["text", "text-diffusion", "vision", "image-gen", "video-gen"]
+VideoGenerationMode = Literal["text-to-video", "image-to-video"]
+VIDEO_GENERATION_MODES: tuple[VideoGenerationMode, ...] = get_args(VideoGenerationMode)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -214,6 +216,11 @@ class ModelProfile:
     # → ``runtime/video_lane.py``; ``"vision"`` reserved for an upcoming
     # VLM integration.
     modality: Modality = "text"
+    # Operations this checkpoint can perform before it is downloaded or
+    # served. Live shape/control limits still come from
+    # ``GET /v1/videos/capabilities`` because they may depend on checkpoint
+    # metadata. ``None`` is required for every non-video modality.
+    video_modes: tuple[VideoGenerationMode, ...] | None = None
     # PFlash long-prompt compression eligibility (#287). Default
     # ``"unknown"`` keeps the engine's PFlash mode at ``"off"`` so a
     # brand-new alias never silently enables compression on an

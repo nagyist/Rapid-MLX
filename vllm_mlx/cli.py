@@ -6275,6 +6275,8 @@ def _available_models_json_payload() -> dict:
             "mtp_draft_model": getattr(p, "mtp_draft_model", None),
             "mtp_speculative_tokens": getattr(p, "mtp_speculative_tokens", None),
             "modality": _modality(p),
+            "video_modes": list(p.video_modes or ()),
+            "min_memory_gb": p.min_memory_gb,
             # Desktop consumes these as a launch-safety contract. Only
             # curated aliases may opt into eager MLLM loading, and an
             # explicit text-only pin always wins over name inference.

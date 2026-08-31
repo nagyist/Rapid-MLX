@@ -14,8 +14,14 @@ that entry just gets default capability flags.
 import difflib
 import json
 import os
+from typing import cast
 
-from .model_profile import Modality, ModelProfile
+from .model_profile import (
+    VIDEO_GENERATION_MODES,
+    Modality,
+    ModelProfile,
+    VideoGenerationMode,
+)
 
 # ``Modality`` and the unified ``ModelProfile`` dataclass live in the
 # import-light ``model_profile`` module — the single source of truth for
@@ -156,6 +162,7 @@ def _coerce(alias: str, value: object) -> AliasProfile:
             # ``hf_path``.
             "subfolder",
             "modality",
+            "video_modes",
             # State-pin (parallel to ``is_hybrid`` / ``is_moe``): serve
             # this checkpoint through the text mlx-lm lane even though its
             # config declares a vision tower. server.load_model translates
@@ -480,6 +487,31 @@ def _coerce(alias: str, value: object) -> AliasProfile:
             f"{sorted(_VALID_MODALITIES)}, got {raw_modality!r}"
         )
     modality: Modality = raw_modality  # type: ignore[assignment]
+    raw_video_modes = value.get("video_modes")
+    video_modes: tuple[VideoGenerationMode, ...] | None = None
+    if raw_video_modes is not None:
+        if not isinstance(raw_video_modes, list) or not raw_video_modes:
+            raise ValueError(f"alias {alias!r}: video_modes must be a non-empty list")
+        if any(
+            not isinstance(mode, str) or mode not in VIDEO_GENERATION_MODES
+            for mode in raw_video_modes
+        ):
+            raise ValueError(
+                f"alias {alias!r}: video_modes entries must be one of "
+                f"{list(VIDEO_GENERATION_MODES)}, got {raw_video_modes!r}"
+            )
+        if len(raw_video_modes) != len(set(raw_video_modes)):
+            raise ValueError(
+                f"alias {alias!r}: video_modes must not contain duplicates"
+            )
+        video_modes = cast(tuple[VideoGenerationMode, ...], tuple(raw_video_modes))
+    if modality == "video-gen" and video_modes is None:
+        raise ValueError(f"alias {alias!r}: modality='video-gen' requires video_modes")
+    if modality != "video-gen" and video_modes is not None:
+        raise ValueError(
+            f"alias {alias!r}: video_modes is only valid when "
+            f"modality='video-gen', got modality={modality!r}"
+        )
     # ``is_text_only`` — state-pin that serves a vision-config checkpoint
     # through the AR text mlx-lm lane (translated to the ``force_text``
     # routing kwarg in server.load_model). Only meaningful on the ``text``
@@ -576,6 +608,7 @@ def _coerce(alias: str, value: object) -> AliasProfile:
         hf_path=hf_path,
         subfolder=subfolder,
         modality=modality,
+        video_modes=video_modes,
         is_text_only=is_text_only,
         tool_call_parser=value.get("tool_call_parser"),
         reasoning_parser=value.get("reasoning_parser"),

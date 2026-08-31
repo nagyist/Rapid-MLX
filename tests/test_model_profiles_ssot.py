@@ -70,6 +70,22 @@ def test_every_alias_has_explicit_profile_fields() -> None:
         assert isinstance(value["supports_spec_decode"], bool)
 
 
+def test_video_aliases_declare_valid_generation_modes() -> None:
+    with open(ALIASES_PATH) as f:
+        raw = json.load(f)
+    allowed = {"text-to-video", "image-to-video"}
+    for alias, value in raw.items():
+        modes = value.get("video_modes")
+        if value.get("modality") == "video-gen":
+            assert isinstance(modes, list) and modes, (
+                f"{alias!r}: video aliases require at least one video mode"
+            )
+            assert set(modes) <= allowed
+            assert len(modes) == len(set(modes))
+        else:
+            assert modes is None, f"{alias!r}: non-video alias declares video modes"
+
+
 def test_no_orphan_aliases() -> None:
     """Every advertised alias must resolve to an explicit profile."""
     aliases = list_aliases()
@@ -315,6 +331,63 @@ def test_invalid_value_raises_with_alias_name(tmp_path) -> None:
         patch.object(ma, "_hf_to_alias", None),
         patch("vllm_mlx.model_aliases.os.path.join", return_value=str(bad)),
         pytest.raises(ValueError, match="foo"),
+    ):
+        ma.list_profiles()
+
+
+@pytest.mark.parametrize(
+    "profile,message",
+    [
+        ({"hf_path": "org/video", "modality": "video-gen"}, "requires video_modes"),
+        (
+            {
+                "hf_path": "org/video",
+                "modality": "video-gen",
+                "video_modes": [],
+            },
+            "must be a non-empty list",
+        ),
+        (
+            {
+                "hf_path": "org/video",
+                "modality": "video-gen",
+                "video_modes": "text-to-video",
+            },
+            "must be a non-empty list",
+        ),
+        (
+            {
+                "hf_path": "org/video",
+                "modality": "video-gen",
+                "video_modes": ["video-to-video"],
+            },
+            "entries must be one of",
+        ),
+        (
+            {
+                "hf_path": "org/video",
+                "modality": "video-gen",
+                "video_modes": ["text-to-video", "text-to-video"],
+            },
+            "must not contain duplicates",
+        ),
+        (
+            {"hf_path": "org/text", "video_modes": ["text-to-video"]},
+            "only valid",
+        ),
+    ],
+)
+def test_invalid_video_modes_fail_at_registry_load(tmp_path, profile, message) -> None:
+    bad = tmp_path / "aliases.json"
+    bad.write_text(json.dumps({"bad-video": profile}))
+
+    import vllm_mlx.model_aliases as ma
+
+    with (
+        patch.object(ma, "_aliases", None),
+        patch.object(ma, "_hf_to_alias", None),
+        patch("vllm_mlx.model_aliases.os.path.join", return_value=str(bad)),
+        pytest.raises(ValueError, match=message),
     ):
         ma.list_profiles()
 

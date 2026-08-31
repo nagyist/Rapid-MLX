@@ -4,7 +4,67 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm_mlx.model_aliases import resolve_profile
 from vllm_mlx.routes import video
+
+
+@pytest.mark.parametrize(
+    "alias,engine",
+    [
+        (
+            "cogvideox-fun-5b-q4",
+            SimpleNamespace(video_family="cogvideox-fun"),
+        ),
+        (
+            "cogvideox-fun-5b-q8",
+            SimpleNamespace(video_family="cogvideox-fun"),
+        ),
+        (
+            "cogvideox-fun-5b-bf16",
+            SimpleNamespace(video_family="cogvideox-fun"),
+        ),
+        (
+            "wan2.2-ti2v-5b-q8",
+            SimpleNamespace(
+                video_family="wan",
+                native_fps=24,
+                _wan_engine=SimpleNamespace(model_type="ti2v", max_area=None),
+            ),
+        ),
+        (
+            "wan2.2-ti2v-5b-bf16",
+            SimpleNamespace(
+                video_family="wan",
+                native_fps=24,
+                _wan_engine=SimpleNamespace(model_type="ti2v", max_area=None),
+            ),
+        ),
+        (
+            "wan2.2-i2v-a14b-q8",
+            SimpleNamespace(
+                video_family="wan",
+                native_fps=24,
+                _wan_engine=SimpleNamespace(model_type="i2v", max_area=None),
+            ),
+        ),
+        (
+            "wan2.2-t2v-a14b-bf16",
+            SimpleNamespace(
+                video_family="wan",
+                native_fps=24,
+                _wan_engine=SimpleNamespace(model_type="t2v", max_area=None),
+            ),
+        ),
+        ("ltx-2.3-mlx-q4", SimpleNamespace(video_family="ltx-2.3")),
+        ("ltx-2.5-mlx-q8", SimpleNamespace(video_family="ltx-2.5")),
+    ],
+)
+def test_builtin_pre_serve_modes_match_live_capabilities(alias, engine) -> None:
+    profile = resolve_profile(alias)
+    assert profile is not None
+    engine.model_name = profile.hf_path
+
+    assert list(profile.video_modes or ()) == video._video_capabilities(engine)["modes"]
 
 
 @pytest.mark.asyncio
