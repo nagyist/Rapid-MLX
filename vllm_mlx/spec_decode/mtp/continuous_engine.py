@@ -567,11 +567,12 @@ def propose_batched_self_mtp(batch: BatchedSelfMTPState) -> SelfMTPCycleResult:
         raise ValueError("cannot propose on an empty self-MTP batch")
     computation: CycleComputation | None = None
     try:
-        computation = batch._runtime.compute.propose(
+        candidate = batch._runtime.compute.propose(
             batch.lanes, batch.caches, batch._runtime.forwards
         )
-        if not isinstance(computation, CycleComputation):
+        if not isinstance(candidate, CycleComputation):
             raise TypeError("compute.propose must return CycleComputation")
+        computation = candidate
         _validate_computation(batch, computation)
         verify_width = max(depth + 1 for depth in computation.draft_depths)
         batch._runtime.caches.rollback(
@@ -634,8 +635,6 @@ def commit_batched_self_mtp(
             raise ValueError(f"lane {row} emitted_count {count} is out of range")
         if not is_terminal and count != len(outputs):
             raise ValueError("a nonterminal lane must consume its entire proposal")
-        if is_terminal and count < len(outputs) and count > accepted:
-            raise ValueError("a terminal prefix cannot split the target bonus token")
         delivery_drops.append(
             accepted - count + 1 if is_terminal and count <= accepted else 0
         )

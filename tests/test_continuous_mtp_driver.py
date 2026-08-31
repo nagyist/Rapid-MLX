@@ -7,6 +7,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 MTP_DIR = Path(__file__).parents[1] / "vllm_mlx" / "spec_decode" / "mtp"
 PACKAGE = "_continuous_mtp_driver_probe"
 package = types.ModuleType(PACKAGE)
@@ -336,3 +338,119 @@ def test_fixed_remove_turns_over_companion_without_transferring_its_ownership():
     compute.queued_outputs.append([(_target(211),)])
     assert _triples(batch_driver.next()) == [(2, 211, None)]
     assert not any(call == ("prepare", 2) for call in compute.calls[2:])
+
+
+def test_driver_construction_resume_and_inspection_contracts():
+    runtime, _compute, _caches = _runtime()
+    with pytest.raises(TypeError, match="batch"):
+        driver.ContinuousMTPDriver(object())
+    batch = generation.ContinuousMTPGenerationBatch.create([_spec(1)], runtime)
+    with pytest.raises(TypeError, match="response_factory"):
+        driver.ContinuousMTPDriver(batch, response_factory=object())
+
+    batch_driver = driver.ContinuousMTPDriver(batch)
+    assert batch_driver.batch is batch
+    assert batch_driver.last_burst is None
+    assert batch_driver.has_work is True
+    batch_driver.next()
+    package = batch_driver.detach_all()[0]
+    assert batch_driver.lane_uids == ()
+    resumed = driver.ContinuousMTPDriver.resume([package])
+    assert resumed.lane_uids == (1,)
+
+
+def test_queue_validation_and_closed_driver_guards():
+    runtime, _compute, _caches = _runtime()
+    batch_driver = driver.ContinuousMTPDriver.create([_spec(1)], runtime)
+    assert batch_driver.queue_lanes([]) == ()
+    with pytest.raises(ValueError, match="unique"):
+        batch_driver.queue_lanes([_spec(2), _spec(2)])
+    batch_driver.queue_lanes([_spec(2)])
+    with pytest.raises(ValueError, match="occupied"):
+        batch_driver.queue_lanes([_spec(2)])
+    with pytest.raises(ValueError, match="unknown queued"):
+        batch_driver.queue_lanes([_spec(3)], stop_tokens={4: {400}})
+
+    batch_driver.next()
+    batch_driver.detach_all()
+    with pytest.raises(driver.ContinuousMTPDriverError, match="detached"):
+        batch_driver.queue_lanes([_spec(3)])
+
+    fixed_runtime, _compute, _caches = _runtime(dynamic=False)
+    fixed = driver.ContinuousMTPDriver.create([_spec(1)], fixed_runtime)
+    with pytest.raises(engine.ContinuousSelfMTPUnsupportedError, match="dynamic"):
+        fixed.queue_lanes([_spec(2)])
+
+
+def test_driver_invariant_guards_for_delivery_and_detach():
+    runtime, compute, _caches = _runtime()
+    batch_driver = driver.ContinuousMTPDriver.create([_spec(1)], runtime)
+    batch_driver.next()
+    compute.queued_outputs.append([(_draft(111), _target(112))])
+    batch_driver.next()
+
+    with pytest.raises(driver.ContinuousMTPDriverError, match="before delivery drains"):
+        batch_driver.detach_all()
+    with pytest.raises(driver.ContinuousMTPDriverError, match="before delivery drains"):
+        batch_driver._queue_burst(batch_driver.last_burst)
+
+    empty = generation.ContinuousMTPGenerationBurst(
+        emissions=(generation.ContinuousMTPLaneEmission(uid=9, tokens=()),),
+        emitted_counts=(0,),
+        initial=False,
+    )
+    other = driver.ContinuousMTPDriver.create([_spec(2)], runtime)
+    other.next()
+    other.detach_all()
+    with pytest.raises(driver.ContinuousMTPDriverError, match="empty burst"):
+        other._queue_burst(empty)
+
+    orphan = driver.ContinuousMTPDriver.create([_spec(3)], runtime)
+    orphan._delivery_order = (3,)
+    orphan._delivery_queues[3] = driver.deque(
+        [driver._QueuedToken(3, 300, None, False, "stop")]
+    )
+    with pytest.raises(driver.ContinuousMTPDriverError, match="no retained"):
+        orphan._drain_one_per_uid()
+
+
+def test_remove_covers_staged_held_and_empty_paths():
+    runtime, compute, _caches = _runtime()
+    batch_driver = driver.ContinuousMTPDriver.create([_spec(1)], runtime)
+    assert batch_driver.remove_uids([]) == ()
+    batch_driver.queue_lanes([_spec(2), _spec(3)], stop_tokens={2: {202}})
+    batch_driver.remove_uids([2])
+    assert batch_driver.pending_join_uids == (3,)
+    batch_driver.remove_uids([3])
+
+    batch_driver.next()
+    compute.queued_outputs.append([(_draft(111), _target(112))])
+    batch_driver.next()
+    package = batch_driver._batch.detach_lanes([1])[0]
+    batch_driver._held_detaches[1] = package
+    removed = batch_driver.remove_uids([1])
+    assert removed == (package,)
+
+
+def test_turnover_validation_empty_and_deduplicated_recording():
+    runtime, compute, _caches = _runtime(dynamic=False)
+    batch_driver = driver.ContinuousMTPDriver.create([_spec(1), _spec(2)], runtime)
+    with pytest.raises(driver.ContinuousMTPDriverError, match="detached cohort"):
+        batch_driver.resume_turnover()
+
+    batch_driver.next()
+    compute.queued_outputs.append(
+        [(_draft(111), _target(112)), (_draft(211), _target(212))]
+    )
+    batch_driver.next()
+    batch_driver.remove_uids([1])
+    with pytest.raises(driver.ContinuousMTPDriverError, match="before delivery drains"):
+        batch_driver.resume_turnover()
+    batch_driver.next()
+    packages = batch_driver.take_resumable_detaches()
+    assert [package.uid for package in packages] == [2]
+    assert batch_driver.resume_turnover() == ()
+
+    package = packages[0]
+    batch_driver._record_detaches((package, package))
+    assert batch_driver.take_resumable_detaches() == (package,)

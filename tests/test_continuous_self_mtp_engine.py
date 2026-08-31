@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -162,11 +163,12 @@ def _runtime(*, config=None, capabilities=None):
 
 
 def _prepare(runtime, uid, **spec_kwargs):
+    num_draft = spec_kwargs.pop("num_draft", 2)
     spec = engine.SelfMTPLaneSpec(
         uid=uid,
         prompt=(uid, uid + 1),
         max_tokens=20,
-        num_draft=2,
+        num_draft=num_draft,
         **spec_kwargs,
     )
     return engine.prepare_self_mtp_lane(spec, runtime)
@@ -436,3 +438,293 @@ def test_commit_rejects_coercible_vector_values(emitted, terminal, message):
         )
     assert batch.proposal_open is True
     assert [lane.ntoks for lane in batch.lanes] == [1, 1]
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: engine.ContinuousSelfMTPConfig(enabled=1),
+        lambda: engine.ContinuousSelfMTPConfig(allow_dynamic_membership="yes"),
+        lambda: engine.ContinuousSelfMTPConfig(architecture=""),
+        lambda: engine.ContinuousSelfMTPConfig(architecture=None),
+        lambda: engine.RapidForwardSeams(None, lambda *args: None),
+        lambda: engine.RapidForwardSeams(lambda *args: None, None),
+        lambda: engine.SelfMTPSampling(temperature=True),
+        lambda: engine.SelfMTPSampling(temperature="hot"),
+        lambda: engine.SelfMTPSampling(temperature=-0.1),
+        lambda: engine.SelfMTPSampling(has_logits_processors=1),
+        lambda: engine.SelfMTPSampling(uses_xtc="yes"),
+        lambda: engine.SelfMTPLaneSpec(True, (), 1),
+        lambda: engine.SelfMTPLaneSpec("1", (), 1),
+        lambda: engine.SelfMTPLaneSpec(1, (), 0),
+        lambda: engine.SelfMTPLaneSpec(1, (), 1, num_draft=True),
+        lambda: engine.MTPToken(True, None, False),
+        lambda: engine.MTPToken("1", None, False),
+        lambda: engine.MTPToken(1, None, 0),
+    ],
+)
+def test_value_objects_reject_invalid_contract_values(factory):
+    with pytest.raises((TypeError, ValueError)):
+        factory()
+
+
+@pytest.mark.parametrize("n_confirmed", [True, 1.5, "1", -1])
+def test_forward_seam_rejects_invalid_confirmed_count(n_confirmed):
+    seams = engine.RapidForwardSeams(lambda *args, **kwargs: None, lambda *args: None)
+    with pytest.raises(ValueError):
+        seams.target([], None, n_confirmed=n_confirmed)
+
+
+def test_missing_core_and_sampling_capabilities_fail_closed():
+    runtime, _compute, _caches, _calls = _runtime(
+        capabilities=engine.ContinuousSelfMTPCapabilities()
+    )
+    with pytest.raises(engine.ContinuousSelfMTPUnsupportedError, match="missing"):
+        _prepare(runtime, 1)
+
+    runtime, _compute, _caches, _calls = _runtime(
+        capabilities=_capabilities(per_lane_rng=True)
+    )
+    with pytest.raises(engine.ContinuousSelfMTPUnsupportedError, match="verification"):
+        _prepare(
+            runtime,
+            1,
+            sampling=engine.SelfMTPSampling(temperature=0.7),
+        )
+
+    runtime, _compute, _caches, _calls = _runtime()
+    with pytest.raises(engine.ContinuousSelfMTPUnsupportedError, match="processors"):
+        _prepare(
+            runtime,
+            1,
+            sampling=engine.SelfMTPSampling(has_logits_processors=True),
+        )
+
+
+def test_prepare_rejects_foreign_or_inconsistent_backend_result():
+    runtime, compute, _caches, _calls = _runtime()
+    compute.prepare = lambda *args: object()
+    with pytest.raises(TypeError, match="PreparedLaneData"):
+        _prepare(runtime, 1)
+
+    runtime, compute, _caches, _calls = _runtime()
+    original = compute.prepare
+    compute.prepare = lambda *args: replace(
+        original(*args),
+        first_token=engine.MTPToken(101, None, True),
+    )
+    with pytest.raises(engine.ContinuousSelfMTPError, match="cannot be a draft"):
+        _prepare(runtime, 1)
+
+    runtime, compute, _caches, _calls = _runtime()
+    original = compute.prepare
+    compute.prepare = lambda *args: replace(original(*args), cur=999)
+    with pytest.raises(engine.ContinuousSelfMTPError, match="disagree"):
+        _prepare(runtime, 1)
+
+
+def test_attach_rejects_invalid_membership_boundaries():
+    runtime, _compute, _caches, _calls = _runtime()
+    with pytest.raises(ValueError, match="empty"):
+        engine.attach_self_mtp_lanes(None, [], runtime=runtime)
+
+    lane1, _ = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane1])
+    assert engine.attach_self_mtp_lanes(batch, []) is batch
+    batch.proposal_open = True
+    with pytest.raises(engine.ContinuousSelfMTPError, match="proposal is open"):
+        engine.attach_self_mtp_lanes(batch, [])
+    batch.proposal_open = False
+
+    other_runtime, _compute, _caches, _calls = _runtime()
+    foreign, _ = _prepare(other_runtime, 2)
+    with pytest.raises(engine.ContinuousSelfMTPError, match="one runtime"):
+        engine.attach_self_mtp_lanes(None, [lane1, foreign], runtime=runtime)
+
+    duplicate, _ = _prepare(runtime, 1)
+    with pytest.raises(ValueError, match="unique"):
+        engine.attach_self_mtp_lanes(None, [lane1, duplicate])
+
+    different_depth, _ = _prepare(runtime, 3, num_draft=1)
+    with pytest.raises(ValueError, match="draft depth"):
+        engine.attach_self_mtp_lanes(None, [lane1, different_depth])
+
+
+def test_dynamic_capability_and_missing_abort_fail_closed():
+    default_runtime, _compute, _caches, _calls = _runtime()
+    assert engine.supports_dynamic_membership(default_runtime) is False
+
+    config = engine.ContinuousSelfMTPConfig(enabled=True, allow_dynamic_membership=True)
+    runtime, compute, _caches, _calls = _runtime(
+        config=config,
+        capabilities=_capabilities(dynamic_membership=False),
+    )
+    first, _ = _prepare(runtime, 1)
+    second, _ = _prepare(runtime, 2)
+    batch = engine.attach_self_mtp_lanes(None, [first])
+    assert engine.supports_dynamic_membership(runtime) is False
+    with pytest.raises(engine.ContinuousSelfMTPUnsupportedError, match="capability"):
+        engine.attach_self_mtp_lanes(batch, [second])
+
+    flash_runtime, _compute, _caches, _calls = _runtime(
+        config=engine.ContinuousSelfMTPConfig(
+            enabled=True,
+            allow_dynamic_membership=True,
+            architecture="flash",
+        ),
+        capabilities=_capabilities(dynamic_membership=True),
+    )
+    assert engine.supports_dynamic_membership(flash_runtime) is False
+
+    dense_runtime, _compute, _caches, _calls = _runtime(
+        config=config,
+        capabilities=_capabilities(dynamic_membership=True),
+    )
+    assert engine.supports_dynamic_membership(dense_runtime) is True
+
+    compute.abort = None
+    compute.propose = lambda *args: (_ for _ in ()).throw(RuntimeError("failed"))
+    with pytest.raises(engine.ContinuousSelfMTPError, match="no abort"):
+        engine.propose_batched_self_mtp(batch)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"lane_uids": (999,)}, "lane order"),
+        ({"accepted_lengths": ()}, "lane count"),
+        ({"draft_depths": (True,)}, "non-integer"),
+        ({"accepted_lengths": (-1,)}, "invalid acceptance"),
+        ({"accepted_lengths": (3,)}, "invalid acceptance"),
+        (
+            {
+                "draft_depths": (20,),
+                "accepted_lengths": (1,),
+                "target_drops": (19,),
+                "draft_drops": (20,),
+            },
+            "remaining draft budget",
+        ),
+        ({"target_drops": (0,)}, "rollback is inconsistent"),
+        ({"outputs": ((),)}, "accepted drafts plus one"),
+        ({"outputs": ((object(), object()),)}, "invalid token"),
+        (
+            {
+                "outputs": (
+                    (engine.MTPToken(1, None, False), engine.MTPToken(2, None, False)),
+                )
+            },
+            "not marked as a draft",
+        ),
+        (
+            {
+                "outputs": (
+                    (engine.MTPToken(1, None, True), engine.MTPToken(2, None, True)),
+                )
+            },
+            "final target token",
+        ),
+    ],
+)
+def test_proposal_validation_aborts_malformed_computation(changes, message):
+    runtime, compute, _caches, _calls = _runtime()
+    lane, _ = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+    valid = compute.propose(batch.lanes, batch.caches, runtime.forwards)
+    compute.propose = lambda *args: replace(valid, **changes)
+
+    with pytest.raises(engine.ContinuousSelfMTPError, match=message):
+        engine.propose_batched_self_mtp(batch)
+    assert compute.calls[-1][0] == "abort"
+
+
+def test_propose_rejects_open_empty_and_foreign_results():
+    runtime, compute, _caches, _calls = _runtime()
+    lane, _ = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+    proposal = engine.propose_batched_self_mtp(batch)
+    with pytest.raises(engine.ContinuousSelfMTPError, match="already open"):
+        engine.propose_batched_self_mtp(batch)
+    engine.abort_batched_self_mtp(batch, proposal)
+
+    batch.lanes = []
+    with pytest.raises(ValueError, match="empty"):
+        engine.propose_batched_self_mtp(batch)
+    batch.lanes = [lane.lane]
+    compute.propose = lambda *args: object()
+    with pytest.raises(TypeError, match="CycleComputation"):
+        engine.propose_batched_self_mtp(batch)
+
+
+def test_commit_and_detach_reject_invalid_transaction_boundaries():
+    runtime, _compute, caches, _calls = _runtime()
+    lane, _ = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+    proposal = engine.propose_batched_self_mtp(batch)
+
+    foreign = replace(proposal)
+    with pytest.raises(engine.ContinuousSelfMTPError, match="currently open"):
+        engine.commit_batched_self_mtp(
+            batch, foreign, emitted_counts=[2], terminal=[False]
+        )
+    with pytest.raises(engine.ContinuousSelfMTPError, match="currently open"):
+        engine.abort_batched_self_mtp(batch, foreign)
+
+    proposal_epoch = proposal.membership_epoch
+    object.__setattr__(proposal, "membership_epoch", proposal_epoch + 1)
+    with pytest.raises(engine.ContinuousSelfMTPError, match="membership changed"):
+        engine.commit_batched_self_mtp(
+            batch, proposal, emitted_counts=[2], terminal=[False]
+        )
+    object.__setattr__(proposal, "membership_epoch", proposal_epoch)
+
+    original_uids = proposal.lane_uids
+    object.__setattr__(proposal, "lane_uids", (999,))
+    with pytest.raises(engine.ContinuousSelfMTPError, match="lane order changed"):
+        engine.commit_batched_self_mtp(
+            batch, proposal, emitted_counts=[2], terminal=[False]
+        )
+    object.__setattr__(proposal, "lane_uids", original_uids)
+
+    for emitted, terminal, message in [
+        ([], [False], "one entry"),
+        ([2], [], "one entry"),
+        ([-1], [True], "out of range"),
+        ([3], [True], "out of range"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            engine.commit_batched_self_mtp(
+                batch, proposal, emitted_counts=emitted, terminal=terminal
+            )
+
+    engine.abort_batched_self_mtp(batch, proposal)
+    for indices, exception, message in [
+        ([0, 0], ValueError, "unique"),
+        ([-1], IndexError, "outside"),
+        ([2], IndexError, "outside"),
+    ]:
+        with pytest.raises(exception, match=message):
+            engine.detach_self_mtp_lanes(batch, indices)
+    assert engine.detach_self_mtp_lanes(batch, []) == (batch, [])
+
+    original_detach = caches.detach
+    caches.detach = lambda *args: (batch.caches, [])
+    with pytest.raises(engine.ContinuousSelfMTPError, match="wrong detached"):
+        engine.detach_self_mtp_lanes(batch, [0])
+    caches.detach = original_detach
+
+
+def test_terminal_commit_rolls_back_undelivered_target_prefix():
+    runtime, _compute, caches, _calls = _runtime()
+    lane, _ = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+    proposal = engine.propose_batched_self_mtp(batch)
+
+    engine.commit_batched_self_mtp(
+        batch,
+        proposal,
+        emitted_counts=[1],
+        terminal=[True],
+    )
+
+    assert caches.calls[-1] == ("rollback", (1,), (0,), 3)
