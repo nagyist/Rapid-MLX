@@ -363,6 +363,8 @@ def test_inconclusive_metadata_preflight_defers_runtime_rejection(monkeypatch):
 
 
 def test_routing_metadata_prefetch_excludes_weight_shards(monkeypatch):
+    from types import SimpleNamespace
+
     from vllm_mlx import server
 
     calls = []
@@ -372,6 +374,10 @@ def test_routing_metadata_prefetch_excludes_weight_shards(monkeypatch):
     )
     monkeypatch.setattr(
         "vllm_mlx.model_aliases.resolve_subfolder", lambda _name: "4bit"
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.model_info",
+        lambda _repo: SimpleNamespace(sha="abc123"),
     )
     monkeypatch.setattr(
         "huggingface_hub.snapshot_download",
@@ -385,13 +391,69 @@ def test_routing_metadata_prefetch_excludes_weight_shards(monkeypatch):
         (
             "publisher/multi-variant",
             {
+                "revision": "abc123",
                 "allow_patterns": [
                     "4bit/config.json",
                     "4bit/model.safetensors.index.json",
-                ]
+                ],
             },
         )
     ]
+
+
+def test_routing_metadata_prefetch_preserves_external_local_model(
+    tmp_path, monkeypatch
+):
+    from vllm_mlx import server
+
+    external = tmp_path / "publisher" / "model"
+    external.mkdir(parents=True)
+    monkeypatch.setattr(
+        "vllm_mlx.model_aliases.resolve_model", lambda _name: str(external)
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local external model must not reach the Hub")
+        ),
+    )
+
+    assert server._prefetch_routing_metadata("publisher/model") == str(external)
+
+
+def test_speculative_decode_skips_vision_runtime_preflight(monkeypatch):
+    from vllm_mlx import server
+    from vllm_mlx.api.utils import ServingLaneDecision
+
+    monkeypatch.setattr(
+        server,
+        "_prefetch_routing_metadata",
+        lambda _name: (_ for _ in ()).throw(
+            AssertionError("speculative decode selects the text lane")
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.utils.tokenizer._resolve_subfolder_checkpoint",
+        lambda name: name,
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.model_metadata.read_model_metadata", lambda _name: None
+    )
+    monkeypatch.setattr(
+        server,
+        "resolve_serving_lane_decision",
+        lambda *_args, **_kwargs: ServingLaneDecision(
+            False, "text_lane_speculative_decode", auto_text_fallback=True
+        ),
+    )
+
+    resolved = server._resolve_serving_checkpoint(
+        "publisher/vision-model",
+        force_mllm=True,
+        requested_spec_decode="mtp",
+    )
+
+    assert resolved.is_mllm is False
 
 
 def test_load_model_threads_saved_cli_alias_into_checkpoint_resolution(monkeypatch):

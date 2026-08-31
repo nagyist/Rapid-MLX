@@ -1732,18 +1732,37 @@ def _prefetch_routing_metadata(model_name: str) -> str:
     if os.path.exists(model_name):
         return model_name
 
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import model_info, snapshot_download
 
-    from ._download_gate import _escape_variant_glob_literal, pulled_variant
+    from ._download_gate import (
+        _HF_RESOLVE_TIMEOUT_SECONDS,
+        _escape_variant_glob_literal,
+        call_with_deadline,
+        pulled_variant,
+    )
     from .model_aliases import resolve_model, resolve_subfolder
 
     repo_id = resolve_model(model_name)
+    # External-model roots resolve a Hub-shaped display name to a local path.
+    # Preserve that supported in-place load instead of handing the path back to
+    # huggingface_hub as though it were a repository identifier.
+    if os.path.exists(repo_id):
+        return repo_id
     catalog_subfolder = resolve_subfolder(model_name)
     explicit_subfolder = catalog_subfolder if model_name != repo_id else None
     subfolder = explicit_subfolder or pulled_variant(repo_id) or catalog_subfolder
     prefix = f"{_escape_variant_glob_literal(subfolder)}/" if subfolder else ""
+    info = call_with_deadline(
+        model_info,
+        _HF_RESOLVE_TIMEOUT_SECONDS,
+        repo_id,
+    )
+    revision = getattr(info, "sha", None)
+    if not revision:
+        raise RuntimeError("HuggingFace metadata did not include a revision")
     snapshot = snapshot_download(
         repo_id,
+        revision=revision,
         allow_patterns=[
             f"{prefix}config.json",
             f"{prefix}model.safetensors.index.json",
@@ -1776,7 +1795,7 @@ def _resolve_serving_checkpoint(
     # vision runtime before the subfolder resolver or normal prefetch can pull
     # model tensors. The final decision below is repeated after the complete
     # checkpoint materializes so single-file weight evidence remains exact.
-    if not force_text:
+    if not force_text and requested_spec_decode in (None, "none"):
         if force_mllm:
             preflight_is_mllm = True
             preflight_path = model_path
