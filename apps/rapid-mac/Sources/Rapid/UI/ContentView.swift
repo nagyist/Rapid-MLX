@@ -934,6 +934,7 @@ struct ContentView: View {
                 server: server,
                 downloads: downloads,
                 alias: $alias,
+                knownNonChatAliases: knownNonChatAliases,
                 readiness: readiness,
                 onReadinessAction: performReadinessAction
             )
