@@ -559,6 +559,7 @@ async def test_shutdown_does_not_wait_for_blocked_metadata_persistence(
     video.start_video_jobs()
     persistence_started = threading.Event()
     release_persistence = threading.Event()
+    persist_completed_job = video._persist_completed_job
 
     class FakeEngine:
         model_name = "notapalindrome/ltx23-mlx-av-q4"
@@ -569,6 +570,7 @@ async def test_shutdown_does_not_wait_for_blocked_metadata_persistence(
     def block_persist(job) -> None:
         persistence_started.set()
         release_persistence.wait(timeout=5)
+        persist_completed_job(job)
 
     monkeypatch.setattr(video, "_video_engine", lambda: FakeEngine())
     monkeypatch.setattr(video, "_persist_completed_job", block_persist)
@@ -585,6 +587,21 @@ async def test_shutdown_does_not_wait_for_blocked_metadata_persistence(
         assert await asyncio.to_thread(persistence_started.wait, 1)
         await asyncio.wait_for(video.shutdown_video_jobs(timeout=0), timeout=0.5)
         assert (await video.retrieve_video(created["id"]))["status"] == "completed"
+        video.start_video_jobs()
+        assert created["id"] not in video._jobs
+        oldest_id = "video_" + f"{0:032x}"
+        for index in range(video._MAX_JOBS):
+            restored = _completed_job("video_" + f"{index:032x}", created_at=index)
+            video._jobs[restored.id] = restored
+        release_persistence.set()
+        for _ in range(100):
+            if not video._persistence_threads and created["id"] in video._jobs:
+                break
+            await asyncio.sleep(0.01)
+        assert (await video.retrieve_video(created["id"]))["status"] == "completed"
+        assert (video._jobs_root / created["id"] / "job.json").is_file()
+        assert len(video._jobs) == video._MAX_JOBS
+        assert oldest_id not in video._jobs
     finally:
         release_persistence.set()
         for _ in range(100):

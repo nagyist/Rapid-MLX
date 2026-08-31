@@ -548,6 +548,7 @@ async def _persist_completed_job_in_daemon_thread(job: _VideoJob) -> None:
     """
     loop = asyncio.get_running_loop()
     completed = loop.create_future()
+    store_root = _jobs_root
 
     def finish(result: BaseException | None) -> None:
         if completed.done():  # pragma: no cover - defensive duplicate callback
@@ -570,6 +571,27 @@ async def _persist_completed_job_in_daemon_thread(job: _VideoJob) -> None:
         finally:
             with _jobs_lock:
                 _persistence_threads.discard(thread)
+        expired_id: str | None = None
+        if result is None:
+            with _jobs_lock:
+                if (
+                    _jobs_are_persistent
+                    and _jobs_root == store_root
+                    and _accepting_jobs
+                ):
+                    # A new lifespan may have scanned while this detached write
+                    # was still blocked. Register the now-durable result into
+                    # that current registry instead of requiring another
+                    # process restart to discover it.
+                    _jobs[job.id] = replace(job)
+                    if len(_jobs) > _MAX_JOBS:
+                        oldest = min(
+                            _jobs.values(), key=lambda item: (item.created_at, item.id)
+                        )
+                        _jobs.pop(oldest.id, None)
+                        expired_id = oldest.id
+        if expired_id is not None:
+            shutil.rmtree(store_root / expired_id, ignore_errors=True)
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(finish, result)
 
