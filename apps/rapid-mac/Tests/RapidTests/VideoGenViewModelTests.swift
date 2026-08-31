@@ -216,7 +216,7 @@ struct VideoGenViewModelTests {
         #expect(viewModel.jobs.first?.status == .completed)
         #expect(!viewModel.hasLiveActiveJobs)
         #expect(viewModel.previewURL?.lastPathComponent == "finished.mp4")
-        #expect(await client.listCallCount() >= 2)
+        #expect(await client.listCallCount() >= 3)
     }
 
     @Test("A stale active job stops blocking global busy after a server switch")
@@ -268,7 +268,7 @@ private actor VideoPollingClient: VideoClientProtocol {
 
     func list(port: Int, bearer: String?, limit: Int) async throws -> [VideoJob] {
         listCalls += 1
-        return listCalls == 1 ? [] : [Self.job(status: .completed, progress: 100)]
+        return listCalls <= 2 ? [] : [Self.job(status: .completed, progress: 100)]
     }
 
     func delete(id: String, port: Int, bearer: String?) async throws {}

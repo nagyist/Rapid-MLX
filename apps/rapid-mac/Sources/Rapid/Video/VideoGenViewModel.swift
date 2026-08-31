@@ -60,6 +60,7 @@ final class VideoGenViewModel {
     @ObservationIgnored private var serverContextGeneration: UInt = 0
     @ObservationIgnored private var serverRefreshGeneration: UInt = 0
     @ObservationIgnored private var loadedServerContext: ServerRequestContext?
+    @ObservationIgnored private var jobsServerContext: ServerRequestContext?
     @ObservationIgnored private var previewGeneration: UInt = 0
     @ObservationIgnored private var pollingGeneration: UInt = 0
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
@@ -141,7 +142,9 @@ final class VideoGenViewModel {
     /// progressing. Stale history from a stopped or switched process must not
     /// block app shutdown or update coordination indefinitely.
     var hasLiveActiveJobs: Bool {
-        currentServerContext != nil && hasActiveJobs
+        currentServerContext != nil
+            && jobsServerContext == currentServerContext
+            && hasActiveJobs
     }
 
     var canSwitchModels: Bool {
@@ -290,7 +293,8 @@ final class VideoGenViewModel {
                     contextGeneration: contextGeneration,
                     refreshGeneration: refreshGeneration
                 ) else { return }
-                jobs = newJobs
+                jobs = reconciledJobs(from: newJobs, context: context)
+                jobsServerContext = context
                 jobsAreReconciled = true
                 reconcileSelection()
                 reconcileJobPolling()
@@ -326,7 +330,8 @@ final class VideoGenViewModel {
             guard requestIsCurrent(
                 context, contextGeneration: contextGeneration
             ) else { return }
-            jobs = newJobs
+            jobs = reconciledJobs(from: newJobs, context: context)
+            jobsServerContext = context
             jobsAreReconciled = true
             reconcileSelection()
             if selectedJob?.status == .completed, previous != .completed {
@@ -371,6 +376,7 @@ final class VideoGenViewModel {
             ) else { return }
             jobs.removeAll { $0.id == job.id }
             jobs.insert(job, at: 0)
+            jobsServerContext = context
             selectedJobID = job.id
             previewURL = nil
             prompt = ""
@@ -393,7 +399,8 @@ final class VideoGenViewModel {
 
     func loadSelectedPreview() async {
         guard let job = selectedJob, job.status == .completed,
-              let context = currentServerContext else {
+              let context = currentServerContext,
+              jobsServerContext == context else {
             previewURL = nil
             return
         }
@@ -424,7 +431,9 @@ final class VideoGenViewModel {
     }
 
     func delete(_ job: VideoJob) async {
-        guard let context = currentServerContext, job.status != .inProgress else { return }
+        guard let context = currentServerContext,
+              jobsServerContext == context,
+              job.status != .inProgress else { return }
         let contextGeneration = serverContextGeneration
         do {
             try await client.delete(
@@ -452,6 +461,7 @@ final class VideoGenViewModel {
         invalidateServerContext()
         capabilities = nil
         jobs = []
+        jobsServerContext = nil
         jobsAreReconciled = false
         reconcileJobPolling()
         selectedJobID = nil
@@ -487,6 +497,19 @@ final class VideoGenViewModel {
             selectedJobID = jobs.first?.id
             previewURL = nil
         }
+    }
+
+    private func reconciledJobs(
+        from serverJobs: [VideoJob],
+        context: ServerRequestContext
+    ) -> [VideoJob] {
+        guard jobsServerContext == context else { return serverJobs }
+        let reportedIDs = Set(serverJobs.map(\.id))
+        let temporarilyMissingActiveJobs = jobs.filter {
+            ($0.status == .queued || $0.status == .inProgress)
+                && !reportedIDs.contains($0.id)
+        }
+        return serverJobs + temporarilyMissingActiveJobs
     }
 
     private var currentServerContext: ServerRequestContext? {

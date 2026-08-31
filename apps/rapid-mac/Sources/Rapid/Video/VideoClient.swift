@@ -271,10 +271,10 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
               let dimensions = Self.parseSize(size),
               seconds > 0,
               limits.fps.default > 0 else { return false }
-        let widthMultiple = limits.size.width?.multipleOf ?? 1
-        let heightMultiple = limits.size.height?.multipleOf ?? 1
-        guard let width = Self.roundUp(dimensions.width, to: widthMultiple),
-              let height = Self.roundUp(dimensions.height, to: heightMultiple) else { return false }
+        // Workload normalization is a separate server contract from the
+        // request-size alignment. This client validates only multiple_of_64.
+        guard let width = Self.roundUp(dimensions.width, to: 64),
+              let height = Self.roundUp(dimensions.height, to: 64) else { return false }
         let frameStep = max(1, limits.frames.step)
         let frameOffset = limits.frames.offset
         guard frameOffset >= 0 else { return false }
@@ -446,6 +446,14 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
 
     func delete(id: String, port: Int, bearer: String?) async throws {
         let cached = try cacheURL(for: id)
+        var request = request(path: "v1/videos/\(id)", port: port, bearer: bearer)
+        request.httpMethod = "DELETE"
+        do {
+            _ = try await send(request)
+        } catch let VideoClientError.http(status, _) where status == 404 {
+            // DELETE is idempotent: a prior attempt may have removed the
+            // server job before local cache cleanup failed.
+        }
         if FileManager.default.fileExists(atPath: cached.path) {
             do {
                 try removeCachedItem(cached)
@@ -453,9 +461,6 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
                 throw VideoClientError.cacheRemoval
             }
         }
-        var request = request(path: "v1/videos/\(id)", port: port, bearer: bearer)
-        request.httpMethod = "DELETE"
-        _ = try await send(request)
     }
 
     func content(id: String, port: Int, bearer: String?) async throws -> URL {

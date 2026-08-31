@@ -69,6 +69,19 @@ struct VideoClientTests {
         }
     }
 
+    @Test("Workload uses 64-pixel rounding independently of size alignment")
+    func workloadRoundingIsIndependent() throws {
+        let json = Self.capabilitiesJSON
+            .replacingOccurrences(of: #""multiple_of":64"#, with: #""multiple_of":16"#)
+            .replacingOccurrences(
+                of: #"["1280x720","720x1280"]"#,
+                with: #"["592x592"]"#
+            )
+        let value = try JSONDecoder().decode(VideoCapabilities.self, from: Data(json.utf8))
+
+        #expect(value.durationPresets(for: "592x592") == [1, 2])
+    }
+
     @Test("Image input follows advertised formats and acceptance")
     func imageInputUsesCapabilityContract() throws {
         let jpegOnly = Self.capabilitiesJSON.replacingOccurrences(
@@ -186,8 +199,8 @@ struct VideoClientTests {
         #expect(VideoStubProtocol.requests.isEmpty)
     }
 
-    @Test("Cache cleanup failure keeps the server job available for retry")
-    func cacheCleanupFailureStopsDelete() async throws {
+    @Test("Cache cleanup failure is retryable after server deletion")
+    func cacheCleanupFailureIsRetryable() async throws {
         VideoStubProtocol.reset()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [VideoStubProtocol.self]
@@ -209,7 +222,40 @@ struct VideoClientTests {
             try await client.delete(id: id, port: 8123, bearer: nil)
         }
         #expect(FileManager.default.fileExists(atPath: cached.path))
-        #expect(VideoStubProtocol.requests.isEmpty)
+        #expect(VideoStubProtocol.requests.count == 1)
+        #expect(VideoStubProtocol.requests.first?.httpMethod == "DELETE")
+
+        VideoStubProtocol.response = (404, Data())
+        let retryClient = VideoClient(
+            session: URLSession(configuration: configuration),
+            cacheDirectory: directory
+        )
+        try await retryClient.delete(id: id, port: 8123, bearer: nil)
+        #expect(!FileManager.default.fileExists(atPath: cached.path))
+    }
+
+    @Test("Server deletion failure preserves an available cached preview")
+    func serverDeleteFailurePreservesCache() async throws {
+        VideoStubProtocol.reset()
+        VideoStubProtocol.response = (500, Data())
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [VideoStubProtocol.self]
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "rapid-video-delete-tests-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let id = "video_0123456789abcdef0123456789abcdef"
+        let cached = directory.appendingPathComponent(try VideoClient.cacheFileName(for: id))
+        try Data("video".utf8).write(to: cached)
+        let client = VideoClient(
+            session: URLSession(configuration: configuration), cacheDirectory: directory
+        )
+
+        await #expect(throws: VideoClientError.self) {
+            try await client.delete(id: id, port: 8123, bearer: nil)
+        }
+        #expect(FileManager.default.fileExists(atPath: cached.path))
     }
 
     @Test("Reference loader rejects an oversized file before allocating it")
