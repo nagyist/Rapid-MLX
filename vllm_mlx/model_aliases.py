@@ -593,6 +593,10 @@ def _coerce(alias: str, value: object) -> AliasProfile:
         )
     mtp_continuous_batching_tier = value.get("mtp_continuous_batching_tier", "unknown")
     valid_continuous_mtp_tiers = frozenset({"unknown", "verified", "blocked"})
+    if not isinstance(mtp_continuous_batching_tier, str):
+        raise ValueError(
+            f"alias {alias!r}: mtp_continuous_batching_tier must be a string"
+        )
     if mtp_continuous_batching_tier not in valid_continuous_mtp_tiers:
         raise ValueError(
             f"alias {alias!r}: mtp_continuous_batching_tier must be one of "
