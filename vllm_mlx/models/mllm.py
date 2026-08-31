@@ -162,17 +162,16 @@ def _managed_desktop_runtime_kind() -> str | None:
     if "/Library/Application Support/Rapid/runtime-override/" in executable:
         try:
             root = executable_path.parents[2]
-            expected = (
-                Path(os.environ["HOME"]).expanduser().resolve()
-                / "Library/Application Support/Rapid/runtime-override/rapid-mlx"
-            ).resolve()
-        except (KeyError, IndexError, OSError):
+        except (IndexError, OSError):
             return None
         if (
             executable_path.parent.name == "bin"
             and executable_path.parent.parent.name == "python"
             and executable_path.name.startswith("python")
-            and root == expected
+            and root.name == "rapid-mlx"
+            and root.parent.name == "runtime-override"
+            and root.parent.parent.name == "Rapid"
+            and root.parent.parent.parent.name == "Application Support"
         ):
             return "runtime-override"
         return None

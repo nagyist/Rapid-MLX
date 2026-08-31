@@ -113,6 +113,19 @@ def test_noncanonical_override_path_is_not_managed(monkeypatch):
     assert mllm._managed_desktop_runtime_kind() is None
 
 
+def test_runtime_override_stays_managed_without_home(monkeypatch):
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr(
+        mllm.sys,
+        "executable",
+        "/tmp/dogfood/Library/Application Support/Rapid/runtime-override/"
+        "rapid-mlx/python/bin/python3.12",
+    )
+
+    assert mllm._managed_desktop_runtime_kind() == "runtime-override"
+    assert "pip-install into" in mllm._vision_install_hint()
+
+
 def test_managed_runtime_missing_dependency_never_recommends_pip(monkeypatch):
     monkeypatch.setattr(
         mllm.sys,
