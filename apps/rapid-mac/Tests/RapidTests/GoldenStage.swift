@@ -168,7 +168,12 @@ final class GoldenStage {
         guard node.responds(to: sel) else {
             throw StageError(description: "press: \(identifier) does not support press")
         }
-        _ = node.perform(sel)
+        // `accessibilityPerformPress` returns BOOL. `perform(_:)` is only
+        // defined for object-returning selectors, so call through a typed
+        // IMP instead of relying on the scalar riding home in a pointer.
+        typealias PressIMP = @convention(c) (NSObject, Selector) -> Bool
+        let imp = unsafeBitCast(node.method(for: sel), to: PressIMP.self)
+        _ = imp(node, sel)
         Self.turnRunLoop()
     }
 
@@ -182,7 +187,10 @@ final class GoldenStage {
         guard node.responds(to: sel) else {
             throw StageError(description: "setValue: \(identifier) does not accept a value")
         }
-        _ = node.perform(sel, with: value as NSString)
+        // Void-returning — same typed-IMP treatment as `press(_:)`.
+        typealias SetValueIMP = @convention(c) (NSObject, Selector, NSString) -> Void
+        let imp = unsafeBitCast(node.method(for: sel), to: SetValueIMP.self)
+        imp(node, sel, value as NSString)
         Self.turnRunLoop()
     }
 

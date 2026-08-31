@@ -88,19 +88,29 @@ struct ChatMessageActionsGoldenTests {
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+        /// URLSession surfaces an upload body as either `httpBody` or a
+        /// stream depending on how the request was built; missing one form
+        /// would silently drop the "a request actually left the process"
+        /// witness for those requests.
+        private func requestBody() -> Data? {
+            if let body = request.httpBody { return body }
+            guard let stream = request.httpBodyStream else { return nil }
+            stream.open()
+            defer { stream.close() }
+            var body = Data()
+            let bufferSize = 64 * 1024
+            var buffer = [UInt8](repeating: 0, count: bufferSize)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: bufferSize)
+                guard read > 0 else { break }
+                body.append(buffer, count: read)
+            }
+            return body
+        }
+
         override func startLoading() {
             var chunks = Self.replyChunks
-            if let stream = request.httpBodyStream {
-                stream.open()
-                var body = Data()
-                let bufferSize = 64 * 1024
-                var buffer = [UInt8](repeating: 0, count: bufferSize)
-                while stream.hasBytesAvailable {
-                    let read = stream.read(&buffer, maxLength: bufferSize)
-                    guard read > 0 else { break }
-                    body.append(buffer, count: read)
-                }
-                stream.close()
+            if let body = requestBody() {
                 Self.lock.lock()
                 Self.bodies.append(body)
                 Self.lock.unlock()

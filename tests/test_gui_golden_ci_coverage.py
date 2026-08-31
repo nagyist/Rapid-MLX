@@ -98,18 +98,26 @@ def swift_suite_titles() -> set[str]:
     the manifest inventory and the code that honours it.
     """
 
-    # Commented-out code must not satisfy a coverage gate. A live but empty
-    # suite is out of scope for a source-level check; the Swift build itself
-    # is what keeps the named suite compiling and running.
+    # Commented-out code must not satisfy a coverage gate, and a named suite
+    # only counts when its file also declares at least one live @Test —
+    # source-level approximations of "this journey actually executes".
+    # Anything subtler (a @Test that compiles but asserts nothing) is the
+    # Swift build's and reviewer's territory, not a regex's.
     titles: set[str] = set()
     for path in SWIFT_TESTS.glob("*.swift"):
+        file_titles: set[str] = set()
+        has_live_test = False
         for line in path.read_text().splitlines():
             stripped = line.strip()
             if stripped.startswith("//"):
                 continue
+            if stripped.startswith("@Test"):
+                has_live_test = True
             match = re.match(r'@Suite\("Golden journey: ([a-z0-9-]+)"', stripped)
             if match:
-                titles.add(match.group(1))
+                file_titles.add(match.group(1))
+        if has_live_test:
+            titles.update(file_titles)
     return titles
 
 
