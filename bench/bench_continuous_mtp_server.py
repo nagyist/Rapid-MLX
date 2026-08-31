@@ -22,6 +22,7 @@ import time
 import urllib.request
 from dataclasses import asdict, dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 _CONTEXT_BLOCK = (
@@ -44,6 +45,15 @@ _PROMPT = (_CONTEXT_BLOCK * 3) + (
 )
 
 
+def _prompt_for_lane(lane: int) -> str:
+    """Return a deterministic, lane-distinct routing oracle prompt."""
+    return (
+        f"{_PROMPT}\nThe first output line must be exactly "
+        f"# QUALIFICATION_LANE_{lane}. Then name the public scheduler class "
+        f"Lane{lane}Scheduler and include a class constant LANE_ID = {lane}."
+    )
+
+
 @dataclass(frozen=True)
 class RequestResult:
     run: int
@@ -63,6 +73,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--baseline-json",
+        type=Path,
+        help="Ordinary-MTP report to compare against lane by lane",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     for name in ("runs", "concurrency", "max_tokens"):
@@ -74,9 +89,10 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _request(args: argparse.Namespace, run: int, lane: int) -> RequestResult:
+    prompt = _prompt_for_lane(lane)
     payload: dict[str, Any] = {
         "model": args.model,
-        "messages": [{"role": "user", "content": _PROMPT}],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": args.max_tokens,
         "stream": False,
@@ -116,6 +132,12 @@ def main() -> int:
                     "concurrency": args.concurrency,
                     "max_tokens": args.max_tokens,
                     "planned_requests": args.runs * args.concurrency,
+                    "lane_prompt_sha256": {
+                        str(lane): hashlib.sha256(
+                            _prompt_for_lane(lane).encode()
+                        ).hexdigest()
+                        for lane in range(args.concurrency)
+                    },
                 },
                 indent=2,
             )
@@ -150,7 +172,27 @@ def main() -> int:
     complete = len(results) == expected and all(
         row.completion_tokens == args.max_tokens for row in results
     )
-    hashes = sorted({row.output_sha256 for row in results})
+    hashes_by_lane = {
+        str(lane): sorted({row.output_sha256 for row in results if row.lane == lane})
+        for lane in range(args.concurrency)
+    }
+    deterministic = all(len(hashes) == 1 for hashes in hashes_by_lane.values())
+    output_sha256_by_lane = {
+        lane: hashes[0] for lane, hashes in hashes_by_lane.items() if len(hashes) == 1
+    }
+    paired_output_identical: bool | None = None
+    baseline_sha256_by_lane: dict[str, str] | None = None
+    if args.baseline_json is not None:
+        with args.baseline_json.open(encoding="utf-8") as handle:
+            baseline = json.load(handle)
+        baseline_sha256_by_lane = baseline.get("output_sha256_by_lane")
+        if not isinstance(baseline_sha256_by_lane, dict):
+            raise ValueError(
+                f"{args.baseline_json} has no output_sha256_by_lane mapping"
+            )
+        paired_output_identical = (
+            deterministic and output_sha256_by_lane == baseline_sha256_by_lane
+        )
     report = {
         "label": args.label,
         "model": args.model,
@@ -169,8 +211,10 @@ def main() -> int:
             "python": platform.python_version(),
         },
         "complete": complete,
-        "unique_output_hashes": hashes,
-        "deterministic_within_condition": len(hashes) == 1,
+        "output_sha256_by_lane": output_sha256_by_lane,
+        "deterministic_within_lane": deterministic,
+        "baseline_sha256_by_lane": baseline_sha256_by_lane,
+        "paired_output_identical": paired_output_identical,
         "median_wall_seconds": statistics.median(
             row["wall_seconds"] for row in cohorts
         ),
@@ -181,7 +225,8 @@ def main() -> int:
         "requests": [asdict(row) for row in results],
     }
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if complete and len(hashes) == 1 else 1
+    paired_gate = paired_output_identical is not False
+    return 0 if complete and deterministic and paired_gate else 1
 
 
 if __name__ == "__main__":
