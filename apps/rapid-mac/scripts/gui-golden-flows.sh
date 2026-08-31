@@ -1467,25 +1467,44 @@ confirm_memory_warning_from_tree() {
 
 # Report visibility/click state through globals so Bash 3.2 callers can keep
 # one semantic-presentation latch per AX identifier without namerefs or eval.
-# A warning that remains mounted is clicked once. Disappearance re-arms it;
-# a changed label/message also counts as a new presentation so a tight warning
-# restored as unsafe by activation-time memory revalidation can be confirmed.
+# A warning that remains mounted gets bounded, spaced retries. Disappearance
+# re-arms it; a changed label/message also counts as a new presentation so a
+# tight warning restored as unsafe by memory revalidation can be confirmed.
 follow_memory_confirmation_edge() {
-    local tree="$1" evidence="$2" previous_signature="$3" identifier="$4"
+    local tree="$1" evidence="$2" previous_signature="$3"
+    local previous_polls="$4" previous_attempts="$5" identifier="$6"
     local signature=""
     MEMORY_CONFIRMATION_SIGNATURE="$previous_signature"
+    MEMORY_CONFIRMATION_POLLS="$previous_polls"
+    MEMORY_CONFIRMATION_ATTEMPTS="$previous_attempts"
     MEMORY_CONFIRMATION_VISIBLE=0
     MEMORY_CONFIRMATION_CLICKED=0
     if memory_confirmation_enabled "$tree" "$identifier"; then
         MEMORY_CONFIRMATION_VISIBLE=1
         signature="$(memory_confirmation_signature "$tree" "$identifier")"
-        if [[ -n "$signature" && "$signature" != "$previous_signature" ]] \
+        if [[ "$signature" != "$previous_signature" ]]; then
+            MEMORY_CONFIRMATION_POLLS=0
+            MEMORY_CONFIRMATION_ATTEMPTS=0
+        else
+            MEMORY_CONFIRMATION_POLLS=$((previous_polls + 1))
+        fi
+        # click-center proves that mouse events were posted, not that SwiftUI
+        # consumed them. Retry a still-identical presentation after one second,
+        # but cap attempts so a stuck alert cannot be hammered every poll.
+        if [[ -n "$signature" \
+              && "$MEMORY_CONFIRMATION_ATTEMPTS" -lt 3 \
+              && ( "$MEMORY_CONFIRMATION_ATTEMPTS" == 0 \
+                   || "$MEMORY_CONFIRMATION_POLLS" -ge 4 ) ]] \
             && confirm_memory_warning_from_tree "$tree" "$evidence" "$identifier"; then
             MEMORY_CONFIRMATION_SIGNATURE="$signature"
+            MEMORY_CONFIRMATION_POLLS=0
+            MEMORY_CONFIRMATION_ATTEMPTS=$((MEMORY_CONFIRMATION_ATTEMPTS + 1))
             MEMORY_CONFIRMATION_CLICKED=1
         fi
     else
         MEMORY_CONFIRMATION_SIGNATURE=""
+        MEMORY_CONFIRMATION_POLLS=0
+        MEMORY_CONFIRMATION_ATTEMPTS=0
     fi
 }
 
@@ -1758,7 +1777,8 @@ baseline() {
 # button, so a single dump can be a hybrid of two states.
 wait_send_idle() {
     local destination="$1" attempts="${2:-160}" stable=0
-    local memory_confirmation_signature=""
+    local memory_confirmation_signature="" memory_confirmation_polls=0
+    local memory_confirmation_attempts=0
     local confirmation_evidence="${destination%.json}-memory-confirm.json"
     for ((i=0; i<attempts; i++)); do
         see_main "$destination"
@@ -1769,8 +1789,13 @@ wait_send_idle() {
         # branch before continuing to wait for independent UI readiness.
         follow_memory_confirmation_edge \
             "$destination" "$confirmation_evidence" \
-            "$memory_confirmation_signature" MemoryWarning.Confirm
+            "$memory_confirmation_signature" \
+            "$memory_confirmation_polls" \
+            "$memory_confirmation_attempts" \
+            MemoryWarning.Confirm
         memory_confirmation_signature="$MEMORY_CONFIRMATION_SIGNATURE"
+        memory_confirmation_polls="$MEMORY_CONFIRMATION_POLLS"
+        memory_confirmation_attempts="$MEMORY_CONFIRMATION_ATTEMPTS"
         if [[ "$MEMORY_CONFIRMATION_VISIBLE" == 1 ]]; then
             stable=0
             sleep 0.25
@@ -4240,12 +4265,15 @@ wait_fake_event() {
 wait_fake_event_after_start() {
     local predicate="$1" what="$2" prefix="$3"
     shift 3
-    local confirmation_identifiers=("$@") confirmation_signatures=() i j
+    local confirmation_identifiers=("$@") confirmation_signatures=()
+    local confirmation_polls=() confirmation_attempts=() i j
     if [[ "${#confirmation_identifiers[@]}" == 0 ]]; then
         confirmation_identifiers=(MemoryWarning.Confirm)
     fi
     for ((j=0; j<${#confirmation_identifiers[@]}; j++)); do
         confirmation_signatures[$j]=""
+        confirmation_polls[$j]=0
+        confirmation_attempts[$j]=0
     done
     for ((i=0; i<240; i++)); do
         if [[ -s "$OUT/fake-events.jsonl" ]] \
@@ -4259,8 +4287,12 @@ wait_fake_event_after_start() {
                 "$OUT/${prefix}-after-start.json" \
                 "$OUT/${prefix}-memory-confirm.json" \
                 "${confirmation_signatures[$j]}" \
+                "${confirmation_polls[$j]}" \
+                "${confirmation_attempts[$j]}" \
                 "${confirmation_identifiers[$j]}"
             confirmation_signatures[$j]="$MEMORY_CONFIRMATION_SIGNATURE"
+            confirmation_polls[$j]="$MEMORY_CONFIRMATION_POLLS"
+            confirmation_attempts[$j]="$MEMORY_CONFIRMATION_ATTEMPTS"
             [[ "$MEMORY_CONFIRMATION_CLICKED" == 0 ]] || break
         done
         sleep 0.25

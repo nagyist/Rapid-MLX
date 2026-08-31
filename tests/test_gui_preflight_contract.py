@@ -599,6 +599,7 @@ def test_direct_model_starts_follow_enabled_memory_confirmation_branches():
     assert 'jq -e -s "any(.[]; $predicate)"' in wait
     assert "follow_memory_confirmation_edge" in wait
     assert "confirmation_signatures" in wait
+    assert "confirmation_attempts" in wait
     assert wait.index("follow_memory_confirmation_edge") < wait.index('die "$what"')
 
     cached = source.split("flow_cached_quickstart() {", 1)[1].split("\n}", 1)[0]
@@ -717,28 +718,38 @@ export CLICKS="$8"
 log() {{ :; }}
 die() {{ printf '%s\\n' "$*" >&2; exit 1; }}
 {helpers}
-load_signature=""
-anyway_signature=""
+load_signature=""; load_polls=0; load_attempts=0
+anyway_signature=""; anyway_polls=0; anyway_attempts=0
 scan_quickstart() {{
-    follow_memory_confirmation_edge "$1" "$EVIDENCE" "$load_signature" Quickstart.Memory.Load
+    follow_memory_confirmation_edge "$1" "$EVIDENCE" \\
+        "$load_signature" "$load_polls" "$load_attempts" Quickstart.Memory.Load
     load_signature="$MEMORY_CONFIRMATION_SIGNATURE"
-    follow_memory_confirmation_edge "$1" "$EVIDENCE" "$anyway_signature" Quickstart.Memory.LoadAnyway
+    load_polls="$MEMORY_CONFIRMATION_POLLS"
+    load_attempts="$MEMORY_CONFIRMATION_ATTEMPTS"
+    follow_memory_confirmation_edge "$1" "$EVIDENCE" \\
+        "$anyway_signature" "$anyway_polls" "$anyway_attempts" Quickstart.Memory.LoadAnyway
     anyway_signature="$MEMORY_CONFIRMATION_SIGNATURE"
+    anyway_polls="$MEMORY_CONFIRMATION_POLLS"
+    anyway_attempts="$MEMORY_CONFIRMATION_ATTEMPTS"
 }}
 scan_quickstart "$2"
 scan_quickstart "$2"
 scan_quickstart "$4"
 scan_quickstart "$3"
 scan_quickstart "$3"
-main_signature=""
+main_signature=""; main_polls=0; main_attempts=0
 scan_main() {{
-    follow_memory_confirmation_edge "$1" "$EVIDENCE" "$main_signature" MemoryWarning.Confirm
+    follow_memory_confirmation_edge "$1" "$EVIDENCE" \\
+        "$main_signature" "$main_polls" "$main_attempts" MemoryWarning.Confirm
     main_signature="$MEMORY_CONFIRMATION_SIGNATURE"
+    main_polls="$MEMORY_CONFIRMATION_POLLS"
+    main_attempts="$MEMORY_CONFIRMATION_ATTEMPTS"
 }}
 scan_main "$5"
 scan_main "$5"
 scan_main "$6"
 scan_main "$6"
+for _ in {{1..20}}; do scan_main "$6"; done
 """
     result = subprocess.run(
         [
@@ -760,12 +771,14 @@ scan_main "$6"
         timeout=5,
     )
     assert result.returncode == 0, result.stderr
-    assert clicks.read_text().splitlines() == [
+    recorded = clicks.read_text().splitlines()
+    assert recorded[:2] == [
         "Quickstart.Memory.Load",
         "Quickstart.Memory.LoadAnyway",
-        "MemoryWarning.Confirm",
-        "MemoryWarning.Confirm",
     ]
+    # Tight is clicked once, then the semantically new unsafe presentation
+    # gets at most three spaced delivery attempts despite remaining visible.
+    assert recorded[2:] == ["MemoryWarning.Confirm"] * 4
 
 
 def test_ready_wait_confirms_memory_warning_after_session_restore():
@@ -774,6 +787,7 @@ def test_ready_wait_confirms_memory_warning_after_session_restore():
     wait = source.split("wait_send_idle() {", 1)[1].split("\n}", 1)[0]
     assert "follow_memory_confirmation_edge" in wait
     assert "memory_confirmation_signature" in wait
+    assert "memory_confirmation_attempts" in wait
     assert 'MEMORY_CONFIRMATION_VISIBLE" == 1' in wait
     assert wait.index("follow_memory_confirmation_edge") < wait.index(
         'identifier == "ChatView.SendOrStopButton"'
