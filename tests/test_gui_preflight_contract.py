@@ -178,6 +178,23 @@ def test_fresh_install_proves_the_telemetry_boundary_with_a_loopback_sink():
     assert "activation_seen_desktop_first_chat_reply" in fresh_install
 
 
+def test_fresh_install_settles_transcript_before_structural_baseline():
+    """A transient scroll affordance must not become golden structure."""
+    source = HARNESS.read_text()
+    helper = source.split("settle_transcript_at_bottom() {", 1)[1].split("\n}", 1)[0]
+    fresh_install = source.split("flow_fresh_install() {", 1)[1].split("\n}", 1)[0]
+
+    assert 'select(.identifier == "Transcript.JumpToBottom")' in helper
+    assert 'press "$destination" Transcript.JumpToBottom "$press_result"' in helper
+    assert 'sleep 0.1' in helper
+    assert 'die "Jump to latest did not settle the transcript at its tail"' in helper
+
+    banner = fresh_install.index("wait_identifier TelemetryConsent.PostValueBanner")
+    settle = fresh_install.index("settle_transcript_at_bottom")
+    baseline = fresh_install.index("baseline fresh-install.post-value-consent")
+    assert banner < settle < baseline
+
+
 def test_each_fault_fails_with_its_own_message():
     source = DRIVER.read_text()
     assert source.count("fail(") >= 4

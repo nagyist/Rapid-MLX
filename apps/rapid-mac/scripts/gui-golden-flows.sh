@@ -890,6 +890,29 @@ wait_identifier() {
     die "timed out waiting for AX identifier $identifier"
 }
 
+settle_transcript_at_bottom() {
+    local destination="$1" press_result="$2"
+    see_main "$destination"
+    if ! jq -e '.data.ui_elements[]?
+                | select(.identifier == "Transcript.JumpToBottom")' \
+        "$destination" >/dev/null; then
+        return
+    fi
+
+    press "$destination" Transcript.JumpToBottom "$press_result" \
+        || die "transcript was not at its tail and Jump to latest was not pressable"
+    for _ in {1..60}; do
+        see_main "$destination"
+        if ! jq -e '.data.ui_elements[]?
+                    | select(.identifier == "Transcript.JumpToBottom")' \
+            "$destination" >/dev/null; then
+            return
+        fi
+        sleep 0.1
+    done
+    die "Jump to latest did not settle the transcript at its tail"
+}
+
 wait_identifier_enabled() {
     local identifier="$1" destination="$2" attempts="${3:-80}"
     for ((i=0; i<attempts; i++)); do
@@ -1807,6 +1830,10 @@ flow_fresh_install() {
     start_model
     send_prompt "Say hello in one short sentence." "post-value-consent"
     wait_identifier TelemetryConsent.PostValueBanner "$OUT/post-value-consent-visible.json"
+    # Streaming completion and scroll anchoring settle independently. Capture
+    # the structural baseline only after the transcript reaches its stable tail.
+    settle_transcript_at_bottom "$OUT/post-value-consent-visible.json" \
+        "$OUT/post-value-consent-jump-press.json"
     assert_tree_text "$OUT/post-value-consent-visible.json" "Hello"
     [[ "$(jq '[.data.ui_elements[]? | select(.identifier == "TelemetryConsent.PostValueBanner")] | length' \
         "$OUT/post-value-consent-visible.json")" == 1 ]] \
