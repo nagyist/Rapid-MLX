@@ -1,0 +1,311 @@
+name: Post-DMG engine release recovery
+
+# Recovery-only transaction for the narrow state where the immutable Desktop
+# tag and canonical DMG published successfully, but the engine tag/Release did
+# not. The Desktop tag is the source-of-truth candidate identity: this workflow
+# never moves it and never substitutes the current main head for that SHA.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version whose Desktop DMG is already published but engine Release is missing (for example 0.13.0-rc2)."
+        required: true
+        type: string
+      desktop_run_id:
+        description: "Exact successful rapid-mac-release workflow_dispatch run that published this Desktop tag."
+        required: true
+        type: string
+      reason:
+        description: "Operator audit note for the recovery."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-published-desktop:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      release_sha: ${{ steps.identity.outputs.release_sha }}
+      desktop_run_id: ${{ steps.identity.outputs.desktop_run_id }}
+      open_ids: ${{ steps.blockers.outputs.open_ids }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve immutable Desktop release identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          DESKTOP_RUN_ID: ${{ inputs.desktop_run_id }}
+          REASON: ${{ inputs.reason }}
+          HAVE_PAT: ${{ secrets.RELEASE_PAT != '' }}
+          REPO: ${{ github.repository }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_REF" != "refs/heads/main" ]; then
+            echo "::error::post-DMG recovery must be dispatched from main (got $EVENT_REF)" >&2
+            exit 1
+          fi
+          python3 scripts/release_version.py validate "$VERSION"
+          if ! [[ "$DESKTOP_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::desktop_run_id must be the positive integer ID of the exact Desktop promotion run" >&2
+            exit 1
+          fi
+          if [ -z "$REASON" ]; then
+            echo "::error::a non-empty recovery reason is required" >&2
+            exit 1
+          fi
+          if [[ -z "${REASON//[[:space:]]/}" ]]; then
+            echo "::error::recovery reason must contain non-whitespace text" >&2
+            exit 1
+          fi
+          case "$REASON" in
+            *$'\r'*|*$'\n'*)
+              echo "::error::recovery reason must be a single line" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$HAVE_PAT" != "true" ]; then
+            echo "::error::RELEASE_PAT is required so the published engine Release triggers downstream workflows" >&2
+            exit 1
+          fi
+
+          APP_TAG="rapid-mac-v${VERSION}"
+          git fetch --force origin "refs/tags/${APP_TAG}:refs/tags/${APP_TAG}"
+          RELEASE_SHA="$(git rev-parse --verify "refs/tags/${APP_TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+            echo "::error::Desktop candidate $RELEASE_SHA is not an ancestor of current main; refusing cross-history recovery" >&2
+            exit 1
+          fi
+
+          git show "${RELEASE_SHA}:pyproject.toml" > "$RUNNER_TEMP/recovery-pyproject.toml"
+          RECOVERED_VERSION="$(python3 - "$RUNNER_TEMP/recovery-pyproject.toml" <<'PY'
+          import pathlib, sys, tomllib
+          print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["project"]["version"])
+          PY
+          )"
+          if [ "$RECOVERED_VERSION" != "$VERSION" ]; then
+            echo "::error::Desktop tag $APP_TAG identifies version $RECOVERED_VERSION, not requested $VERSION" >&2
+            exit 1
+          fi
+
+          ENGINE_TAG="v${VERSION}"
+          if git rev-parse --verify --quiet "refs/tags/${ENGINE_TAG}^{commit}" > /dev/null; then
+            ENGINE_SHA="$(git rev-parse --verify "refs/tags/${ENGINE_TAG}^{commit}")"
+            if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]; then
+              echo "::error::existing engine tag $ENGINE_TAG points to $ENGINE_SHA, not Desktop candidate $RELEASE_SHA" >&2
+              exit 1
+            fi
+          fi
+
+          # The exact tagged workflow + immutable manifest + canonical Release
+          # asset are the evidence that the Desktop side already shipped.
+          python3 scripts/check_desktop_publish.py \
+            --app-tag "$APP_TAG" \
+            --accepted-sha "$RELEASE_SHA" \
+            --expected-run-id "$DESKTOP_RUN_ID" \
+            --repo "$REPO" \
+            --workflow rapid-mac-release.yml \
+            --deadline-min 5 \
+            --sleep-sec 5 \
+            | tee desktop-publication-evidence.txt
+
+          {
+            echo "version=$VERSION"
+            echo "release_sha=$RELEASE_SHA"
+            echo "desktop_run_id=$DESKTOP_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "VERSION=$VERSION"
+            echo "APP_TAG=$APP_TAG"
+            echo "RELEASE_SHA=$RELEASE_SHA"
+            echo "DESKTOP_RUN_ID=$DESKTOP_RUN_ID"
+            echo "REASON=$REASON"
+          } > recovery-identity.txt
+
+      - name: Release-blocker evidence for recovered candidate
+        id: blockers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          SHA: ${{ steps.identity.outputs.release_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_release_blockers.py \
+            --version "$VERSION" \
+            --source-sha "$SHA" \
+            --repo "$REPO" \
+            --waivers-dir docs/development/release-blockers \
+            | tee release-blocker-evidence.txt
+          OPEN_IDS="$(grep '^OPEN_IDS=' release-blocker-evidence.txt | cut -d= -f2-)"
+          echo "open_ids=$OPEN_IDS" >> "$GITHUB_OUTPUT"
+
+      - name: Build release notes from the immutable candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p recovery-evidence
+          RECOVERY_SOURCE="$RUNNER_TEMP/recovery-source"
+          git worktree add --detach "$RECOVERY_SOURCE" "$RELEASE_SHA"
+          (
+            cd "$RECOVERY_SOURCE"
+            RELEASE_SHA="$RELEASE_SHA" \
+              GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+              GH_TOKEN="$GH_TOKEN" \
+              bash scripts/build_release_notes.sh
+          ) > recovery-evidence/release-notes.md
+          mv recovery-identity.txt desktop-publication-evidence.txt \
+            release-blocker-evidence.txt recovery-evidence/
+
+      - name: Print pre-approval recovery evidence
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+          DESKTOP_RUN_ID: ${{ steps.identity.outputs.desktop_run_id }}
+          OPEN_IDS: ${{ steps.blockers.outputs.open_ids }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Post-DMG engine recovery evidence"
+            echo ""
+            echo "Version: $VERSION"
+            echo "Immutable Desktop candidate SHA: $RELEASE_SHA"
+            echo "Exact Desktop promotion run: $DESKTOP_RUN_ID"
+            echo "Open release-blocker set: ${OPEN_IDS:-none}"
+            echo ""
+            cat recovery-evidence/desktop-publication-evidence.txt
+            echo ""
+            echo "Approval authorizes only the engine tag/Release at this exact SHA."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable recovery evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: post-dmg-engine-recovery-evidence
+          path: recovery-evidence/
+          if-no-files-found: error
+
+  recover-engine-release:
+    needs: verify-published-desktop
+    runs-on: ubuntu-latest
+    environment: rapid-mac-tag
+    permissions:
+      actions: read
+      contents: write
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download immutable recovery evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: post-dmg-engine-recovery-evidence
+          path: evidence
+
+      - name: Verify live rapid-mac-tag environment protection
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ENV_NAME="rapid-mac-tag"
+          gh api "repos/${REPO}/environments/${ENV_NAME}" > "$RUNNER_TEMP/re-env.json"
+          gh api "repos/${REPO}/environments/${ENV_NAME}/deployment-branch-policies" > "$RUNNER_TEMP/re-policy.json"
+          python3 scripts/check_release_environment.py \
+            --environment-json "$RUNNER_TEMP/re-env.json" \
+            --policy-json "$RUNNER_TEMP/re-policy.json" \
+            --expected-env-name "$ENV_NAME"
+
+      - name: Re-verify blockers and immutable Desktop publication
+        env:
+          # The same protected step performs the final publication. Use the
+          # PAT throughout so no step boundary can swap credentials between
+          # the blocker cutoff and the atomic tag claim.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          VERSION: ${{ needs.verify-published-desktop.outputs.version }}
+          RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}
+          DESKTOP_RUN_ID: ${{ needs.verify-published-desktop.outputs.desktop_run_id }}
+          EXPECTED_OPEN_IDS: ${{ needs.verify-published-desktop.outputs.open_ids }}
+          NOTES_FILE: ${{ github.workspace }}/evidence/release-notes.md
+          REASON: ${{ inputs.reason }}
+          # Re-evaluate the secret after protected approval. A pre-approval
+          # boolean can become stale while the job waits; publishing with the
+          # GITHUB_TOKEN fallback would suppress downstream release events.
+          LIVE_HAVE_PAT: ${{ secrets.RELEASE_PAT != '' }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$LIVE_HAVE_PAT" != "true" ]; then
+            echo "::error::RELEASE_PAT disappeared after pre-approval evidence" >&2
+            exit 1
+          fi
+          grep -Fx "VERSION=$VERSION" evidence/recovery-identity.txt
+          grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-identity.txt
+          grep -Fx "DESKTOP_RUN_ID=$DESKTOP_RUN_ID" evidence/recovery-identity.txt
+
+          # Approval can wait while waiver policy changes on main. Refresh the
+          # policy tree after approval; the immutable Desktop tag remains the
+          # artifact identity, while live main is the policy source of truth.
+          git fetch --force origin refs/heads/main:refs/remotes/origin/main
+          LIVE_WAIVER_SOURCE="$RUNNER_TEMP/recovery-live-main"
+          git worktree add --detach "$LIVE_WAIVER_SOURCE" origin/main
+          python3 scripts/check_desktop_publish.py \
+            --app-tag "rapid-mac-v${VERSION}" \
+            --accepted-sha "$RELEASE_SHA" \
+            --expected-run-id "$DESKTOP_RUN_ID" \
+            --repo "$REPO" \
+            --workflow rapid-mac-release.yml \
+            --deadline-min 5 \
+            --sleep-sec 5
+
+          # Approval can wait indefinitely. Re-read the engine tag namespace
+          # after every other live check and immediately before publication;
+          # absence is the expected recovery state, a same-SHA tag is an
+          # idempotent retry, and any other SHA fails closed.
+          ENGINE_TAG="v${VERSION}"
+          set +e
+          git ls-remote --exit-code --refs origin "refs/tags/${ENGINE_TAG}" \
+            > "$RUNNER_TEMP/recovery-engine-tag.txt"
+          TAG_QUERY_RC=$?
+          set -e
+          if [ "$TAG_QUERY_RC" -eq 0 ]; then
+            git fetch --force origin \
+              "refs/tags/${ENGINE_TAG}:refs/tags/${ENGINE_TAG}"
+            ENGINE_SHA="$(git rev-parse --verify "refs/tags/${ENGINE_TAG}^{commit}")"
+            if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]; then
+              echo "::error::engine tag $ENGINE_TAG appeared during approval at $ENGINE_SHA, not approved SHA $RELEASE_SHA" >&2
+              exit 1
+            fi
+          elif [ "$TAG_QUERY_RC" -ne 2 ]; then
+            echo "::error::cannot re-read engine tag $ENGINE_TAG after approval" >&2
+            exit 1
+          fi
+
+          # The live policy cutoff and the atomic tag/Release transaction stay
+          # in one shell step. Everything slow ran above; no unrelated command
+          # may be inserted between this query and publication.
+          python3 scripts/check_release_blockers.py \
+            --version "$VERSION" \
+            --source-sha "$RELEASE_SHA" \
+            --repo "$REPO" \
+            --waivers-dir "$LIVE_WAIVER_SOURCE/docs/development/release-blockers" \
+            --expected-open-ids "$EXPECTED_OPEN_IDS"
+          bash scripts/recover_engine_release.sh
