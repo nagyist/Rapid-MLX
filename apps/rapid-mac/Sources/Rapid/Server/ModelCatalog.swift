@@ -925,7 +925,13 @@ enum ModelCatalog {
             "aliases": aliases,
             "recommendation_policy_digests": policyDigests,
         ]
-        guard let normalized = rcjNormalized(projection),
+        return atomicObjectDigest(projection)
+    }
+
+    /// RCJ-1 digest shared by catalog snapshots and independently addressed
+    /// product policies. Callers provide the exact digest projection.
+    static func atomicObjectDigest(_ value: Any) -> String? {
+        guard let normalized = rcjNormalized(value),
               JSONSerialization.isValidJSONObject(normalized),
               let data = try? JSONSerialization.data(
                 withJSONObject: normalized,

@@ -18,6 +18,7 @@ from vllm_mlx.catalog import (
     build_catalog_bundle,
     build_legacy_catalog_snapshot,
     canonical_json_bytes,
+    load_product_recommendation_policy,
     rcj_digest,
 )
 
@@ -119,10 +120,18 @@ def test_catalog_digest_covers_ordered_records_and_policy_reference() -> None:
     assert rcj_digest(projection) != snapshot["catalog_digest"]
 
 
-def test_recommendation_adapter_scales_measurements_and_validates_tasks() -> None:
+def test_product_recommendation_policy_is_atomic_ssot_and_validates_tasks() -> None:
     bundle = build_catalog_bundle()
     snapshot = bundle["snapshot"]
     policy = bundle["recommendation_policies"][0]
+    assert policy == load_product_recommendation_policy(snapshot)
+    assert all(
+        "minimum_memory_mib" in tier and "floor_gb" not in tier
+        for tier in policy["tiers"]
+    )
+    assert all(
+        "footprint_gb" not in pick for tier in policy["tiers"] for pick in tier["picks"]
+    )
     first = policy["tiers"][0]["picks"][0]
     assert policy["machine_dimension"] == "physical_memory_mib"
     assert first["footprint_mib"] == 3 * 1024
