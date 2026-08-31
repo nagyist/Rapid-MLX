@@ -73,6 +73,7 @@ struct ContentView: View {
     @Environment(ChatViewModel.self) private var chat
     @Environment(ImageGenViewModel.self) private var imageGen
     @Environment(AudioViewModel.self) private var audio
+    @Environment(VideoGenViewModel.self) private var video
     @Environment(DictationController.self) private var dictation
     @Environment(SamplingConfig.self) private var sampling
     @Environment(UpdateChecker.self) private var updater
@@ -93,6 +94,8 @@ struct ContentView: View {
     @State private var userSelectionRevision: UInt = 0
     /// Which detail surface the sidebar shows (chat vs the Launch page).
     @State private var section: SidebarSection = .chat
+    @AppStorage(VideoFeatureConfig.enabledKey)
+    private var videoGenerationEnabled = VideoFeatureConfig.defaultEnabled
     /// Window-level conversation search, opened from the toolbar.
     @State private var showConversationSearch = false
     // Was @SceneStorage. Moved to @AppStorage so the View menu command in
@@ -217,6 +220,11 @@ struct ContentView: View {
                 // and try to execute — tools with no process behind them.
                 mcpCatalog.clear()
             }
+        }
+        .onChange(of: videoGenerationEnabled) { _, enabled in
+            // Removing an experimental destination while it is active must
+            // never leave an unreachable detail pane on screen.
+            section = Self.sectionAfterVideoGateChange(current: section, enabled: enabled)
         }
         .onChange(of: server.state) { _, newState in
             // Sync the picker breadcrumb when the server lands in
@@ -467,8 +475,9 @@ struct ContentView: View {
             }
             NavigationSplitView {
                 SidebarView(
-                selection: $section,
-                chat: chat,
+                    selection: $section,
+                    videoGenerationEnabled: videoGenerationEnabled,
+                    chat: chat,
                 onNewChat: {
                     chat.newConversation()
                     section = .chat
@@ -569,7 +578,12 @@ struct ContentView: View {
         } ?? false
 
         return .init(
-            isBusy: chat.isStreaming || imageGen.isGenerating || dictationIsBusy,
+            isBusy: chat.isStreaming
+                || imageGen.isGenerating
+                || video.hasActiveJobs
+                || video.isSubmitting
+                || video.isPreparing
+                || dictationIsBusy,
             hasBlockingSurface: quickstartVisible
                 || deferredTelemetryConsent.isPresented
                 || campaignIsVisible
@@ -1021,6 +1035,12 @@ struct ContentView: View {
             ImagesView(viewModel: imageGen, server: server)
         case .audio:
             AudioView(viewModel: audio, server: server)
+        case .video:
+            if videoGenerationEnabled {
+                VideoView(viewModel: video, server: server)
+            } else {
+                mainArea
+            }
         case .launch:
             LaunchView(
                 server: server,
@@ -1226,6 +1246,15 @@ struct ContentView: View {
         })
     }
 
+    /// Route recovery for the experimental gate. Pure so Settings/sidebar
+    /// behavior can be pinned without standing up the full app environment.
+    static func sectionAfterVideoGateChange(
+        current: SidebarSection,
+        enabled: Bool
+    ) -> SidebarSection {
+        !enabled && current == .video ? .chat : current
+    }
+
     /// The chat catalog intentionally omits every media row, so aliases from
     /// independently loaded media catalogs close that negative-information
     /// gap. Dictation publishes its own catalog-proven aliases because it can
@@ -1237,6 +1266,7 @@ struct ContentView: View {
         Set(
             audio.audioModels.map(\.alias)
                 + imageGen.imageModels.map(\.alias)
+                + video.videoModels.map(\.alias)
                 + Array(dictation.knownAudioAliases)
         )
     }

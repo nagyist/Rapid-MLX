@@ -1,0 +1,143 @@
+import Foundation
+import Testing
+@testable import Rapid
+
+@Suite("VideoClient wire contract", .serialized)
+struct VideoClientTests {
+    private func makeClient() -> VideoClient {
+        VideoStubProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [VideoStubProtocol.self]
+        return VideoClient(session: URLSession(configuration: configuration))
+    }
+
+    @Test("Capabilities authenticate and produce conservative controls")
+    func capabilities() async throws {
+        let client = makeClient()
+        VideoStubProtocol.response = (200, Data(Self.capabilitiesJSON.utf8))
+
+        let value = try await client.capabilities(port: 8123, bearer: "secret")
+
+        #expect(value.modes == [.textToVideo, .imageToVideo])
+        #expect(value.sizePresets == [
+            "512x512", "768x512", "512x768", "1280x720", "720x1280",
+        ])
+        #expect(value.durationPresets == [1, 2, 4])
+        let request = try #require(VideoStubProtocol.requests.first)
+        #expect(request.url?.path == "/v1/videos/capabilities")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+    }
+
+    @Test("Create uses the documented multipart fields and reference name")
+    func createMultipart() async throws {
+        let client = makeClient()
+        VideoStubProtocol.response = (200, Data(Self.jobJSON.utf8))
+
+        let job = try await client.create(
+            VideoCreateRequest(
+                prompt: "A fox runs through snow",
+                model: "ltx-2.3-mlx-q4",
+                seconds: 2,
+                size: "768x512",
+                seed: 42,
+                reference: Data("reference-bytes".utf8),
+                referenceFileName: "fox.png",
+                referenceMIMEType: "image/png"
+            ),
+            port: 8123,
+            bearer: "secret"
+        )
+
+        #expect(job.status == .queued)
+        let body = String(decoding: try #require(VideoStubProtocol.bodies.first), as: UTF8.self)
+        #expect(body.contains("name=\"prompt\"\r\n\r\nA fox runs through snow"))
+        #expect(body.contains("name=\"model\"\r\n\r\nltx-2.3-mlx-q4"))
+        #expect(body.contains("name=\"seconds\"\r\n\r\n2"))
+        #expect(body.contains("name=\"size\"\r\n\r\n768x512"))
+        #expect(body.contains("name=\"seed\"\r\n\r\n42"))
+        #expect(body.contains("name=\"input_reference\"; filename=\"fox.png\""))
+        #expect(body.contains("reference-bytes"))
+    }
+
+    @Test("Nested server errors remain actionable")
+    func nestedError() async throws {
+        let client = makeClient()
+        VideoStubProtocol.response = (
+            409,
+            Data(#"{"detail":{"error":{"message":"start a video model"}}}"#.utf8)
+        )
+
+        do {
+            _ = try await client.capabilities(port: 8123, bearer: nil)
+            Issue.record("Expected an HTTP error")
+        } catch let error as VideoClientError {
+            #expect(error.errorDescription == "start a video model")
+        }
+    }
+
+    private static let capabilitiesJSON = #"""
+    {
+      "object":"video.capabilities","model":"ltx","modality":"video-gen","family":"ltx-2.3",
+      "modes":["text-to-video","image-to-video"],
+      "limits":{
+        "size":{"type":"range","width":{"minimum":256,"maximum":1920,"multiple_of":64},"height":{"minimum":256,"maximum":1920,"multiple_of":64},"also_supported":["1280x720","720x1280"]},
+        "seconds":{"minimum":1,"maximum":20,"default":4},
+        "fps":{"minimum":1,"maximum":60,"default":24,"fixed":false},
+        "frames":{"minimum":9,"maximum":1201,"step":8,"offset":1},
+        "workload":{"metric":"pixel_frames","maximum":38141952,"dimension_rounding":"multiple_of_64"},
+        "input_reference":{"accepted":true,"maximum_bytes":20971520,"formats":["jpeg","png","webp"]}
+      },
+      "controls":{}
+    }
+    """#
+
+    private static let jobJSON = #"""
+    {"id":"video_0123456789abcdef0123456789abcdef","model":"ltx-2.3-mlx-q4","prompt":"A fox runs through snow","seconds":"2","size":"768x512","status":"queued","progress":0,"created_at":123,"completed_at":null,"error":null,"object":"video"}
+    """#
+}
+
+private final class VideoStubProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requests: [URLRequest] = []
+    nonisolated(unsafe) static var bodies: [Data] = []
+    nonisolated(unsafe) static var response: (Int, Data) = (200, Data())
+
+    static func reset() {
+        requests = []
+        bodies = []
+        response = (200, Data())
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requests.append(request)
+        Self.bodies.append(Self.readBody(from: request))
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: Self.response.0,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.response.1)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func readBody(from request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+}
