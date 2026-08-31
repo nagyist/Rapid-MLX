@@ -20,6 +20,9 @@ the website must be able to validate and render them without a binary codec.
   cache, and prefill configuration.
 - [`v1/benchmark-run.schema.json`](v1/benchmark-run.schema.json) composes the
   three reusable contracts with workload and raw measurements.
+- [`v1/protocols/`](v1/protocols/) and [`v1/corpora/`](v1/corpora/) bind a
+  registered protocol digest to the exact workload and corpus generator it
+  names.
 
 Once a version has shipped, its accepted meaning is immutable. Additive fields
 still require a new version directory: `additionalProperties: false` is a
@@ -39,19 +42,25 @@ the public-data allowlist. Ingestion must also run semantic validation that JSON
 Schema cannot express cleanly:
 
 1. Recompute every digest instead of trusting the client value.
-2. Require `completed_at >= started_at` and a bounded run duration.
-3. Require every measurement `case_id` to exist in `workload.cases`.
-4. Require unique `(case_id, round_index)` pairs and the declared number of
+2. For `protocol_strength: registered`, look up `(protocol_id,
+   protocol_version)` in `v1/protocols/` and require the entire submitted
+   workload, including corpus, concurrency, cache state, and cases, to equal the
+   registered workload byte-for-byte after canonicalization. Also verify the
+   corpus digest against `v1/corpora/`. A changed workload with an unchanged
+   registered digest is invalid, not a new cohort.
+3. Require `completed_at >= started_at` and a bounded run duration.
+4. Require every measurement `case_id` to exist in `workload.cases`.
+5. Require unique `(case_id, round_index)` pairs and the declared number of
    measured rounds for every case.
-5. Require observed token counts to satisfy the protocol tolerance and reject
+6. Require observed token counts to satisfy the protocol tolerance and reject
    incomplete samples from speed aggregates.
-6. Check `performance_cores + efficiency_cores == cpu_cores` when both optional
+7. Check `performance_cores + efficiency_cores == cpu_cores` when both optional
    core counts are present.
-7. Apply deduplication, anomaly, correctness, identity, and trust checks on the
+8. Apply deduplication, anomaly, correctness, identity, and trust checks on the
    server.
-8. Require `total_duration_ms >= ttft_ms + decode_duration_ms` within the
+9. Require `total_duration_ms >= ttft_ms + decode_duration_ms` within the
    protocol's documented timer tolerance.
-9. For an experiment group, require exactly one baseline; identical model,
+10. For an experiment group, require exactly one baseline; identical model,
    machine profile, runtime stack, workload, and collector version; unique arms
    and sequence indexes; close timestamps; and effective configs that differ
    only at `varied_fields`. Reject a causal speedup when thermal, power, or
@@ -75,9 +84,25 @@ campaign participation lane, not a fail-open trust verdict.
 
 ## Canonical digests
 
-Canonicalize each projection with JSON Canonicalization Scheme (RFC 8785), hash
-the UTF-8 bytes with SHA-256, encode lowercase hexadecimal, and prefix the result
-with `sha256:`.
+Canonicalize each projection with **Rapid Canonical JSON v1 (RCJ-1)**, hash the
+UTF-8 bytes with SHA-256, encode lowercase hexadecimal, and prefix the result
+with `sha256:`. RCJ-1 deliberately excludes JSON floating-point numbers, the
+source of Python/Swift/JavaScript exponent and rounding drift. Fractional wire
+values use named scaled integers: probabilities and temperature use millionths;
+bit widths use `*_bits_x2` so 2.5-bit is represented as `5`.
+
+RCJ-1 is exactly:
+
+1. Objects use schema-defined ASCII keys sorted lexicographically by byte value;
+   arrays preserve their contract-defined order.
+2. Strings are NFC-normalized, encoded directly as UTF-8, and use the shortest
+   JSON escapes for quote, backslash, and controls. Slash and non-ASCII
+   characters are not escaped.
+3. Integers are restricted to `[-9007199254740991, 9007199254740991]` and use
+   base-10 with no leading zero, plus sign, exponent, decimal point, or negative
+   zero. Booleans and null are lowercase JSON literals.
+4. No insignificant whitespace or trailing newline is emitted. Any float is a
+   contract error rather than something a producer may canonicalize.
 
 The three digest values in
 [`v1/examples/benchmark-run.example.json`](v1/examples/benchmark-run.example.json)
@@ -89,14 +114,14 @@ byte-for-byte before it can emit v1 payloads.
 | `model.identity_digest` | `{schema_version, source, artifact, quantization}` | `display`, `family`, `identity_strength` |
 | `machine.profile_digest` | `machine.profile` | OS, run conditions, install ID |
 | `execution.config_digest` | `{load, generation, features}` | runtime versions |
-| `workload.protocol_digest` | Published protocol document selected by `protocol_id` + `protocol_version` | Result measurements |
+| `workload.protocol_digest` | Registered workload excluding only `protocol_digest` | Result measurements |
 
 Artifact manifests have two closed v1 bases:
 
-- `huggingface_tree`: RFC 8785 array sorted by repository-relative POSIX path;
+- `huggingface_tree`: RCJ-1 array sorted by NFC repository-relative POSIX path;
   each entry is `{path, size_bytes, blob_oid}` from the immutable resolved
   revision. Paths are NFC-normalized and must not contain `..`.
-- `content_sha256`: RFC 8785 array sorted by model-root-relative POSIX path;
+- `content_sha256`: RCJ-1 array sorted by NFC model-root-relative POSIX path;
   each required config, tokenizer, and weight entry is
   `{path, size_bytes, sha256}`. It hashes file content, never the absolute model
   root. Local models must use this basis.
@@ -144,6 +169,10 @@ community results never write production defaults directly.
 Only `profile_completeness: complete` enters a formal machine cohort. Partial
 profiles remain visible exploratory evidence and cannot support a promoted
 machine-specific recommendation.
+
+Only `protocol_strength: registered` enters formal comparison or recommendation
+evidence. A custom workload remains shareable exploratory data and receives a
+server-recomputed digest, but cannot claim a registered protocol ID/version.
 
 ## Privacy boundary
 

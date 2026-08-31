@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "rapid-synthetic-token-corpus",
+  "version": 1,
+  "digest": "sha256:451155d21587a4bf0079d5351d23cf50e7da1342ed546229823c3c92f68f2cde",
+  "generator": {
+    "algorithm": "seeded-token-id-v1",
+    "seed": 12648430,
+    "minimum_token_id": 256,
+    "maximum_token_id_rule": "min-vocab-size-100000-exclusive",
+    "decode_then_retokenize": true
+  }
+}

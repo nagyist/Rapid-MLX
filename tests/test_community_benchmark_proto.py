@@ -16,6 +16,8 @@ referencing = pytest.importorskip("referencing")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROTO_ROOT = REPO_ROOT / "proto" / "community-benchmark" / "v1"
 EXAMPLES_ROOT = PROTO_ROOT / "examples"
+PROTOCOLS_ROOT = PROTO_ROOT / "protocols"
+CORPORA_ROOT = PROTO_ROOT / "corpora"
 
 SCHEMA_FILES = (
     "model-identity.schema.json",
@@ -142,16 +144,16 @@ def test_local_identity_rejects_repository_coordinates(schemas, registry) -> Non
 def test_quantized_model_requires_method_and_weight_bits(schemas, registry) -> None:
     example = _load(EXAMPLES_ROOT / "model-identity.example.json")
     del example["quantization"]["method"]
-    del example["quantization"]["weight_bits"]
+    del example["quantization"]["weight_bits_x2"]
 
     errors = list(
         _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
     )
-    assert {"method", "weight_bits"}.issubset(
+    assert {"method", "weight_bits_x2"}.issubset(
         {
             field
             for error in errors
-            for field in ("method", "weight_bits")
+            for field in ("method", "weight_bits_x2")
             if field in error.message
         }
     )
@@ -182,13 +184,23 @@ def test_external_draft_method_requires_draft_artifact(schemas, registry) -> Non
 
 def test_quantized_kv_cache_requires_bit_width(schemas, registry) -> None:
     example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    del example["execution"]["features"]["kv_cache"]["bits"]
+    del example["execution"]["features"]["kv_cache"]["bits_x2"]
 
     errors = list(
         _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
     )
     assert errors
-    assert any("bits" in error.message for error in errors)
+    assert any("bits_x2" in error.message for error in errors)
+
+
+def test_scaled_execution_values_reject_wire_floats(schemas, registry) -> None:
+    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
+    example["execution"]["generation"]["temperature_millionths"] = 0.7
+    errors = list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
+    )
+    assert errors
+    assert any("is not of type 'integer'" in error.message for error in errors)
 
 
 def test_complete_machine_profile_requires_all_cohort_axes(schemas, registry) -> None:
@@ -298,15 +310,32 @@ def test_machine_profile_digest_does_not_change_with_run_conditions() -> None:
     assert example["machine"]["profile"] == before
 
 
-def _digest(value: object) -> str:
-    """RFC 8785-equivalent for the integer/string/bool/null v1 golden vectors."""
-    canonical = json.dumps(
+def _reject_floats(value: object) -> None:
+    if isinstance(value, float):
+        raise TypeError("RCJ-1 forbids floating-point values")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not key.isascii():
+                raise TypeError("RCJ-1 object keys must be ASCII")
+            _reject_floats(child)
+    elif isinstance(value, list):
+        for child in value:
+            _reject_floats(child)
+
+
+def _canonical(value: object) -> bytes:
+    """Rapid Canonical JSON v1 for schema-bounded values."""
+    _reject_floats(value)
+    return json.dumps(
         value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _digest(value: object) -> str:
+    return f"sha256:{hashlib.sha256(_canonical(value)).hexdigest()}"
 
 
 def test_cross_language_digest_golden_vectors() -> None:
@@ -326,6 +355,44 @@ def test_cross_language_digest_golden_vectors() -> None:
         _digest(example["machine"]["profile"]) == example["machine"]["profile_digest"]
     )
     assert _digest(execution_projection) == execution["config_digest"]
+
+
+def test_canonical_profile_handles_unicode_but_rejects_float_exponents() -> None:
+    value = {
+        "path": "模型/权重.safetensors",
+        "sha256": "a" * 64,
+        "size_bytes": 123,
+    }
+    assert _canonical(value).decode("utf-8") == (
+        '{"path":"模型/权重.safetensors","sha256":"' + "a" * 64 + '","size_bytes":123}'
+    )
+
+    with pytest.raises(TypeError, match="forbids floating-point"):
+        _canonical({"temperature": 0.7, "tiny": 1e-7})
+
+
+def test_registered_workload_exactly_matches_published_protocol() -> None:
+    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
+    entry = _load(PROTOCOLS_ROOT / "rapid-community-speed-v1.json")
+    workload = example["workload"]
+
+    assert workload == entry["workload"]
+    projection = {
+        key: value for key, value in workload.items() if key != "protocol_digest"
+    }
+    assert _digest(projection) == workload["protocol_digest"]
+    assert entry["protocol_digest"] == workload["protocol_digest"]
+
+    changed = copy.deepcopy(workload)
+    changed["cases"][0]["target_prompt_tokens"] = 513
+    assert changed["protocol_digest"] == workload["protocol_digest"]
+    assert changed != entry["workload"]
+
+
+def test_registered_corpus_digest_matches_generator_definition() -> None:
+    corpus = _load(CORPORA_ROOT / "rapid-synthetic-token-corpus-v1.json")
+    projection = {key: value for key, value in corpus.items() if key != "digest"}
+    assert _digest(projection) == corpus["digest"]
 
 
 def test_example_measurements_match_declared_cases() -> None:

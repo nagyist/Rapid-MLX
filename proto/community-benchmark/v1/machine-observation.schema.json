@@ -73,7 +73,7 @@
     },
     "profile_digest": {
       "$ref": "#/$defs/sha256Digest",
-      "description": "RFC 8785 + SHA-256 digest of the profile object. Shared by all Macs with the same declared profile; not a device fingerprint. The server recomputes it."
+      "description": "Rapid Canonical JSON v1 + SHA-256 digest of the profile object. Shared by all Macs with the same declared profile; not a device fingerprint. The server recomputes it."
     },
     "os": {
       "type": "object",
