@@ -485,7 +485,6 @@ def test_ensure_routing_config_raises_when_prefetch_does_not_materialize(monkeyp
     crashing MLLM engine (#352). Assert it fails fast with an actionable error
     instead.
     """
-    from vllm_mlx import cli as cli_mod
     from vllm_mlx import model_metadata as mm
     from vllm_mlx import server
 
@@ -501,7 +500,7 @@ def test_ensure_routing_config_raises_when_prefetch_does_not_materialize(monkeyp
         called["prefetch"] = True  # ran, but errored + put no config on disk
         raise original_err
 
-    monkeypatch.setattr(cli_mod, "_ensure_model_downloaded", _failing_prefetch)
+    monkeypatch.setattr(server, "_prefetch_routing_config", _failing_prefetch)
 
     with pytest.raises(RuntimeError) as excinfo:
         server._ensure_routing_config(model)
@@ -527,7 +526,6 @@ def test_ensure_routing_config_warns_when_prefetch_errors_but_config_lands(
     attributable."""
     import logging
 
-    from vllm_mlx import cli as cli_mod
     from vllm_mlx import model_metadata as mm
     from vllm_mlx import server
 
@@ -543,7 +541,7 @@ def test_ensure_routing_config_warns_when_prefetch_errors_but_config_lands(
         state["materialized"] = True
         raise OSError("connection reset mid-download")
 
-    monkeypatch.setattr(cli_mod, "_ensure_model_downloaded", _partial_prefetch)
+    monkeypatch.setattr(server, "_prefetch_routing_config", _partial_prefetch)
 
     with caplog.at_level(logging.WARNING, logger="vllm_mlx.server"):
         # Config is readable afterward → no raise.
@@ -551,13 +549,12 @@ def test_ensure_routing_config_warns_when_prefetch_errors_but_config_lands(
 
     joined = " ".join(rec.message for rec in caplog.records)
     assert "connection reset mid-download" in joined
-    assert "partially downloaded" in joined
+    assert "later weight loading" in joined
 
 
 def test_ensure_routing_config_succeeds_when_prefetch_materializes(monkeypatch):
     """Happy path for the first-time uncached startup: config is absent, the
     prefetch materializes it, and ``_ensure_routing_config`` returns cleanly."""
-    from vllm_mlx import cli as cli_mod
     from vllm_mlx import model_metadata as mm
     from vllm_mlx import server
 
@@ -571,7 +568,7 @@ def test_ensure_routing_config_succeeds_when_prefetch_materializes(monkeypatch):
     def _fake_prefetch(name):
         state["materialized"] = True
 
-    monkeypatch.setattr(cli_mod, "_ensure_model_downloaded", _fake_prefetch)
+    monkeypatch.setattr(server, "_prefetch_routing_config", _fake_prefetch)
 
     # Must not raise.
     server._ensure_routing_config("some/uncached-but-fetchable-4bit")
@@ -581,7 +578,6 @@ def test_ensure_routing_config_succeeds_when_prefetch_materializes(monkeypatch):
 def test_ensure_routing_config_skips_prefetch_when_config_already_readable(monkeypatch):
     """Warm cache / local checkpoint: config already readable → no download is
     attempted (keeps warm starts and the unit suite fully offline)."""
-    from vllm_mlx import cli as cli_mod
     from vllm_mlx import model_metadata as mm
     from vllm_mlx import server
 
@@ -590,27 +586,45 @@ def test_ensure_routing_config_skips_prefetch_when_config_already_readable(monke
     def _must_not_run(name):  # pragma: no cover - asserted never called
         raise AssertionError("prefetch must be skipped when config is readable")
 
-    monkeypatch.setattr(cli_mod, "_ensure_model_downloaded", _must_not_run)
+    monkeypatch.setattr(server, "_prefetch_routing_config", _must_not_run)
 
     server._ensure_routing_config("mlx-community/Qwen3.5-9B-4bit")
 
 
-def test_ensure_routing_config_propagates_disk_gate_systemexit(monkeypatch):
-    """The intentional hard disk-space gate (``SystemExit``) from the prefetch
-    must propagate unchanged — it is a fail-fast, not a swallowable hiccup."""
-    from vllm_mlx import cli as cli_mod
+def test_ensure_routing_config_propagates_metadata_prefetch_systemexit(monkeypatch):
+    """Control-flow exits from the metadata prefetch must propagate unchanged."""
     from vllm_mlx import model_metadata as mm
     from vllm_mlx import server
 
     monkeypatch.setattr(mm, "read_model_metadata", lambda name: None)
 
-    def _disk_gate(name):
+    def _metadata_exit(name):
         raise SystemExit(1)
 
-    monkeypatch.setattr(cli_mod, "_ensure_model_downloaded", _disk_gate)
+    monkeypatch.setattr(server, "_prefetch_routing_config", _metadata_exit)
 
     with pytest.raises(SystemExit):
         server._ensure_routing_config("some/uncached-4bit")
+
+
+def test_routing_prefetch_requests_config_only(monkeypatch):
+    """The pre-lane fetch must never include model weight files (#2860)."""
+    from vllm_mlx import server
+
+    calls = []
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda repo, **kwargs: calls.append((repo, kwargs)),
+    )
+
+    server._prefetch_routing_config("publisher/vision-model")
+
+    assert calls == [
+        (
+            "publisher/vision-model",
+            {"allow_patterns": ["config.json", "*/config.json"]},
+        )
+    ]
 
 
 def test_load_model_infers_programmatic_max_tokens_explicit(monkeypatch):
