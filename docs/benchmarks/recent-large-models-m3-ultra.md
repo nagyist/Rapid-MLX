@@ -127,11 +127,24 @@ The target process reported 165.4 GB MLX active memory and approximately
 This short-prompt qualification did not capture TTFT or prefill, so the README
 leaves those cells blank instead of deriving them from wall time.
 
-The serving shape can be reproduced after the GLM support change is present:
+Resolve the exact measured checkpoint revision first, then serve that immutable
+local snapshot. This avoids accidentally benchmarking a newer cached revision:
 
 ```bash
+MODEL_DIR="$(
+  python - <<'PY'
+from huggingface_hub import snapshot_download
+
+print(snapshot_download(
+    repo_id="Vontra/GLM-5.3-Flash-MLX-4bit-MTP",
+    revision="06d6c7530e8290e20fabdc37a825ce07bdfc490c",
+))
+PY
+)"
+
 HF_HUB_OFFLINE=1 rapid-mlx serve \
-  glm5.3-flash-4bit --host 127.0.0.1 --port 8465 --no-thinking
+  "$MODEL_DIR" --served-model-name glm5.3-flash-4bit \
+  --host 127.0.0.1 --port 8465 --no-thinking
 ```
 
 In another shell, send one discarded warmup followed by three identical
