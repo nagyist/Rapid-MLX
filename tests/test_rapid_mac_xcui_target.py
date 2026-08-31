@@ -84,6 +84,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "build/Rapid-MLX Desktop.app" in runner
     assert "lsregister" in runner
     assert "xcodebuild -version" in runner
+    assert "/usr/bin/automationmodetool" in runner
     assert 'DERIVED_DATA="${RAPID_XCUI_DERIVED_DATA:' in runner
     assert "${RESULT_BUNDLE%.xcresult}-DerivedData" in runner
     assert '-derivedDataPath "$DERIVED_DATA"' in runner
@@ -92,6 +93,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "CODE_SIGNING_REQUIRED=YES" in runner
     assert "CODE_SIGN_IDENTITY=-" in runner
     assert "CODE_SIGNING_ALLOWED=NO" not in runner
+    assert '${test_selection[@]+"${test_selection[@]}"}' in runner
     assert "XCUIApplication(url: appURL)" in source
     assert 'appendingPathComponent("build/Rapid-MLX Desktop.app")' in source
     assert source.count('"CFFIXED_USER_HOME": testHome.path') == 1

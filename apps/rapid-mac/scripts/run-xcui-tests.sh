@@ -18,6 +18,9 @@ xcodebuild -version >/dev/null 2>&1 || {
     echo "error: generated Xcode project missing: $PROJECT" >&2
     exit 1
 }
+if [[ -x /usr/bin/automationmodetool ]]; then
+    /usr/bin/automationmodetool
+fi
 
 # XCUIApplication(bundleIdentifier:) resolves through LaunchServices.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -34,7 +37,7 @@ xcodebuild test \
     -destination 'platform=macOS' \
     -derivedDataPath "$DERIVED_DATA" \
     -resultBundlePath "$RESULT_BUNDLE" \
-    "${test_selection[@]}" \
+    ${test_selection[@]+"${test_selection[@]}"} \
     CODE_SIGN_STYLE=Manual \
     CODE_SIGNING_ALLOWED=YES \
     CODE_SIGNING_REQUIRED=YES \
