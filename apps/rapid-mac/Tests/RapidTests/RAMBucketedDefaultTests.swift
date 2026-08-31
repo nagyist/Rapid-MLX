@@ -41,6 +41,17 @@ struct RAMBucketedDefaultTests {
         throw CocoaError(.fileNoSuchFile)
     }
 
+    private func addressedPolicyData(_ object: [String: Any]) throws -> Data {
+        var addressed = object
+        guard let digest = ModelCatalog.atomicObjectDigest(
+            addressed.filter { $0.key != "policy_digest" }
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        addressed["policy_digest"] = digest
+        return try JSONSerialization.data(withJSONObject: addressed)
+    }
+
     // MARK: - Primary alias per RAM (rounds DOWN to nearest floor)
 
     @Test("Each RAM lands on the tier whose floor is the largest ≤ its RAM")
@@ -228,28 +239,77 @@ struct RAMBucketedDefaultTests {
         let data = try policyData()
         #expect(RAMBucketedDefault.parseRecommendationPolicy(data) != nil)
 
-        var tampered = try #require(
+        let original = try #require(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
+        var tampered = original
         tampered["machine_dimension"] = "available_memory_mib"
         let staleDigestData = try JSONSerialization.data(withJSONObject: tampered)
         #expect(RAMBucketedDefault.parseRecommendationPolicy(staleDigestData) == nil)
 
+        tampered = original
         var tiers = try #require(tampered["tiers"] as? [[String: Any]])
         var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
         picks[0]["execution_preset_id"] = "preset/unsupported"
         tiers[0]["picks"] = picks
         tampered["tiers"] = tiers
-        tampered["machine_dimension"] = "physical_memory_mib"
-        guard let recomputedDigest = ModelCatalog.atomicObjectDigest(
-            tampered.filter { $0.key != "policy_digest" }
-        ) else {
-            Issue.record("test policy must be RCJ-addressable")
-            return
-        }
-        tampered["policy_digest"] = recomputedDigest
-        let unsupportedData = try JSONSerialization.data(withJSONObject: tampered)
+        let unsupportedData = try addressedPolicyData(tampered)
         #expect(RAMBucketedDefault.parseRecommendationPolicy(unsupportedData) == nil)
+    }
+
+    @Test("Atomic policy rejects unknown fields at every schema boundary")
+    func atomicPolicyRejectsUnknownFields() throws {
+        let original = try #require(
+            JSONSerialization.jsonObject(with: policyData()) as? [String: Any]
+        )
+
+        var unknownTop = original
+        unknownTop["unexpected"] = true
+        #expect(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try addressedPolicyData(unknownTop)
+            ) == nil
+        )
+
+        var unknownTier = original
+        var tiers = try #require(unknownTier["tiers"] as? [[String: Any]])
+        tiers[0]["unexpected"] = true
+        unknownTier["tiers"] = tiers
+        #expect(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try addressedPolicyData(unknownTier)
+            ) == nil
+        )
+
+        var unknownPick = original
+        tiers = try #require(unknownPick["tiers"] as? [[String: Any]])
+        var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
+        picks[0]["unexpected"] = true
+        tiers[0]["picks"] = picks
+        unknownPick["tiers"] = tiers
+        #expect(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try addressedPolicyData(unknownPick)
+            ) == nil
+        )
+    }
+
+    @Test("Atomic policy rejects limitations the current display cannot represent")
+    func atomicPolicyRejectsMultipleLimitations() throws {
+        var policy = try #require(
+            JSONSerialization.jsonObject(with: policyData()) as? [String: Any]
+        )
+        var tiers = try #require(policy["tiers"] as? [[String: Any]])
+        var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
+        picks[0]["limitation_ids"] = ["not_for_coding", "basic_chat"]
+        tiers[0]["picks"] = picks
+        policy["tiers"] = tiers
+
+        #expect(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try addressedPolicyData(policy)
+            ) == nil
+        )
     }
 }
 
