@@ -7348,14 +7348,19 @@ class Scheduler:
             runtime = getattr(batch_generator, "_continuous_mtp_runtime", None)
             router_config = getattr(router, "config", None)
             runtime_capabilities = getattr(runtime, "capabilities", None)
-            if (
-                getattr(self.config, "mtp_continuous_batching", False)
-                and getattr(self.config, "mtp_allow_dynamic_membership", False)
-                and getattr(router_config, "allow_dynamic_membership", False)
-                and getattr(runtime_capabilities, "dynamic_membership", False)
-            ):
+            fixed_core = all(
+                getattr(runtime_capabilities, name, False) is True
+                for name in (
+                    "target_return_hidden",
+                    "mtp_return_hidden",
+                    "confirmed_target_forward",
+                    "ragged_rollback",
+                    "atomic_cache_commit",
+                )
+            )
+            if getattr(self.config, "mtp_continuous_batching", False) and fixed_core:
                 try:
-                    return max(
+                    capacity = max(
                         1,
                         min(
                             int(self.config.max_num_seqs),
@@ -7365,6 +7370,25 @@ class Scheduler:
                 except (AttributeError, TypeError, ValueError):
                     # Optional speculative acceleration must fail closed.
                     pass
+                else:
+                    driver = getattr(batch_generator, "_continuous_mtp_driver", None)
+                    if driver is None:
+                        # Collect the initial wave even for fixed-membership
+                        # mode. The router's min_batch_lanes gate decides
+                        # whether it becomes a continuous cohort or remains on
+                        # the singleton verifier.
+                        return capacity
+                    if (
+                        getattr(self.config, "mtp_allow_dynamic_membership", False)
+                        and getattr(router_config, "allow_dynamic_membership", False)
+                        and getattr(runtime_capabilities, "dynamic_membership", False)
+                        and getattr(driver, "dynamic_membership", False)
+                    ):
+                        return capacity
+                    # A live fixed cohort may drain but must not admit a new
+                    # row into the same generator. Re-open capacity only after
+                    # the coordinator clears the driver between transactions.
+                    return len(getattr(self, "running", ()))
             return 1
         return self.config.max_num_seqs
 

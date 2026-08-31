@@ -1785,27 +1785,79 @@ def test_mtp_running_limit_uses_only_attested_continuous_capacity():
         allow_dynamic_membership=True,
         max_lanes=4,
     )
-    runtime_capabilities = SimpleNamespace(dynamic_membership=True)
+    runtime_capabilities = SimpleNamespace(
+        target_return_hidden=True,
+        mtp_return_hidden=True,
+        confirmed_target_forward=True,
+        ragged_rollback=True,
+        atomic_cache_commit=True,
+        dynamic_membership=True,
+    )
     scheduler.batch_generator = SimpleNamespace(
         _continuous_mtp_router=SimpleNamespace(config=router_config),
         _continuous_mtp_runtime=SimpleNamespace(
             capabilities=runtime_capabilities,
         ),
+        _continuous_mtp_driver=SimpleNamespace(dynamic_membership=True),
     )
+    scheduler.running = {}
 
     assert scheduler._max_running_sequences() == 4
 
-    # Every layer of the feature-detected contract is fail-closed.  A stale
-    # config flag, router, or runtime descriptor cannot expose the legacy
-    # single-request verifier to a multi-row generation batch.
-    for owner, field in (
-        (scheduler.config, "mtp_allow_dynamic_membership"),
-        (router_config, "allow_dynamic_membership"),
-        (runtime_capabilities, "dynamic_membership"),
-    ):
-        setattr(owner, field, False)
-        assert scheduler._max_running_sequences() == 1
-        setattr(owner, field, True)
+    # Any missing fixed-core runtime fact fails closed before the legacy
+    # verifier can be exposed to a multi-row generation batch.
+    runtime_capabilities.atomic_cache_commit = False
+    assert scheduler._max_running_sequences() == 1
+
+
+def test_mtp_fixed_membership_collects_initial_wave_then_freezes_admission():
+    from types import SimpleNamespace
+
+    from vllm_mlx.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(
+        spec_decode="mtp",
+        max_num_seqs=8,
+        mtp_continuous_batching=True,
+        mtp_allow_dynamic_membership=False,
+    )
+    scheduler.spec_decode_runtime_attempted = True
+    scheduler.spec_decode_runtime_method = "mtp"
+    scheduler.running = {}
+    scheduler.batch_generator = SimpleNamespace(
+        _continuous_mtp_router=SimpleNamespace(
+            config=SimpleNamespace(
+                allow_dynamic_membership=False,
+                max_lanes=4,
+            )
+        ),
+        _continuous_mtp_runtime=SimpleNamespace(
+            capabilities=SimpleNamespace(
+                target_return_hidden=True,
+                mtp_return_hidden=True,
+                confirmed_target_forward=True,
+                ragged_rollback=True,
+                atomic_cache_commit=True,
+                dynamic_membership=False,
+            )
+        ),
+        _continuous_mtp_driver=None,
+    )
+
+    # The scheduler can collect a B=2+ initial wave even though later joins
+    # are disabled.
+    assert scheduler._max_running_sequences() == 4
+
+    scheduler.running = {"req-1": object(), "req-2": object()}
+    scheduler.batch_generator._continuous_mtp_driver = SimpleNamespace(
+        dynamic_membership=False
+    )
+    assert scheduler._max_running_sequences() == 2
+
+    # Once the fixed cohort turns over, the next wave may be collected.
+    scheduler.batch_generator._continuous_mtp_driver = None
+    assert scheduler._max_running_sequences() == 4
 
 
 def test_mtp_running_limit_clamps_malformed_continuous_capacity_to_one():
@@ -1830,9 +1882,18 @@ def test_mtp_running_limit_clamps_malformed_continuous_capacity_to_one():
             )
         ),
         _continuous_mtp_runtime=SimpleNamespace(
-            capabilities=SimpleNamespace(dynamic_membership=True),
+            capabilities=SimpleNamespace(
+                target_return_hidden=True,
+                mtp_return_hidden=True,
+                confirmed_target_forward=True,
+                ragged_rollback=True,
+                atomic_cache_commit=True,
+                dynamic_membership=True,
+            ),
         ),
+        _continuous_mtp_driver=SimpleNamespace(dynamic_membership=True),
     )
+    scheduler.running = {}
 
     assert scheduler._max_running_sequences() == 1
 
