@@ -247,6 +247,22 @@ def test_invalid_tier_fails_alias_registry_validation() -> None:
         )
 
 
+@pytest.mark.parametrize("tier", [[], {}, True, None])
+def test_non_string_tier_fails_alias_registry_validation(tier: object) -> None:
+    from vllm_mlx.model_aliases import _coerce
+
+    with pytest.raises(ValueError, match="must be a string"):
+        _coerce(
+            "bad",
+            {
+                "hf_path": "example/model",
+                "supports_native_mtp": True,
+                "mtp_speculative_tokens": 1,
+                "mtp_continuous_batching_tier": tier,
+            },
+        )
+
+
 def test_qualification_benchmark_dry_run_is_network_free() -> None:
     script = (
         Path(__file__).resolve().parents[1] / "bench" / "bench_continuous_mtp_server.py"
