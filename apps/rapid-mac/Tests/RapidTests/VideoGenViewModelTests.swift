@@ -34,7 +34,7 @@ struct VideoGenViewModelTests {
         #expect(viewModel.selectedAlias == "video-24")
         #expect(viewModel.isSelectedModelEligible)
         #expect(!viewModel.isModelEligible(tooLarge))
-        #expect(viewModel.supportedModes == [.text, .image])
+        #expect(viewModel.supportedModes == [.text])
     }
 
     @Test("Live capabilities gate Image mode and submission carries the reference")
@@ -284,7 +284,8 @@ private actor VideoFakeClient: VideoClientProtocol {
         "seconds":{"minimum":1,"maximum":20,"default":4},
         "fps":{"minimum":1,"maximum":60,"default":24,"fixed":false},
         "frames":{"minimum":9,"maximum":1201,"step":8,"offset":1},
-        "workload":{"metric":"pixel_frames","maximum":38141952,"dimension_rounding":"multiple_of_64"}
+        "workload":{"metric":"pixel_frames","maximum":38141952,"dimension_rounding":"multiple_of_64"},
+        "input_reference":{"accepted":true,"maximum_bytes":20971520,"formats":["jpeg","png","webp"]}
       }
     }
     """#

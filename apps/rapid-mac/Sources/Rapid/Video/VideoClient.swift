@@ -136,6 +136,24 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
     let modes: [VideoModelCapability]
     let limits: Limits
 
+    var acceptedReferenceMIMETypes: Set<String> {
+        guard let input = limits.inputReference, input.accepted else { return [] }
+        return Set(input.formats.compactMap { format in
+            switch format.lowercased() {
+            case "jpeg", "jpg", "image/jpeg": "image/jpeg"
+            case "png", "image/png": "image/png"
+            case "webp", "image/webp": "image/webp"
+            default: nil
+            }
+        })
+    }
+
+    var supportsImageInput: Bool {
+        modes.contains(.imageToVideo)
+            && referenceMaximumBytes > 0
+            && !acceptedReferenceMIMETypes.isEmpty
+    }
+
     /// Conservative, familiar output shapes. The API remains authoritative:
     /// candidates outside its dimensions, alignment, or area are removed.
     var sizePresets: [String] {
@@ -149,25 +167,27 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
         var accepted: [(area: Int, order: Int, value: String)] = []
         for (index, value) in candidates.enumerated() {
             guard seen.insert(value).inserted,
-                  let dimensions = Self.parseSize(value) else { continue }
+                  let dimensions = Self.parseSize(value),
+                  let area = Self.product(dimensions.width, dimensions.height) else { continue }
             if explicitlySupported.contains(value) {
-                accepted.append((dimensions.width * dimensions.height, index, value))
+                accepted.append((area, index, value))
                 continue
             }
             guard let width = limits.size.width,
                   let height = limits.size.height,
-                  (width.minimum...width.maximum).contains(dimensions.width),
-                  (height.minimum...height.maximum).contains(dimensions.height),
+                  Self.contains(dimensions.width, minimum: width.minimum, maximum: width.maximum),
+                  Self.contains(dimensions.height, minimum: height.minimum, maximum: height.maximum),
                   dimensions.width.isMultiple(of: width.multipleOf),
                   dimensions.height.isMultiple(of: height.multipleOf) else {
                 continue
             }
             if let maximumArea = limits.size.maximumArea {
-                let roundedWidth = Self.roundUp(dimensions.width, to: width.multipleOf)
-                let roundedHeight = Self.roundUp(dimensions.height, to: height.multipleOf)
-                guard roundedWidth * roundedHeight <= maximumArea else { continue }
+                guard let roundedWidth = Self.roundUp(dimensions.width, to: width.multipleOf),
+                      let roundedHeight = Self.roundUp(dimensions.height, to: height.multipleOf),
+                      let roundedArea = Self.product(roundedWidth, roundedHeight),
+                      roundedArea <= maximumArea else { continue }
             }
-            accepted.append((dimensions.width * dimensions.height, index, value))
+            accepted.append((area, index, value))
         }
         return accepted.sorted { lhs, rhs in
             lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 < rhs.0
@@ -177,11 +197,15 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
     func durationPresets(for size: String) -> [Int] {
         let candidates = Set([limits.seconds.minimum, 1, 2, 4]).sorted()
         let values = candidates.filter {
-            (limits.seconds.minimum...limits.seconds.maximum).contains($0)
+            Self.contains($0, minimum: limits.seconds.minimum, maximum: limits.seconds.maximum)
                 && workloadAllows(seconds: $0, size: size)
         }
         if !values.isEmpty { return values }
-        return (limits.seconds.minimum...limits.seconds.maximum).contains(limits.seconds.default)
+        return Self.contains(
+            limits.seconds.default,
+            minimum: limits.seconds.minimum,
+            maximum: limits.seconds.maximum
+        )
             && workloadAllows(seconds: limits.seconds.default, size: size)
             ? [limits.seconds.default] : []
     }
@@ -193,6 +217,55 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
         return min(inputReference.maximumBytes, VideoClient.maxReferenceBytes)
     }
 
+    func validated() throws -> Self {
+        let size = limits.size
+        let validDimension: (Limits.Dimension) -> Bool = {
+            $0.minimum > 0 && $0.maximum >= $0.minimum && $0.multipleOf > 0
+        }
+        let validSize: Bool
+        switch size.type {
+        case "fixed":
+            validSize = !(size.values ?? []).isEmpty
+                && (size.values ?? []).allSatisfy { Self.parseSize($0) != nil }
+        case "range":
+            validSize = size.width.map(validDimension) == true
+                && size.height.map(validDimension) == true
+                && (size.maximumArea.map { $0 > 0 } ?? true)
+        default:
+            validSize = false
+        }
+        let seconds = limits.seconds
+        let fps = limits.fps
+        let frames = limits.frames
+        let workload = limits.workload
+        let validInput = limits.inputReference.map {
+            $0.maximumBytes >= 0
+                && (!$0.accepted || ($0.maximumBytes > 0 && !acceptedReferenceMIMETypes.isEmpty))
+        } ?? true
+        guard !model.isEmpty,
+              !family.isEmpty,
+              !modes.isEmpty,
+              validSize,
+              seconds.minimum > 0,
+              seconds.maximum >= seconds.minimum,
+              Self.contains(seconds.default, minimum: seconds.minimum, maximum: seconds.maximum),
+              fps.minimum > 0,
+              fps.maximum >= fps.minimum,
+              Self.contains(fps.default, minimum: fps.minimum, maximum: fps.maximum),
+              frames.minimum > 0,
+              frames.maximum >= frames.minimum,
+              frames.step > 0,
+              frames.offset >= 0,
+              frames.offset <= frames.maximum,
+              workload.metric == "pixel_frames",
+              workload.maximum > 0,
+              !workload.dimensionRounding.isEmpty,
+              validInput else {
+            throw VideoClientError.invalidResponse
+        }
+        return self
+    }
+
     private func workloadAllows(seconds: Int, size: String) -> Bool {
         guard limits.workload.metric == "pixel_frames",
               let dimensions = Self.parseSize(size),
@@ -200,8 +273,8 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
               limits.fps.default > 0 else { return false }
         let widthMultiple = limits.size.width?.multipleOf ?? 1
         let heightMultiple = limits.size.height?.multipleOf ?? 1
-        let width = Self.roundUp(dimensions.width, to: widthMultiple)
-        let height = Self.roundUp(dimensions.height, to: heightMultiple)
+        guard let width = Self.roundUp(dimensions.width, to: widthMultiple),
+              let height = Self.roundUp(dimensions.height, to: heightMultiple) else { return false }
         let frameStep = max(1, limits.frames.step)
         let frameOffset = limits.frames.offset
         guard frameOffset >= 0 else { return false }
@@ -227,13 +300,27 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
     private static func parseSize(_ value: String) -> (width: Int, height: Int)? {
         let parts = value.lowercased().split(separator: "x", maxSplits: 1)
         guard parts.count == 2,
-              let width = Int(parts[0]), let height = Int(parts[1]) else { return nil }
+              let width = Int(parts[0]), let height = Int(parts[1]),
+              width > 0, height > 0 else { return nil }
         return (width, height)
     }
 
-    private static func roundUp(_ value: Int, to multiple: Int) -> Int {
-        guard multiple > 0 else { return value }
-        return ((value + multiple - 1) / multiple) * multiple
+    private static func contains(_ value: Int, minimum: Int, maximum: Int) -> Bool {
+        minimum <= maximum && value >= minimum && value <= maximum
+    }
+
+    private static func product(_ lhs: Int, _ rhs: Int) -> Int? {
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? nil : value
+    }
+
+    private static func roundUp(_ value: Int, to multiple: Int) -> Int? {
+        guard value >= 0, multiple > 0 else { return nil }
+        let (offsetValue, additionOverflow) = value.addingReportingOverflow(multiple - 1)
+        guard !additionOverflow else { return nil }
+        let quotient = offsetValue / multiple
+        let (result, multiplicationOverflow) = quotient.multipliedReportingOverflow(by: multiple)
+        return multiplicationOverflow ? nil : result
     }
 }
 
@@ -296,7 +383,10 @@ struct VideoClient: VideoClientProtocol, @unchecked Sendable {
     )[0].appendingPathComponent("Rapid/VideoPreviews", isDirectory: true)
 
     func capabilities(port: Int, bearer: String?) async throws -> VideoCapabilities {
-        try await decode(request(path: "v1/videos/capabilities", port: port, bearer: bearer))
+        let value: VideoCapabilities = try await decode(
+            request(path: "v1/videos/capabilities", port: port, bearer: bearer)
+        )
+        return try value.validated()
     }
 
     func create(

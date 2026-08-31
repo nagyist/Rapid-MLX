@@ -41,6 +41,38 @@ struct VideoClientTests {
         #expect(value.durationPresets(for: "512x512") == [3, 4])
     }
 
+    @Test("Malformed capability ranges fail closed")
+    func malformedCapabilitiesFailClosed() async {
+        let client = makeClient()
+        let json = Self.capabilitiesJSON.replacingOccurrences(
+            of: #""minimum":1,"maximum":20,"default":4"#,
+            with: #""minimum":5,"maximum":3,"default":4"#
+        )
+        VideoStubProtocol.response = (200, Data(json.utf8))
+
+        await #expect(throws: VideoClientError.invalidResponse) {
+            _ = try await client.capabilities(port: 8123, bearer: nil)
+        }
+    }
+
+    @Test("Image input follows advertised formats and acceptance")
+    func imageInputUsesCapabilityContract() throws {
+        let jpegOnly = Self.capabilitiesJSON.replacingOccurrences(
+            of: #"["jpeg","png","webp"]"#,
+            with: #"["jpeg"]"#
+        )
+        let value = try JSONDecoder().decode(VideoCapabilities.self, from: Data(jpegOnly.utf8))
+        #expect(value.supportsImageInput)
+        #expect(value.acceptedReferenceMIMETypes == ["image/jpeg"])
+
+        let rejected = jpegOnly.replacingOccurrences(of: #""accepted":true"#, with: #""accepted":false"#)
+        let rejectedValue = try JSONDecoder().decode(
+            VideoCapabilities.self, from: Data(rejected.utf8)
+        )
+        #expect(!rejectedValue.supportsImageInput)
+        #expect(rejectedValue.acceptedReferenceMIMETypes.isEmpty)
+    }
+
     @Test("Reference MIME type is detected from bytes, not the filename")
     func referenceMIMETypeUsesBytes() throws {
         let png = try #require(Data(base64Encoded:

@@ -94,14 +94,20 @@ final class VideoGenViewModel {
     var supportedModes: [Mode] {
         guard let model = selectedModel else { return [] }
         return Mode.allCases.filter { candidate in
-            model.videoCapabilities.contains(candidate.capability)
-                && (capabilities?.modes.contains(candidate.capability) ?? true)
+            guard model.videoCapabilities.contains(candidate.capability) else { return false }
+            if candidate == .image {
+                return capabilities?.supportsImageInput == true
+            }
+            return capabilities?.modes.contains(candidate.capability) ?? true
         }
     }
 
     var sizePresets: [String] { capabilities?.sizePresets ?? [] }
     var durationPresets: [Int] { capabilities?.durationPresets(for: size) ?? [] }
     var referenceMaximumBytes: Int { capabilities?.referenceMaximumBytes ?? 0 }
+    var acceptedReferenceMIMETypes: Set<String> {
+        capabilities?.acceptedReferenceMIMETypes ?? []
+    }
 
     var isSelectedModelEligible: Bool {
         selectedModel.map(isModelEligible) ?? false

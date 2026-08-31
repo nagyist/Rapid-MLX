@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 enum VideoReferenceLoaderError: Error, Equatable {
     case notRegularFile
     case tooLarge
+    case unsupportedFormat
 }
 
 enum VideoReferenceLoader {
@@ -114,7 +115,7 @@ struct VideoView: View {
         }
         .fileImporter(
             isPresented: $showingReferenceImporter,
-            allowedContentTypes: [.png, .jpeg, .webP],
+            allowedContentTypes: acceptedReferenceContentTypes,
             allowsMultipleSelection: false,
             onCompletion: importReference
         )
@@ -554,14 +555,43 @@ struct VideoView: View {
         )
     }
 
+    private var acceptedReferenceContentTypes: [UTType] {
+        [
+            ("image/jpeg", UTType.jpeg),
+            ("image/png", UTType.png),
+            ("image/webp", UTType.webP),
+        ].compactMap { mime, type in
+            viewModel.acceptedReferenceMIMETypes.contains(mime) ? type : nil
+        }
+    }
+
     private func importReference(_ result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
             let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            Task {
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                await loadReference(url)
+            }
+        } catch {
+            viewModel.errorMessage = "Rapid couldn't open that reference image."
+        }
+    }
+
+    private func loadReference(_ url: URL) async {
+        do {
             let maximumBytes = viewModel.referenceMaximumBytes
-            let data = try VideoReferenceLoader.load(from: url, maximumBytes: maximumBytes)
-            guard let mime = VideoReferenceLoader.mimeType(for: data) else {
+            let acceptedMIMETypes = viewModel.acceptedReferenceMIMETypes
+            let (data, mime) = try await Task.detached(priority: .userInitiated) {
+                let data = try VideoReferenceLoader.load(from: url, maximumBytes: maximumBytes)
+                guard let mime = VideoReferenceLoader.mimeType(for: data) else {
+                    throw VideoReferenceLoaderError.unsupportedFormat
+                }
+                return (data, mime)
+            }.value
+            guard maximumBytes == viewModel.referenceMaximumBytes,
+                  acceptedMIMETypes == viewModel.acceptedReferenceMIMETypes else { return }
+            guard acceptedMIMETypes.contains(mime) else {
                 viewModel.errorMessage = "Choose a valid JPEG, PNG, or WebP image."
                 return
             }
@@ -569,6 +599,8 @@ struct VideoView: View {
             viewModel.errorMessage = nil
         } catch VideoReferenceLoaderError.tooLarge {
             viewModel.errorMessage = "That reference image exceeds this model's size limit."
+        } catch VideoReferenceLoaderError.unsupportedFormat {
+            viewModel.errorMessage = "Choose a valid JPEG, PNG, or WebP image."
         } catch {
             viewModel.errorMessage = "Rapid couldn't open that reference image."
         }
