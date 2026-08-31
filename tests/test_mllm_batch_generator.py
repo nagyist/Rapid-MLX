@@ -16,7 +16,10 @@ pytestmark = pytest.mark.requires_mlx
 
 
 import base64
+import concurrent.futures
 import io
+import threading
+from unittest.mock import MagicMock
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -1892,6 +1895,60 @@ def test_exact_prefix_cache_restores_text_prefix_and_slices_only_suffix():
     }
 
 
+def test_exact_prefix_cache_restores_two_dimensional_input():
+    manager = _ExactPrefixCache(warm_cache=[object()], prefix_len=3)
+    gen = _make_prefix_cache_generator(manager)
+    request = _make_ids_request(5)
+    request.input_ids = mx.array([[0, 1, 2, 3, 4]])
+
+    assert gen._lookup_exact_text_prefix(request) is manager.warm_cache
+    assert request.input_ids.tolist() == [[3, 4]]
+
+
+def test_exact_prefix_cache_short_prompt_counts_miss_without_lookup():
+    manager = _ExactPrefixCache()
+    gen = _make_prefix_cache_generator(manager)
+    request = _make_ids_request(1)
+
+    assert gen._lookup_exact_text_prefix(request) is None
+    assert manager.lookups == []
+    assert gen.get_prefix_cache_stats()["misses"] == 1
+
+
+def test_generator_enables_exact_apc_from_pinned_runtime(monkeypatch):
+    from mlx_vlm import apc
+
+    manager = _ExactPrefixCache()
+    monkeypatch.setattr(apc, "model_apc_mode", lambda _model: "exact")
+    monkeypatch.setattr(apc, "from_env", lambda *, overrides: manager)
+    monkeypatch.setattr(apc, "semantic_extra_hash", lambda **_kwargs: 41)
+
+    gen = _make_generator(_RecordingModel())
+    try:
+        assert gen._prefix_cache is manager
+        assert gen._prefix_cache_mode == "exact"
+        assert gen._prefix_cache_extra_hash == 41
+    finally:
+        gen.close()
+
+
+def test_generator_keeps_mllm_available_when_exact_apc_init_fails(monkeypatch):
+    from mlx_vlm import apc
+
+    monkeypatch.setattr(
+        apc,
+        "model_apc_mode",
+        lambda _model: (_ for _ in ()).throw(ValueError("unsupported cache layout")),
+    )
+
+    gen = _make_generator(_RecordingModel())
+    try:
+        assert gen._prefix_cache is None
+        assert gen._prefix_cache_mode is None
+    finally:
+        gen.close()
+
+
 def test_exact_prefix_cache_miss_keeps_full_prompt_then_stores_boundary():
     manager = _ExactPrefixCache()
     gen = _make_prefix_cache_generator(manager)
@@ -1984,3 +2041,98 @@ def test_bare_generator_without_prefix_cache_keeps_legacy_cold_path():
     assert gen._lookup_exact_text_prefix(request) is None
     assert gen.get_prefix_cache_stats() is None
     assert gen.clear_prefix_cache() is False
+
+
+def _make_cache_scheduler(*, batch_generator):
+    from vllm_mlx.mllm_scheduler import MLLMScheduler
+
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler._step_executor = None
+    scheduler._injected_step_executor = None
+    scheduler.waiting = []
+    scheduler.running = {}
+    scheduler._aborted_queue_ids = set()
+    scheduler.finished_req_ids = set()
+    scheduler.num_requests_processed = 2
+    scheduler.total_prompt_tokens = 3
+    scheduler.total_completion_tokens = 4
+    scheduler.num_requests_cancelled = 0
+    scheduler.num_requests_cancelled_via_disconnect = 0
+    scheduler.batch_generator = batch_generator
+    scheduler.vision_cache = None
+    return scheduler
+
+
+def test_scheduler_prefix_cache_stats_and_empty_paths():
+    batch_generator = MagicMock()
+    batch_generator.stats.return_value.to_dict.return_value = {"active": 0}
+    batch_generator.get_vision_cache_stats.return_value = {"entries": 0}
+    batch_generator.get_prefix_cache_stats.return_value = {"hits": 2}
+    scheduler = _make_cache_scheduler(batch_generator=batch_generator)
+
+    assert scheduler.get_stats()["prefix_cache"] == {"hits": 2}
+    assert scheduler.get_cache_stats() == {"hits": 2}
+
+    scheduler.batch_generator = None
+    assert scheduler.get_cache_stats() is None
+    assert scheduler.clear_prefix_cache() is False
+
+
+def test_scheduler_prefix_cache_clear_waits_behind_inflight_step():
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="mllm-step-clear-test"
+    )
+    events: list[tuple[str, str]] = []
+    step_started = threading.Event()
+    release_step = threading.Event()
+
+    class _Generator:
+        def clear_prefix_cache(self, *, reset_stats):
+            events.append(("clear", threading.current_thread().name))
+            return True
+
+    scheduler = _make_cache_scheduler(batch_generator=_Generator())
+    scheduler._step_executor = executor
+    scheduler._injected_step_executor = executor
+
+    def inflight_step():
+        events.append(("step-start", threading.current_thread().name))
+        step_started.set()
+        assert release_step.wait(timeout=5)
+        events.append(("step-store", threading.current_thread().name))
+
+    try:
+        step_future = executor.submit(inflight_step)
+        assert step_started.wait(timeout=5)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as caller:
+            clear_future = caller.submit(
+                scheduler.clear_prefix_cache, reset_stats=False
+            )
+            assert not clear_future.done()
+            release_step.set()
+            step_future.result(timeout=5)
+            assert clear_future.result(timeout=5) is True
+
+        assert [event for event, _thread in events] == [
+            "step-start",
+            "step-store",
+            "clear",
+        ]
+        assert all(
+            thread.startswith("mllm-step-clear-test") for _event, thread in events
+        )
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_scheduler_prefix_cache_clear_rejects_active_requests():
+    batch_generator = MagicMock()
+    scheduler = _make_cache_scheduler(batch_generator=batch_generator)
+    scheduler.waiting = [object()]
+
+    with pytest.raises(
+        RuntimeError, match="cannot clear prefix cache while requests are active"
+    ):
+        scheduler.clear_prefix_cache(reset_stats=False)
+
+    batch_generator.clear_prefix_cache.assert_not_called()
