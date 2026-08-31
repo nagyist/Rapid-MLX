@@ -1464,13 +1464,14 @@ class MLLMBatchGenerator:
         chunk = max(1, min(self.prefill_step_size, _MLLM_PREFILL_CHUNK_TOKENS))
         is_text_only = _is_text_only_request(request)
         no_extra_kwargs = not request.extra_kwargs
+        prompt_length = input_ids.shape[1]
         if (
             cache is not None
             and (
-                input_ids.shape[1] > chunk
+                prompt_length > chunk
                 or 0
                 < request.prefix_boundary - request.cached_tokens
-                < input_ids.shape[1]
+                < prompt_length
             )
             and is_text_only
             and no_extra_kwargs
