@@ -311,6 +311,7 @@ def test_transformed_sampling_fails_closed_without_residual_hooks():
             confirmed_target_forward=True,
             ragged_rollback=True,
             atomic_cache_commit=True,
+            per_lane_rng=True,
             transformed_sampling=True,
         ),
         forwards=runtime.forwards,

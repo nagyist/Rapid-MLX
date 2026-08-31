@@ -44,7 +44,8 @@ def _version_tuple(version: str) -> tuple[int, int, int]:
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
     if match is None:
         raise RaggedCacheUnsupportedError(f"cannot parse mlx-lm version {version!r}")
-    return tuple(int(part) for part in match.groups())
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch)
 
 
 def _validate_version(version: str) -> None:
@@ -178,6 +179,8 @@ def _arrays_trim(self, n, *, verify_size: int, validate: bool = True):
 def _batch_kv_preflight(self, n, *, verify_size=None, validate: bool = True):
     del verify_size
     base = self._rapid_ragged_batch_kv_base
+    aux_spec: tuple[tuple[str, int], ...] | None
+    aux_hook: Any | None
     if type(self) is base:
         aux_spec = ()
         aux_hook = None
@@ -214,7 +217,8 @@ def _batch_kv_preflight(self, n, *, verify_size=None, validate: bool = True):
     residual = [drop - uniform for drop in drops]
     if max(residual, default=0) and aux_spec is not None:
         stop = int(self._idx) - uniform
-        for name, axis in aux_spec:
+        for item in aux_spec:
+            name, axis = item
             ledger = getattr(self, name, None)
             if ledger is not None and int(ledger.shape[axis]) < stop:
                 raise RaggedCacheUnsupportedError(
@@ -355,7 +359,9 @@ def install_ragged_cache_rollback(
     version = mlx_lm_version or importlib.metadata.version("mlx-lm")
     _validate_version(version)
     if cache_module is None:
-        from mlx_lm.models import cache as cache_module
+        from mlx_lm.models import cache as mlx_lm_cache
+
+        cache_module = mlx_lm_cache
     if qwen4_state_cls is _UNSET or qsa_cls is _UNSET:
         from vllm_mlx.models.qwen4_exp_cache import (
             QSAIndexCache,
@@ -483,7 +489,8 @@ def preflight_ragged_cache(
     result = _call_ragged_method(
         preflight, values, verify_size=verify_size, validate=validate
     )
-    return result[0] if isinstance(result, tuple) and len(result) == 5 else result
+    normalized = result[0] if isinstance(result, tuple) and len(result) == 5 else result
+    return [int(value) for value in normalized]
 
 
 def trim_ragged_cache(

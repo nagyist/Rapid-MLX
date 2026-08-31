@@ -240,6 +240,18 @@ def test_xtc_is_unconditionally_fail_closed():
     assert compute.calls == []
 
 
+def test_transformed_sampling_requires_per_lane_rng_attestation():
+    runtime, compute, _caches, _calls = _runtime(
+        capabilities=_capabilities(transformed_sampling=True)
+    )
+    sampling = engine.SelfMTPSampling(temperature=0.8)
+
+    with pytest.raises(engine.ContinuousSelfMTPUnsupportedError, match="per-lane RNG"):
+        _prepare(runtime, 1, sampling=sampling)
+
+    assert compute.calls == []
+
+
 def test_fixed_membership_refuses_incremental_attach_and_partial_detach():
     runtime, _compute, _caches, _calls = _runtime()
     lane1, _ = _prepare(runtime, 1)
