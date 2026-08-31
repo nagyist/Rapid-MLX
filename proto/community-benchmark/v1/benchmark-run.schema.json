@@ -397,7 +397,7 @@
         },
         "output_tokens": {
           "type": "integer",
-          "minimum": 2
+          "minimum": 1
         },
         "ttft_ms": {
           "type": "number",
@@ -405,8 +405,8 @@
         },
         "decode_duration_ms": {
           "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Elapsed monotonic time from first token to final token; server derives decode TPS as (output_tokens - 1) / duration for output_tokens > 1."
+          "minimum": 0,
+          "description": "Elapsed monotonic time from first token to final token. It is exactly 0 for a one-token completion, which has no decode-TPS value. Otherwise the server derives decode TPS as (output_tokens - 1) / duration."
         },
         "total_duration_ms": {
           "type": "number",
@@ -423,7 +423,35 @@
           "const": true,
           "description": "Only completed measured rounds belong in BenchmarkRun v1. Failed attempts use a future diagnostic-event contract rather than fabricating timings."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "output_tokens": {
+                "const": 1
+              }
+            },
+            "required": [
+              "output_tokens"
+            ]
+          },
+          "then": {
+            "properties": {
+              "decode_duration_ms": {
+                "const": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "decode_duration_ms": {
+                "exclusiveMinimum": 0
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
