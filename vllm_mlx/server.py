@@ -1737,6 +1737,7 @@ def _prefetch_routing_metadata(model_name: str) -> str:
     from ._download_gate import (
         _HF_RESOLVE_TIMEOUT_SECONDS,
         _escape_variant_glob_literal,
+        _snapshot_is_complete,
         call_with_deadline,
         pulled_variant,
     )
@@ -1748,6 +1749,16 @@ def _prefetch_routing_metadata(model_name: str) -> str:
     # huggingface_hub as though it were a repository identifier.
     if os.path.exists(repo_id):
         return repo_id
+    # Warm/offline starts must never require a Hub round trip.  Reuse only a
+    # verified-complete snapshot here; a metadata-only or interrupted snapshot
+    # must continue to the bounded online resolution below.
+    from .model_metadata import read_model_metadata
+
+    for candidate in (model_name, repo_id):
+        cached = read_model_metadata(candidate)
+        cached_dir = getattr(cached, "snapshot_dir", None)
+        if cached_dir is not None and _snapshot_is_complete(str(cached_dir)):
+            return str(cached_dir)
     catalog_subfolder = resolve_subfolder(model_name)
     explicit_subfolder = catalog_subfolder if model_name != repo_id else None
     subfolder = explicit_subfolder or pulled_variant(repo_id) or catalog_subfolder
@@ -1797,8 +1808,8 @@ def _resolve_serving_checkpoint(
     # checkpoint materializes so single-file weight evidence remains exact.
     if not force_text and requested_spec_decode in (None, "none"):
         if force_mllm:
-            preflight_is_mllm = True
             preflight_path = model_path
+            preflight_has_vision_weights = True
         else:
             preflight_path = _prefetch_routing_metadata(model_name)
             # Config-only evidence is not enough to reject startup: a VLM-style
@@ -1811,7 +1822,7 @@ def _resolve_serving_checkpoint(
             )
 
             preflight_metadata = read_model_metadata(preflight_path)
-            preflight_is_mllm = bool(
+            preflight_has_vision_weights = bool(
                 preflight_metadata is not None
                 and checkpoint_has_multimodal_weights(
                     (
@@ -1823,7 +1834,18 @@ def _resolve_serving_checkpoint(
                 )
                 is True
             )
-        if preflight_is_mllm:
+        if preflight_has_vision_weights:
+            preflight_decision = resolve_serving_lane_decision(
+                preflight_path,
+                force_mllm=force_mllm,
+                vision_min_memory_gb=(
+                    profile.vision_min_memory_gb if profile is not None else None
+                ),
+                requested_spec_decode=requested_spec_decode,
+            )
+        if preflight_has_vision_weights and getattr(
+            preflight_decision, "is_mllm", False
+        ):
             from .models.mllm import _require_mlx_vlm
 
             _require_mlx_vlm(preflight_path)

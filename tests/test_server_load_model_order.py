@@ -309,6 +309,11 @@ def test_metadata_preflight_rejects_before_subfolder_weight_download(monkeypatch
         model_metadata, "checkpoint_has_multimodal_weights", lambda *_args: True
     )
     monkeypatch.setattr(
+        server,
+        "resolve_serving_lane_decision",
+        lambda *_args, **_kwargs: SimpleNamespace(is_mllm=True),
+    )
+    monkeypatch.setattr(
         "vllm_mlx.utils.tokenizer._resolve_subfolder_checkpoint",
         lambda _name: (_ for _ in ()).throw(
             AssertionError("weight-bearing subfolder resolution ran too early")
@@ -419,6 +424,74 @@ def test_routing_metadata_prefetch_preserves_external_local_model(
     )
 
     assert server._prefetch_routing_metadata("publisher/model") == str(external)
+
+
+def test_routing_metadata_prefetch_reuses_complete_warm_cache(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx import model_metadata, server
+
+    cached = "/cache/snapshots/abc123"
+    monkeypatch.setattr(
+        model_metadata,
+        "read_model_metadata",
+        lambda _name: SimpleNamespace(snapshot_dir=cached),
+    )
+    monkeypatch.setattr(
+        "vllm_mlx._download_gate._snapshot_is_complete", lambda path: path == cached
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.model_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("complete warm cache must not reach the Hub")
+        ),
+    )
+
+    assert server._prefetch_routing_metadata("publisher/model") == cached
+
+
+def test_vision_preflight_honors_automatic_text_fallback(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx import model_metadata, server
+    from vllm_mlx.models import mllm
+
+    monkeypatch.setattr(
+        server, "_prefetch_routing_metadata", lambda _name: "/cache/vision-model"
+    )
+    monkeypatch.setattr(
+        model_metadata,
+        "read_model_metadata",
+        lambda _name: SimpleNamespace(snapshot_dir="/cache", config={}),
+    )
+    monkeypatch.setattr(
+        model_metadata, "checkpoint_has_multimodal_weights", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        server,
+        "resolve_serving_lane_decision",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            is_mllm=False,
+            auto_text_fallback=True,
+            reason="vision_memory_insufficient",
+        ),
+    )
+    monkeypatch.setattr(
+        mllm,
+        "_require_mlx_vlm",
+        lambda _name=None: (_ for _ in ()).throw(
+            AssertionError("text fallback must not require mlx-vlm")
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.utils.tokenizer._resolve_subfolder_checkpoint", lambda name: name
+    )
+    monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
+
+    resolved = server._resolve_serving_checkpoint("publisher/vision-model")
+
+    assert resolved.is_mllm is False
+    assert resolved.lane_reason == "vision_memory_insufficient"
 
 
 def test_speculative_decode_skips_vision_runtime_preflight(monkeypatch):
