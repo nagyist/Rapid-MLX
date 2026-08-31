@@ -204,7 +204,7 @@ def test_fixed_membership_prepare_attach_propose_commit_detach_lifecycle():
     proposal = engine.propose_batched_self_mtp(batch)
     assert proposal.lane_uids == (1, 2)
     assert proposal.accepted_lengths == (1, 0)
-    assert caches.calls[-1] == ("rollback", (1, 2), (2, 2), 3)
+    assert not [call for call in caches.calls if call[0] == "rollback"]
     with pytest.raises(engine.ContinuousSelfMTPError, match="proposal is open"):
         engine.detach_self_mtp_lanes(batch, [0, 1])
 
@@ -221,6 +221,7 @@ def test_fixed_membership_prepare_attach_propose_commit_detach_lifecycle():
         (2, 1),
         (False, False),
     )
+    assert caches.calls[-1] == ("rollback", (1, 2), (2, 2), 3)
 
     previous_epoch = batch.membership_epoch
     batch, detached = engine.detach_self_mtp_lanes(batch, [0, 1])
@@ -727,4 +728,4 @@ def test_terminal_commit_rolls_back_undelivered_target_prefix():
         terminal=[True],
     )
 
-    assert caches.calls[-1] == ("rollback", (1,), (0,), 3)
+    assert caches.calls[-1] == ("rollback", (2,), (2,), 3)

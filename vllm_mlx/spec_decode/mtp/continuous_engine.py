@@ -574,13 +574,6 @@ def propose_batched_self_mtp(batch: BatchedSelfMTPState) -> SelfMTPCycleResult:
             raise TypeError("compute.propose must return CycleComputation")
         computation = candidate
         _validate_computation(batch, computation)
-        verify_width = max(depth + 1 for depth in computation.draft_depths)
-        batch._runtime.caches.rollback(
-            batch.caches,
-            target_drops=computation.target_drops,
-            draft_drops=computation.draft_drops,
-            verify_width=verify_width,
-        )
     except BaseException as error:  # noqa: BLE001 - transaction includes cancellation
         _abort_backend_transaction(batch, computation, error)
         raise
@@ -640,13 +633,21 @@ def commit_batched_self_mtp(
         )
 
     try:
-        if any(delivery_drops):
-            batch._runtime.caches.rollback(
-                batch.caches,
-                target_drops=delivery_drops,
-                draft_drops=[0] * n,
-                verify_width=max(depth + 1 for depth in proposal.draft_depths),
-            )
+        # Keep proposal cache state provisional until the exact delivered
+        # prefix is known. Rejected drafts and tokens hidden by a terminal
+        # condition must be rewound in one atomic operation: recurrent cache
+        # snapshots describe the original verify block and cannot safely be
+        # consumed by two sequential trims.
+        target_drops = tuple(
+            rejected + undelivered
+            for rejected, undelivered in zip(proposal.target_drops, delivery_drops)
+        )
+        batch._runtime.caches.rollback(
+            batch.caches,
+            target_drops=target_drops,
+            draft_drops=proposal.draft_drops,
+            verify_width=max(depth + 1 for depth in proposal.draft_depths),
+        )
         batch._runtime.compute.commit(
             batch.lanes,
             proposal._computation,
