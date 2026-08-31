@@ -6,7 +6,10 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import json
 import logging
+import os
+import re
 import shutil
 import tempfile
 import threading
@@ -23,6 +26,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..middleware.auth import _verify_api_key_values, verify_api_key
 from ..model_aliases import resolve_profile
+from ._async_utils import run_to_completion
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -32,8 +36,14 @@ _VIDEO_REQUEST_BYTES = _MAX_REFERENCE_BYTES + 1024 * 1024
 _MAX_JOBS = 100
 _MAX_PIXEL_FRAMES = 768 * 512 * 97
 _MAX_REFERENCE_PIXELS = 16_777_216
+_VIDEO_JOB_SCHEMA_VERSION = 1
+_VIDEO_JOB_METADATA = "job.json"
+_MAX_VIDEO_JOB_METADATA_BYTES = 64 * 1024
+_VIDEO_ID_RE = re.compile(r"video_[0-9a-f]{32}\Z")
 _jobs_lock = threading.Lock()
-_jobs_root = Path(tempfile.mkdtemp(prefix="rapid-mlx-videos-"))
+_ephemeral_jobs_roots = {Path(tempfile.mkdtemp(prefix="rapid-mlx-videos-"))}
+_jobs_root = next(iter(_ephemeral_jobs_roots))
+_jobs_are_persistent = False
 
 
 @dataclass
@@ -194,17 +204,186 @@ def _generation_gate_for_current_loop() -> asyncio.Lock:
 
 
 def _cleanup_jobs() -> None:
-    shutil.rmtree(_jobs_root, ignore_errors=True)
+    for root in tuple(_ephemeral_jobs_roots):
+        shutil.rmtree(root, ignore_errors=True)
 
 
 atexit.register(_cleanup_jobs)
 
 
+def configure_video_jobs(output_dir: str | Path | None) -> Path:
+    """Select the job store before the server lifecycle starts.
+
+    ``None`` preserves the historical process-temporary behavior. An explicit
+    directory opts into completed-job persistence; the directory is resolved
+    once so a later working-directory change cannot redirect cleanup or writes.
+    """
+    global _jobs_are_persistent, _jobs_root
+
+    persistent = output_dir is not None
+    if persistent:
+        raw_output_dir = str(output_dir).strip()
+        if not raw_output_dir:
+            raise ValueError("video output directory must not be empty")
+        root = Path(raw_output_dir).expanduser().resolve(strict=False)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Fail before a large model download when the selected store cannot be
+        # written. NamedTemporaryFile uses 0600 and removes the probe on close.
+        with tempfile.NamedTemporaryFile(prefix=".rapid-mlx-write-", dir=root):
+            pass
+    else:
+        root = Path(tempfile.mkdtemp(prefix="rapid-mlx-videos-"))
+        _ephemeral_jobs_roots.add(root)
+
+    with _jobs_lock:
+        active_tasks = [task for task in _tasks.values() if not task.done()]
+        active_cleanup = [task for task in _cleanup_tasks if not task.done()]
+        if active_tasks or active_cleanup or _generation_threads:
+            raise RuntimeError("cannot reconfigure the video job store while jobs run")
+        _jobs.clear()
+        _tasks.clear()
+        _jobs_root = root
+        _jobs_are_persistent = persistent
+    return root
+
+
+def _completed_job_record(job: _VideoJob) -> dict:
+    return {
+        "schema_version": _VIDEO_JOB_SCHEMA_VERSION,
+        **job.public(),
+    }
+
+
+def _persist_completed_job(job: _VideoJob) -> None:
+    """Atomically commit one completed job after its MP4 is durable."""
+    job_dir = _jobs_root / job.id
+    metadata_path = job_dir / _VIDEO_JOB_METADATA
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".job-",
+            suffix=".json.tmp",
+            dir=job_dir,
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(
+                _completed_job_record(job),
+                temporary,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, metadata_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _load_completed_job(job_dir: Path) -> _VideoJob | None:
+    if (
+        job_dir.is_symlink()
+        or not job_dir.is_dir()
+        or not _VIDEO_ID_RE.fullmatch(job_dir.name)
+    ):
+        return None
+    metadata_path = job_dir / _VIDEO_JOB_METADATA
+    output_path = job_dir / "output.mp4"
+    try:
+        if metadata_path.is_symlink() or output_path.is_symlink():
+            return None
+        metadata_stat = metadata_path.stat()
+        output_stat = output_path.stat()
+        if (
+            not metadata_path.is_file()
+            or metadata_stat.st_size > _MAX_VIDEO_JOB_METADATA_BYTES
+            or not output_path.is_file()
+            or output_stat.st_size <= 0
+        ):
+            return None
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        logger.warning("Ignoring unreadable video job record: %s", job_dir.name)
+        return None
+
+    if not isinstance(value, dict):
+        return None
+    if value.get("schema_version") != _VIDEO_JOB_SCHEMA_VERSION:
+        return None
+    if value.get("object") != "video" or value.get("id") != job_dir.name:
+        return None
+    if value.get("status") != "completed" or value.get("progress") != 100:
+        return None
+    if value.get("error") is not None:
+        return None
+
+    model = value.get("model")
+    prompt = value.get("prompt")
+    seconds = value.get("seconds")
+    size = value.get("size")
+    created_at = value.get("created_at")
+    completed_at = value.get("completed_at")
+    if (
+        not isinstance(model, str)
+        or not model
+        or len(model) > 2048
+        or not isinstance(prompt, str)
+        or not prompt
+        or len(prompt) > 4096
+        or not isinstance(seconds, str)
+        or not seconds
+        or len(seconds) > 32
+        or not isinstance(size, str)
+        or not size
+        or len(size) > 64
+        or type(created_at) is not int
+        or type(completed_at) is not int
+        or created_at < 0
+        or completed_at < created_at
+    ):
+        return None
+
+    return _VideoJob(
+        id=job_dir.name,
+        model=model,
+        prompt=prompt,
+        seconds=seconds,
+        size=size,
+        status="completed",
+        progress=100,
+        created_at=created_at,
+        completed_at=completed_at,
+        output_path=str(output_path),
+        generation_finished=True,
+    )
+
+
+def _restore_completed_jobs() -> list[_VideoJob]:
+    try:
+        candidates = list(_jobs_root.iterdir())
+    except OSError:
+        logger.exception("Unable to scan the video job store")
+        return []
+
+    restored = [job for path in candidates if (job := _load_completed_job(path))]
+    restored.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+    for expired in restored[_MAX_JOBS:]:
+        shutil.rmtree(_jobs_root / expired.id, ignore_errors=True)
+    return restored[:_MAX_JOBS]
+
+
 def start_video_jobs() -> None:
     """Reset the route lifecycle when an application instance starts."""
     global _accepting_jobs
+    restored = _restore_completed_jobs() if _jobs_are_persistent else []
     with _jobs_lock:
         _accepting_jobs = True
+        for job in restored:
+            _jobs.setdefault(job.id, job)
 
 
 async def shutdown_video_jobs(timeout: float = 30.0) -> None:
@@ -544,12 +723,30 @@ async def _run_job(
         generated = await asyncio.shield(runner)
         if not generated:
             return
+        completed_job = replace(
+            job,
+            status="completed",
+            progress=100,
+            completed_at=int(time.time()),
+            output_path=str(output),
+            generation_finished=True,
+        )
+        if _jobs_are_persistent:
+            try:
+                await run_to_completion(_persist_completed_job, completed_job)
+            except OSError:
+                # The MP4 is already complete and remains downloadable for this
+                # process. Keep that user result available while making the
+                # durability loss visible to operators.
+                logger.exception(
+                    "Unable to persist completed video job metadata for %s", job.id
+                )
         with _jobs_lock:
-            job.status = "completed"
-            job.progress = 100
-            job.completed_at = int(time.time())
-            job.output_path = str(output)
-            job.generation_finished = True
+            job.status = completed_job.status
+            job.progress = completed_job.progress
+            job.completed_at = completed_job.completed_at
+            job.output_path = completed_job.output_path
+            job.generation_finished = completed_job.generation_finished
     except asyncio.CancelledError:
         with _jobs_lock:
             if job.status != "failed":

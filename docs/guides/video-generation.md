@@ -7,6 +7,29 @@ Video generation requires Python 3.11 or newer because the upstream
 `mlx-video-with-audio` runtime does not support Python 3.10. Rapid-MLX's core
 text and audio features continue to support Python 3.10.
 
+## Keep completed videos across restarts
+
+By default, video jobs and MP4 files use a process-temporary directory and are
+removed when the server exits. For a desktop app or another long-lived client,
+pass an explicit artifact directory when starting the server:
+
+```bash
+rapid-mlx serve ltx-2.3-mlx-q4 \
+  --video-output-dir /path/to/rapid-mlx-video-artifacts
+```
+
+Every completed job is committed atomically beside its MP4. Starting a later
+server with the same directory restores up to the newest 100 completed jobs, so
+they remain available through `GET /v1/videos`, `GET /v1/videos/{id}` and
+`GET /v1/videos/{id}/content`. `DELETE /v1/videos/{id}` removes both the record
+and its MP4. Queued, interrupted, failed, incomplete or malformed records are
+never restored as completed work.
+
+The metadata includes the prompt and generation settings. Choose a
+user-private directory with enough free space; Rapid-MLX creates new job
+directories with owner-only permissions but does not change the permissions of
+an existing parent directory.
+
 ## Motion and conditioning controls
 
 `POST /v1/videos` accepts optional controls in addition to `seconds`:
