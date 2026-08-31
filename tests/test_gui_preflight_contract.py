@@ -190,7 +190,8 @@ def test_fresh_install_settles_transcript_before_structural_baseline():
 
     assert 'select(.identifier == "Transcript.JumpToBottom")' in helper
     assert 'press "$destination" Transcript.JumpToBottom "$press_result"' in helper
-    assert 'select(.role == "AXScrollBar"' in helper
+    assert ".bounds.x > $jump_x" in helper
+    assert '--argjson scroll_x "$scroll_x"' in helper
     assert 'die "Jump to latest did not physically settle' in helper
 
     banner = fresh_install.index("wait_identifier TelemetryConsent.PostValueBanner")
@@ -215,9 +216,25 @@ def test_transcript_settler_waits_for_physical_scroll_stability(tmp_path):
         (1.00, False),
     ]
     for index, (value, has_button) in enumerate(fixtures):
-        elements = [{"role": "AXScrollBar", "value": value}]
+        elements = [
+            {
+                "role": "AXScrollBar",
+                "value": 1.0,
+                "bounds": {"x": 180, "width": 17, "height": 320},
+            },
+            {
+                "role": "AXScrollBar",
+                "value": value,
+                "bounds": {"x": 704, "width": 17, "height": 320},
+            },
+        ]
         if has_button:
-            elements.append({"identifier": "Transcript.JumpToBottom"})
+            elements.append(
+                {
+                    "identifier": "Transcript.JumpToBottom",
+                    "bounds": {"x": 444.5, "width": 33, "height": 33},
+                }
+            )
         (tmp_path / f"fixture-{index}.json").write_text(
             json.dumps({"data": {"ui_elements": elements}})
         )

@@ -899,10 +899,28 @@ settle_transcript_at_bottom() {
         return
     fi
 
-    local before_value
-    before_value="$(jq -r '[.data.ui_elements[]?
-        | select(.role == "AXScrollBar" and (.value | type) == "number")
-        | .value] | max // empty' "$destination")"
+    # The window can expose both sidebar and transcript scrollbars. Correlate
+    # the transcript bar with its overlay button: it is the first vertical bar
+    # to the button's right. Keep that x-coordinate after the button hides.
+    local scroll_x before_value
+    scroll_x="$(jq -r '
+        ([.data.ui_elements[]?
+          | select(.identifier == "Transcript.JumpToBottom")
+          | .bounds.x] | first) as $jump_x
+        | [.data.ui_elements[]?
+           | select(.role == "AXScrollBar"
+                    and (.value | type) == "number"
+                    and .bounds.height > .bounds.width
+                    and .bounds.x > $jump_x)]
+        | sort_by(.bounds.x) | .[0].bounds.x // empty' "$destination")"
+    [[ -n "$scroll_x" ]] \
+        || die "could not identify the transcript scrollbar beside Jump to latest"
+    before_value="$(jq -r --argjson scroll_x "$scroll_x" '
+        [.data.ui_elements[]?
+         | select(.role == "AXScrollBar"
+                  and (.value | type) == "number"
+                  and ((.bounds.x - $scroll_x) | fabs) < 1)
+         | .value] | first // empty' "$destination")"
     [[ -n "$before_value" ]] \
         || die "transcript exposes no measurable scroll position before Jump to latest"
     press "$destination" Transcript.JumpToBottom "$press_result" \
@@ -911,9 +929,12 @@ settle_transcript_at_bottom() {
     for _ in {1..60}; do
         see_main "$destination"
         local current_value
-        current_value="$(jq -r '[.data.ui_elements[]?
-            | select(.role == "AXScrollBar" and (.value | type) == "number")
-            | .value] | max // empty' "$destination")"
+        current_value="$(jq -r --argjson scroll_x "$scroll_x" '
+            [.data.ui_elements[]?
+             | select(.role == "AXScrollBar"
+                      and (.value | type) == "number"
+                      and ((.bounds.x - $scroll_x) | fabs) < 1)
+             | .value] | first // empty' "$destination")"
         if [[ -n "$current_value" ]] \
             && ! jq -e '.data.ui_elements[]?
                         | select(.identifier == "Transcript.JumpToBottom")' \
