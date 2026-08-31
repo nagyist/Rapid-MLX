@@ -19,7 +19,7 @@
     },
     "config_digest": {
       "$ref": "#/$defs/sha256Digest",
-      "description": "RFC 8785 + SHA-256 digest of the effective load, generation, and features objects. Runtime versions are deliberately excluded and remain separate cohort axes. The server recomputes it."
+      "description": "Rapid Canonical JSON v1 + SHA-256 digest of the effective load, generation, and features objects. Runtime versions are deliberately excluded and remain separate cohort axes. The server recomputes it."
     },
     "runtime": {
       "type": "object",
@@ -116,20 +116,22 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "temperature",
-        "top_p",
+        "temperature_millionths",
+        "top_p_millionths",
         "ignore_eos"
       ],
       "properties": {
-        "temperature": {
-          "type": "number",
+        "temperature_millionths": {
+          "type": "integer",
           "minimum": 0,
-          "maximum": 10
+          "maximum": 10000000,
+          "description": "Temperature multiplied by 1,000,000."
         },
-        "top_p": {
-          "type": "number",
+        "top_p_millionths": {
+          "type": "integer",
           "minimum": 0,
-          "maximum": 1
+          "maximum": 1000000,
+          "description": "top_p multiplied by 1,000,000."
         },
         "top_k": {
           "type": [
@@ -138,13 +140,14 @@
           ],
           "minimum": 0
         },
-        "min_p": {
+        "min_p_millionths": {
           "type": [
-            "number",
+            "integer",
             "null"
           ],
           "minimum": 0,
-          "maximum": 1
+          "maximum": 1000000,
+          "description": "min_p multiplied by 1,000,000."
         },
         "seed": {
           "type": [
@@ -286,11 +289,11 @@
                 "unknown"
               ]
             },
-            "bits": {
-              "type": "number",
-              "minimum": 1,
-              "maximum": 32,
-              "multipleOf": 0.5
+            "bits_x2": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 64,
+              "description": "KV-cache bit width multiplied by 2."
             },
             "group_size": {
               "type": "integer",
@@ -320,7 +323,7 @@
               },
                   "then": {
                     "required": [
-                      "bits",
+                      "bits_x2",
                       "group_size"
                     ]
                   }

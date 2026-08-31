@@ -26,9 +26,9 @@
   "quantization": {
     "kind": "weights",
     "method": "affine",
-    "weight_bits": 4,
+    "weight_bits_x2": 8,
     "group_size": 64,
     "base_dtype": "bfloat16"
   },
-  "identity_digest": "sha256:0b54d4978f76985a8810b1eb9eebec0d3aa5bff8fec44a084224aa85d66ba34f"
+  "identity_digest": "sha256:6135801ae71eba23b25b9cd68eb79b4588f76694a5c2bd25e2036780157f620d"
 }

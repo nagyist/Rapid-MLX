@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "protocol_digest": "sha256:eeaecf41b3f18b95c7ff261de63418a25ec7906cb305ec65c54aa954e731ac39",
+  "workload": {
+    "protocol_id": "rapid-community-speed",
+    "protocol_version": 1,
+    "protocol_strength": "registered",
+    "protocol_digest": "sha256:eeaecf41b3f18b95c7ff261de63418a25ec7906cb305ec65c54aa954e731ac39",
+    "corpus": {
+      "id": "rapid-synthetic-token-corpus",
+      "digest": "sha256:451155d21587a4bf0079d5351d23cf50e7da1342ed546229823c3c92f68f2cde"
+    },
+    "concurrency": 1,
+    "prefix_cache_state": "disabled",
+    "cases": [
+      {
+        "case_id": "pp512-tg128",
+        "target_prompt_tokens": 512,
+        "target_output_tokens": 128,
+        "warmup_rounds": 1,
+        "measured_rounds": 5
+      },
+      {
+        "case_id": "pp2048-tg512",
+        "target_prompt_tokens": 2048,
+        "target_output_tokens": 512,
+        "warmup_rounds": 1,
+        "measured_rounds": 5
+      }
+    ]
+  }
+}

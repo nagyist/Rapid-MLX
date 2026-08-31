@@ -48,11 +48,11 @@
     "quantization": {
       "kind": "weights",
       "method": "affine",
-      "weight_bits": 4,
+      "weight_bits_x2": 8,
       "group_size": 64,
       "base_dtype": "bfloat16"
     },
-    "identity_digest": "sha256:0b54d4978f76985a8810b1eb9eebec0d3aa5bff8fec44a084224aa85d66ba34f"
+    "identity_digest": "sha256:6135801ae71eba23b25b9cd68eb79b4588f76694a5c2bd25e2036780157f620d"
   },
   "machine": {
     "schema_version": 1,
@@ -90,7 +90,7 @@
   },
   "execution": {
     "schema_version": 1,
-    "config_digest": "sha256:accbc9510934f9be684955bb4c4b0e1db3d53fe34dac1f5673b8bfb2caa4faaa",
+    "config_digest": "sha256:85832ccfa2abfa3a0382a04bc58c21773ac90f40105c6241647d166131f03c05",
     "runtime": {
       "distribution": "release",
       "rapid_mlx": "0.14.0",
@@ -104,10 +104,10 @@
       "wired_memory_limit_mib": 110000
     },
     "generation": {
-      "temperature": 0,
-      "top_p": 1,
+      "temperature_millionths": 0,
+      "top_p_millionths": 1000000,
       "top_k": 0,
-      "min_p": 0,
+      "min_p_millionths": 0,
       "seed": 12648430,
       "ignore_eos": true
     },
@@ -119,7 +119,7 @@
       "kv_cache": {
         "mode": "quantized",
         "dtype": "q8",
-        "bits": 8,
+        "bits_x2": 16,
         "group_size": 64
       },
       "prefix_cache": {
@@ -134,10 +134,11 @@
   "workload": {
     "protocol_id": "rapid-community-speed",
     "protocol_version": 1,
-    "protocol_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "protocol_strength": "registered",
+    "protocol_digest": "sha256:eeaecf41b3f18b95c7ff261de63418a25ec7906cb305ec65c54aa954e731ac39",
     "corpus": {
       "id": "rapid-synthetic-token-corpus",
-      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      "digest": "sha256:451155d21587a4bf0079d5351d23cf50e7da1342ed546229823c3c92f68f2cde"
     },
     "concurrency": 1,
     "prefix_cache_state": "disabled",
@@ -147,7 +148,14 @@
         "target_prompt_tokens": 512,
         "target_output_tokens": 128,
         "warmup_rounds": 1,
-        "measured_rounds": 1
+        "measured_rounds": 5
+      },
+      {
+        "case_id": "pp2048-tg512",
+        "target_prompt_tokens": 2048,
+        "target_output_tokens": 512,
+        "warmup_rounds": 1,
+        "measured_rounds": 5
       }
     ]
   },
@@ -164,6 +172,105 @@
       "decode_duration_ms": 2607.8,
       "total_duration_ms": 3029.1,
       "peak_active_memory_mib": 25395,
+      "completed": true
+    },
+    {
+      "case_id": "pp512-tg128",
+      "round_index": 2,
+      "prompt_tokens": 512,
+      "output_tokens": 128,
+      "ttft_ms": 419.8,
+      "decode_duration_ms": 2599.1,
+      "total_duration_ms": 3018.9,
+      "peak_active_memory_mib": 25395,
+      "completed": true
+    },
+    {
+      "case_id": "pp512-tg128",
+      "round_index": 3,
+      "prompt_tokens": 512,
+      "output_tokens": 128,
+      "ttft_ms": 423.0,
+      "decode_duration_ms": 2610.2,
+      "total_duration_ms": 3033.2,
+      "peak_active_memory_mib": 25396,
+      "completed": true
+    },
+    {
+      "case_id": "pp512-tg128",
+      "round_index": 4,
+      "prompt_tokens": 512,
+      "output_tokens": 128,
+      "ttft_ms": 420.5,
+      "decode_duration_ms": 2602.7,
+      "total_duration_ms": 3023.2,
+      "peak_active_memory_mib": 25396,
+      "completed": true
+    },
+    {
+      "case_id": "pp512-tg128",
+      "round_index": 5,
+      "prompt_tokens": 512,
+      "output_tokens": 128,
+      "ttft_ms": 421.7,
+      "decode_duration_ms": 2605.4,
+      "total_duration_ms": 3027.1,
+      "peak_active_memory_mib": 25396,
+      "completed": true
+    },
+    {
+      "case_id": "pp2048-tg512",
+      "round_index": 1,
+      "prompt_tokens": 2048,
+      "output_tokens": 512,
+      "ttft_ms": 1268.4,
+      "decode_duration_ms": 10488.2,
+      "total_duration_ms": 11756.6,
+      "peak_active_memory_mib": 26840,
+      "completed": true
+    },
+    {
+      "case_id": "pp2048-tg512",
+      "round_index": 2,
+      "prompt_tokens": 2048,
+      "output_tokens": 512,
+      "ttft_ms": 1271.2,
+      "decode_duration_ms": 10492.0,
+      "total_duration_ms": 11763.2,
+      "peak_active_memory_mib": 26842,
+      "completed": true
+    },
+    {
+      "case_id": "pp2048-tg512",
+      "round_index": 3,
+      "prompt_tokens": 2048,
+      "output_tokens": 512,
+      "ttft_ms": 1266.9,
+      "decode_duration_ms": 10480.5,
+      "total_duration_ms": 11747.4,
+      "peak_active_memory_mib": 26842,
+      "completed": true
+    },
+    {
+      "case_id": "pp2048-tg512",
+      "round_index": 4,
+      "prompt_tokens": 2048,
+      "output_tokens": 512,
+      "ttft_ms": 1273.1,
+      "decode_duration_ms": 10495.8,
+      "total_duration_ms": 11768.9,
+      "peak_active_memory_mib": 26843,
+      "completed": true
+    },
+    {
+      "case_id": "pp2048-tg512",
+      "round_index": 5,
+      "prompt_tokens": 2048,
+      "output_tokens": 512,
+      "ttft_ms": 1269.7,
+      "decode_duration_ms": 10487.1,
+      "total_duration_ms": 11756.8,
+      "peak_active_memory_mib": 26843,
       "completed": true
     }
   ]
