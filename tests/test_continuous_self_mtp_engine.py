@@ -87,6 +87,17 @@ class _Compute:
             if outputs:
                 lane.cur = outputs[-1].token
 
+    def abort(self, lanes, caches, computation, cause):
+        del caches
+        self.calls.append(
+            (
+                "abort",
+                tuple(lane.uid for lane in lanes),
+                None if computation is None else computation.payload,
+                None if cause is None else str(cause),
+            )
+        )
+
     def detach_lane(self, lane, caches):
         self.calls.append(("detach", lane.uid, caches.target, caches.draft))
 
@@ -214,6 +225,79 @@ def test_fixed_membership_prepare_attach_propose_commit_detach_lifecycle():
     assert batch.lanes == []
     assert batch.membership_epoch == previous_epoch + 1
     assert [item.lane.uid for item in detached] == [1, 2]
+
+
+def test_explicit_abort_restores_open_proposal_through_backend():
+    runtime, compute, _caches, _calls = _runtime()
+    lane, _first = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+    proposal = engine.propose_batched_self_mtp(batch)
+
+    engine.abort_batched_self_mtp(batch, proposal)
+
+    assert batch.proposal_open is False
+    assert compute.calls[-1] == ("abort", (1,), "opaque-cycle", None)
+
+
+def test_propose_exception_aborts_before_retry():
+    runtime, compute, _caches, _calls = _runtime()
+    lane, _first = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+    original = compute.propose
+
+    def fail_once(*args, **kwargs):
+        compute.propose = original
+        raise RuntimeError("verify failed")
+
+    compute.propose = fail_once
+    with pytest.raises(RuntimeError, match="verify failed"):
+        engine.propose_batched_self_mtp(batch)
+
+    assert compute.calls[-1] == ("abort", (1,), None, "verify failed")
+    assert engine.propose_batched_self_mtp(batch).lane_uids == (1,)
+
+
+def test_commit_exception_aborts_and_closes_proposal():
+    runtime, compute, _caches, _calls = _runtime()
+    lane, _first = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+    proposal = engine.propose_batched_self_mtp(batch)
+
+    def fail_commit(*args, **kwargs):
+        raise RuntimeError("commit failed")
+
+    compute.commit = fail_commit
+    with pytest.raises(RuntimeError, match="commit failed"):
+        engine.commit_batched_self_mtp(
+            batch,
+            proposal,
+            emitted_counts=[2],
+            terminal=[False],
+        )
+
+    assert batch.proposal_open is False
+    assert compute.calls[-1] == ("abort", (1,), "opaque-cycle", "commit failed")
+
+
+def test_abort_failure_poisons_batch_and_forbids_reuse():
+    runtime, compute, _caches, _calls = _runtime()
+    lane, _first = _prepare(runtime, 1)
+    batch = engine.attach_self_mtp_lanes(None, [lane])
+
+    def fail_proposal(*args, **kwargs):
+        raise RuntimeError("forward failed")
+
+    def fail_abort(*args, **kwargs):
+        raise RuntimeError("rollback failed")
+
+    compute.propose = fail_proposal
+    compute.abort = fail_abort
+    with pytest.raises(engine.ContinuousSelfMTPError, match="rollback failed"):
+        engine.propose_batched_self_mtp(batch)
+
+    assert batch.poisoned is True
+    with pytest.raises(engine.ContinuousSelfMTPError, match="poisoned"):
+        engine.detach_self_mtp_lanes(batch, [0])
 
 
 def test_default_off_refuses_before_compute():

@@ -23,6 +23,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from .continuous_engine import (
+    ContinuousSelfMTPUnsupportedError,
+    SelfMTPCachePair,
+)
+
 
 class RaggedCacheUnsupportedError(RuntimeError):
     """A cache cannot prove exact per-row rollback under this adapter."""
@@ -441,7 +446,7 @@ def _reject_unsupported_shape(cache: Any) -> None:
         raise RaggedCacheUnsupportedError(
             f"quantized cache {type(cache).__name__} has no supported ragged contract"
         )
-    if "rotating" in name or "window" in name:
+    if "rotating" in name or "window" in name or "sink" in name:
         raise RaggedCacheUnsupportedError(
             f"windowed cache {type(cache).__name__} has no supported ragged contract"
         )
@@ -519,9 +524,140 @@ def trim_ragged_cache(
     return values
 
 
+def _cache_group(value: Any, name: str) -> list[Any]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{name} cache must be a non-empty layer sequence")
+    group = list(value)
+    for cache in group:
+        _reject_unsupported_shape(cache)
+    return group
+
+
+def _cache_pair(pair: SelfMTPCachePair) -> tuple[list[Any], list[Any]]:
+    return _cache_group(pair.target, "target"), _cache_group(pair.draft, "draft")
+
+
+class RapidRaggedCacheAdapter:
+    """Transaction adapter for merged target/draft ragged cache groups.
+
+    Cross-group preflight completes before either cache mutates.  Merge and
+    detach similarly validate the complete reflective surface first, so a
+    missing method cannot leave half of a target/draft pair updated.
+    """
+
+    def __init__(self, *, preflight: Any = None, trim: Any = None) -> None:
+        self._preflight = preflight or preflight_ragged_cache
+        self._trim = trim or trim_ragged_cache
+        if not callable(self._preflight) or not callable(self._trim):
+            raise TypeError("ragged cache preflight and trim hooks must be callable")
+
+    @staticmethod
+    def _merge(groups: list[list[Any]], name: str) -> list[Any]:
+        if not groups:
+            raise ValueError(f"cannot merge an empty {name} cache group")
+        width = len(groups[0])
+        if width == 0 or any(len(group) != width for group in groups):
+            raise ValueError(f"{name} cache groups must have equal non-zero width")
+        merged: list[Any] = []
+        for rows in zip(*groups):
+            if any(type(cache) is not type(rows[0]) for cache in rows):
+                raise ContinuousSelfMTPUnsupportedError(
+                    f"mixed {name} cache classes cannot be merged"
+                )
+            merge = getattr(type(rows[0]), "merge", None)
+            if not callable(merge):
+                raise ContinuousSelfMTPUnsupportedError(
+                    f"cache {type(rows[0]).__name__} has no merge surface"
+                )
+            merged.append(merge(list(rows)))
+        return merged
+
+    def attach(
+        self,
+        current: SelfMTPCachePair | None,
+        joining: Iterable[SelfMTPCachePair],
+    ) -> SelfMTPCachePair:
+        joining = list(joining)
+        if not joining:
+            if current is None:
+                raise ValueError("cannot attach no cache rows")
+            return current
+        pairs = [_cache_pair(pair) for pair in joining]
+        incoming = SelfMTPCachePair(
+            target=self._merge([pair[0] for pair in pairs], "target"),
+            draft=self._merge([pair[1] for pair in pairs], "draft"),
+        )
+        if current is None or not current.target:
+            return incoming
+        target, draft = _cache_pair(current)
+        incoming_target, incoming_draft = _cache_pair(incoming)
+        if len(target) != len(incoming_target) or len(draft) != len(incoming_draft):
+            raise ValueError("cache layer widths differ during extend")
+        operations = list(zip(target, incoming_target)) + list(
+            zip(draft, incoming_draft)
+        )
+        if any(not callable(getattr(cache, "extend", None)) for cache, _ in operations):
+            raise ContinuousSelfMTPUnsupportedError("cache has no extend surface")
+        for cache, other in operations:
+            cache.extend(other)
+        return current
+
+    def rollback(
+        self,
+        caches: SelfMTPCachePair,
+        *,
+        target_drops: Iterable[int],
+        draft_drops: Iterable[int],
+        verify_width: int,
+    ) -> None:
+        target, draft = _cache_pair(caches)
+        target_values = list(target_drops)
+        draft_values = list(draft_drops)
+        self._preflight(target, target_values, verify_size=verify_width, validate=True)
+        if any(draft_values):
+            self._preflight(
+                draft, draft_values, verify_size=verify_width, validate=True
+            )
+        self._trim(target, target_values, verify_size=verify_width, validate=False)
+        if any(draft_values):
+            self._trim(draft, draft_values, verify_size=verify_width, validate=False)
+
+    def detach(
+        self,
+        caches: SelfMTPCachePair,
+        indices: Iterable[int],
+        keep_indices: Iterable[int],
+    ) -> tuple[SelfMTPCachePair, list[SelfMTPCachePair]]:
+        target, draft = _cache_pair(caches)
+        indices = list(indices)
+        keep_indices = list(keep_indices)
+        all_caches = target + draft
+        if any(not callable(getattr(cache, "extract", None)) for cache in all_caches):
+            raise ContinuousSelfMTPUnsupportedError("cache has no extract surface")
+        if keep_indices and any(
+            not callable(getattr(cache, "filter", None)) for cache in all_caches
+        ):
+            raise ContinuousSelfMTPUnsupportedError("cache has no filter surface")
+        detached = [
+            SelfMTPCachePair(
+                target=[cache.extract(index) for cache in target],
+                draft=[cache.extract(index) for cache in draft],
+            )
+            for index in indices
+        ]
+        if keep_indices:
+            for cache in all_caches:
+                cache.filter(keep_indices)
+            remaining = caches
+        else:
+            remaining = SelfMTPCachePair(target=[], draft=[])
+        return remaining, detached
+
+
 __all__ = [
     "RaggedCacheInstallReport",
     "RaggedCacheUnsupportedError",
+    "RapidRaggedCacheAdapter",
     "install_ragged_cache_rollback",
     "preflight_ragged_cache",
     "trim_ragged_cache",
