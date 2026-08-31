@@ -74,11 +74,17 @@ final class TextFadeAnimator {
     /// Called when a message finishes or the transcript changes, so a
     /// re-render does not replay the whole reveal.
     public func reset() {
+        stopAndReveal()
+        animationState.reset()
+    }
+
+    /// Stop this block's animator without resetting the message-wide pacing
+    /// state shared by the next mutable segment.
+    func stopAndReveal() {
         displayLink.stop()
         fadingParts.removeAll()
         scheduledLength = 0
         lastGrowthTime = nil
-        animationState.reset()
         clearRenderingAttributes()
     }
 
@@ -106,7 +112,7 @@ final class TextFadeAnimator {
     ///
     /// That is the common case here, not the rare one. `MessageRow` takes the
     /// raw `ChatMessage`, so every SSE delta (~16 ms) re-renders it, while the
-    /// blocks only change on the compiler's 100 ms beat — five out of six
+    /// blocks only change on the compiler's coalesced beat — five out of six
     /// passes wipe without restoring. native-chat avoids it structurally by
     /// handing its row a compiled, `Equatable` view model keyed on the
     /// compile revision, so SwiftUI skips the pass entirely.

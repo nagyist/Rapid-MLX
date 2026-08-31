@@ -70,7 +70,7 @@ struct TextFadeBacklogTests {
         renderer.setBlocks([
             .init(runs: [InlineRun(text: "一二三四五六七八九十")], kind: .paragraph)
         ])
-        renderer.measureHeight(width: 400)
+        _ = renderer.measureHeight(width: 400)
         animator.contentDidGrow()
 
         let start = CACurrentMediaTime()
@@ -88,6 +88,58 @@ struct TextFadeBacklogTests {
             return false
         }
         #expect((alpha ?? 1) > 0.99, "text stayed dim after the schedule elapsed")
+    }
+
+    @Test("Disabled streaming fade leaves new text visible immediately")
+    func disabledFadeDoesNotHideNewText() {
+        let (renderer, animator) = makeAnimator()
+        animator.configuration = .off
+        renderer.setBlocks([
+            .init(runs: [InlineRun(text: "latest answer")], kind: .paragraph)
+        ])
+        animator.contentDidGrow()
+
+        guard let location = renderer.textContentStorage.location(
+            renderer.textContentStorage.documentRange.location, offsetBy: 0
+        ) else {
+            Issue.record("streaming text has no TextKit location")
+            return
+        }
+        var alpha: CGFloat?
+        renderer.textLayoutManager.enumerateRenderingAttributes(
+            from: location, reverse: false
+        ) { _, attributes, _ in
+            alpha = (attributes[.foregroundColor] as? NSColor)?.alphaComponent
+            return false
+        }
+        // No temporary foreground attribute means TextKit uses the normal
+        // opaque text color after the disabled fade clears its overrides.
+        #expect((alpha ?? 1) > 0.99, "new streaming text was hidden by the fade")
+    }
+
+    @Test("Committing one segment preserves the message fade timeline")
+    func segmentStopPreservesSharedState() {
+        let state = TextFadeAnimationState()
+        state.smoothedWordsPerSecond = 96
+        state.accentDecayStartTime = 42
+
+        var options = MarkdownOptions.assistantTranscript()
+        options.textColor = .black
+        let renderer = MarkdownTextRenderer(options: options)
+        let animator = TextFadeAnimator(
+            textLayoutManager: renderer.textLayoutManager,
+            textContentStorage: renderer.textContentStorage,
+            animationState: state
+        )
+
+        animator.stopAndReveal()
+
+        #expect(state.smoothedWordsPerSecond == 96)
+        #expect(state.accentDecayStartTime == 42)
+
+        animator.reset()
+        #expect(state.smoothedWordsPerSecond == 0)
+        #expect(state.accentDecayStartTime == nil)
     }
 }
 
@@ -128,12 +180,12 @@ struct TextFadeRateTests {
         // compiler produces against a fast model.
         let first = (1...40).map { "word\($0)" }.joined(separator: " ")
         renderer.setBlocks([.init(runs: [InlineRun(text: first)], kind: .paragraph)])
-        renderer.measureHeight(width: 600)
+        _ = renderer.measureHeight(width: 600)
         animator.contentDidGrow()
 
         let second = first + " " + (41...80).map { "word\($0)" }.joined(separator: " ")
         renderer.setBlocks([.init(runs: [InlineRun(text: second)], kind: .paragraph)])
-        renderer.measureHeight(width: 600)
+        _ = renderer.measureHeight(width: 600)
         animator.contentDidGrow()
 
         let rate = animator.animationState.smoothedWordsPerSecond

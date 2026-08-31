@@ -14,6 +14,14 @@ import Markdown
 /// streaming.
 struct MarkdownCompiler: Sendable {
 
+    /// A conservative streaming split: every top-level node before the last
+    /// one is structurally closed, while the last node remains mutable until a
+    /// following sibling proves its boundary.
+    struct TopLevelStreamingSplit: Equatable, Sendable {
+        let stablePrefix: String
+        let mutableTail: String
+    }
+
     /// Passes run over the compiled blocks, in order.
     ///
     /// Auto-linking by default because a bare URL rendering as dead text is a
@@ -23,6 +31,265 @@ struct MarkdownCompiler: Sendable {
 
     public init(postProcessors: [MarkdownPostProcessor] = [AutoLinkPostProcessor()]) {
         self.postProcessors = postProcessors
+    }
+
+    /// Split a growing Markdown fragment into a stable prefix and mutable tail.
+    ///
+    /// `swift-markdown` owns the block grammar and source ranges. Keeping the
+    /// final top-level node mutable is deliberately conservative: an unfinished
+    /// paragraph may still become emphasis, a link, or inline code; a list or
+    /// fence may still grow. Once another top-level sibling appears, nodes
+    /// before it can no longer be reinterpreted by later input.
+    func topLevelStreamingSplit(_ source: String) -> TopLevelStreamingSplit? {
+        guard !source.isEmpty else { return nil }
+        let document = Document(parsing: source, options: [.parseBlockDirectives])
+        let children = Array(document.children)
+        guard children.count > 1,
+              let tailLocation = children.last?.range?.lowerBound,
+              let tailStart = Self.index(at: tailLocation, in: source),
+              tailStart > source.startIndex else {
+            return nil
+        }
+        let stablePrefix = source[..<tailStart]
+        guard Self.hasBlankLineBoundary(in: stablePrefix) else {
+            return nil
+        }
+
+        // Reparse only the candidate prefix so reference links count as
+        // resolved only when their definition is actually inside the chunk we
+        // are about to freeze. If one unresolved reference remains, commit the
+        // safe blocks before its top-level owner instead of pinning the whole
+        // growing answer behind it.
+        let stableDocument = Document(
+            parsing: String(stablePrefix),
+            options: [.parseBlockDirectives]
+        )
+        if let definitionOffset = Self.firstReferenceDefinitionUTF8Offset(
+            in: stableDocument,
+            source: String(stablePrefix)
+        ),
+           let definitionUTF8 = source.utf8.index(
+            source.utf8.startIndex,
+            offsetBy: definitionOffset,
+            limitedBy: source.utf8.endIndex
+           ),
+           let definitionStart = definitionUTF8.samePosition(in: source) {
+            let safePrefix = source[..<definitionStart]
+            let safeSource = String(safePrefix)
+            let safeDocument = Document(
+                parsing: safeSource,
+                options: [.parseBlockDirectives]
+            )
+            if let blockedLocation = Self.firstPotentialReferenceBlock(
+                in: safeDocument,
+                source: safeSource
+            ),
+               let blockedStart = Self.index(at: blockedLocation, in: source) {
+                let prefixBeforeReference = source[..<blockedStart]
+                guard blockedStart > source.startIndex,
+                      Self.hasBlankLineBoundary(in: prefixBeforeReference) else {
+                    return nil
+                }
+                return TopLevelStreamingSplit(
+                    stablePrefix: String(prefixBeforeReference),
+                    mutableTail: String(source[blockedStart...])
+                )
+            }
+            guard definitionStart > source.startIndex,
+                  Self.hasBlankLineBoundary(in: safePrefix) else {
+                return nil
+            }
+            return TopLevelStreamingSplit(
+                stablePrefix: String(safePrefix),
+                mutableTail: String(source[definitionStart...])
+            )
+        }
+        if let blockedLocation = Self.firstPotentialReferenceBlock(
+            in: stableDocument,
+            source: String(stablePrefix)
+        ),
+           let blockedStart = Self.index(at: blockedLocation, in: source) {
+            let safePrefix = source[..<blockedStart]
+            guard blockedStart > source.startIndex,
+                  Self.hasBlankLineBoundary(in: safePrefix) else {
+                return nil
+            }
+            return TopLevelStreamingSplit(
+                stablePrefix: String(safePrefix),
+                mutableTail: String(source[blockedStart...])
+            )
+        }
+
+        return TopLevelStreamingSplit(
+            stablePrefix: String(stablePrefix),
+            mutableTail: String(source[tailStart...])
+        )
+    }
+
+    /// Keep a definition and everything after it in one compiler document.
+    /// A later independently-compiled segment may reference it, while the
+    /// parser intentionally emits definitions as no visible AST node. Code
+    /// and HTML ranges are excluded so a literal `[name]: value` does not
+    /// disable incremental splitting for the rest of a code-heavy answer.
+    private static func firstReferenceDefinitionUTF8Offset(
+        in document: Document,
+        source: String
+    ) -> Int? {
+        var opaqueRanges: [Range<String.Index>] = []
+        collectReferenceOpaqueRanges(in: document, source: source, into: &opaqueRanges)
+
+        var searchStart = source.startIndex
+        while searchStart < source.endIndex,
+              let match = source.range(
+                // Labels may contain escaped closing brackets and one or
+                // more soft line endings. This deliberately follows the
+                // parser's broad label surface; opaque AST ranges still keep
+                // definition-shaped code and HTML out of the result.
+                of: #"(?m)^[ ]{0,3}\[(?:\\.|[^\]])+\]:"#,
+                options: .regularExpression,
+                range: searchStart..<source.endIndex
+            ) {
+            if !opaqueRanges.contains(where: { $0.overlaps(match) }),
+               let utf8Index = match.lowerBound.samePosition(in: source.utf8) {
+                return source.utf8.distance(
+                    from: source.utf8.startIndex,
+                    to: utf8Index
+                )
+            }
+            searchStart = match.upperBound
+        }
+        return nil
+    }
+
+    /// Convert swift-markdown's one-based UTF-8 line/column location into a
+    /// native String index without assuming ASCII input or LF-only newlines.
+    private static func index(at location: SourceLocation, in source: String) -> String.Index? {
+        guard location.line >= 1, location.column >= 1 else { return nil }
+
+        let utf8 = source.utf8
+        var line = 1
+        var lineStart = utf8.startIndex
+        while line < location.line {
+            guard lineStart < utf8.endIndex else { return nil }
+            var cursor = lineStart
+            while cursor < utf8.endIndex, utf8[cursor] != 0x0A, utf8[cursor] != 0x0D {
+                cursor = utf8.index(after: cursor)
+            }
+            guard cursor < utf8.endIndex else { return nil }
+
+            // SourceLocation counts CRLF as one line ending. Consume the pair
+            // explicitly instead of relying on String's grapheme clustering.
+            if utf8[cursor] == 0x0D {
+                cursor = utf8.index(after: cursor)
+                if cursor < utf8.endIndex, utf8[cursor] == 0x0A {
+                    cursor = utf8.index(after: cursor)
+                }
+            } else {
+                cursor = utf8.index(after: cursor)
+            }
+            lineStart = cursor
+            line += 1
+        }
+
+        var lineEnd = lineStart
+        while lineEnd < utf8.endIndex, utf8[lineEnd] != 0x0A, utf8[lineEnd] != 0x0D {
+            lineEnd = utf8.index(after: lineEnd)
+        }
+        guard let utf8Target = utf8.index(
+                lineStart,
+                offsetBy: location.column - 1,
+                limitedBy: lineEnd
+              ) else {
+            return nil
+        }
+        return utf8Target.samePosition(in: source)
+    }
+
+    /// A new AST sibling is not by itself proof of a stable boundary. While a
+    /// GFM table row is still being typed, cmark temporarily reports an empty
+    /// table followed by a paragraph, then folds that paragraph into the table
+    /// once the row is complete. A blank line is the conservative CommonMark
+    /// boundary that prevents that cross-node reinterpretation.
+    private static func hasBlankLineBoundary(in prefix: Substring) -> Bool {
+        var newlineCount = 0
+        for character in prefix.reversed() {
+            if character.isNewline {
+                newlineCount += 1
+                if newlineCount >= 2 { return true }
+            } else if character == " " || character == "\t" {
+                continue
+            } else {
+                return false
+            }
+        }
+        return false
+    }
+
+    /// Return the first top-level block that still contains unresolved
+    /// reference-like syntax. swift-markdown turns a resolved reference into a
+    /// `Link`; code and HTML are opaque, so brackets in those nodes cannot hold
+    /// later blocks mutable.
+    private static func firstPotentialReferenceBlock(
+        in document: Document,
+        source: String
+    ) -> SourceLocation? {
+        for child in document.children
+        where containsPotentialReferenceLink(in: child, source: source) {
+            if let location = child.range?.lowerBound { return location }
+        }
+        return nil
+    }
+
+    private static func containsPotentialReferenceLink(
+        in markup: Markup,
+        source: String
+    ) -> Bool {
+        guard let scanRange = sourceRange(of: markup, in: source) else { return false }
+        var opaqueRanges: [Range<String.Index>] = []
+        collectReferenceOpaqueRanges(in: markup, source: source, into: &opaqueRanges)
+
+        var searchStart = scanRange.lowerBound
+        while searchStart < scanRange.upperBound,
+              let match = source.range(
+                // CommonMark reference labels may contain a soft line
+                // ending. The scan is already bounded to one parsed block,
+                // so allowing newlines here cannot consume later blocks.
+                of: #"(?<!\\)\[[^\]]+\](?!\()"#,
+                options: .regularExpression,
+                range: searchStart..<scanRange.upperBound
+              ) {
+            if !opaqueRanges.contains(where: { $0.overlaps(match) }) { return true }
+            searchStart = match.upperBound
+        }
+        return false
+    }
+
+    private static func collectReferenceOpaqueRanges(
+        in markup: Markup,
+        source: String,
+        into ranges: inout [Range<String.Index>]
+    ) {
+        switch markup {
+        case is CodeBlock, is InlineCode, is Link, is Image, is HTMLBlock, is InlineHTML:
+            if let range = sourceRange(of: markup, in: source) { ranges.append(range) }
+        default:
+            for child in markup.children {
+                collectReferenceOpaqueRanges(in: child, source: source, into: &ranges)
+            }
+        }
+    }
+
+    private static func sourceRange(
+        of markup: Markup,
+        in source: String
+    ) -> Range<String.Index>? {
+        guard let range = markup.range,
+              let lowerBound = index(at: range.lowerBound, in: source),
+              let upperBound = index(at: range.upperBound, in: source),
+              lowerBound <= upperBound else {
+            return nil
+        }
+        return lowerBound..<upperBound
     }
 
     /// Drop a trailing fence marker that is still being typed.
