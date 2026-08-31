@@ -31,6 +31,7 @@ struct SettingsMemoryPanel: View {
                 }
             }
             .toggleStyle(.switch)
+            .accessibilityIdentifier("Settings.Memory.EnableToggle")
 
             if memoryStore.isEnabled && !memoryStore.entries.isEmpty {
                 HStack {
@@ -43,6 +44,7 @@ struct SettingsMemoryPanel: View {
                     }
                     .buttonStyle(.borderless)
                     .font(.callout)
+                    .accessibilityIdentifier("Settings.Memory.ClearAll")
                 }
 
                 ScrollView {
@@ -64,9 +66,11 @@ struct SettingsMemoryPanel: View {
         .padding()
         .alert("Clear all memories?", isPresented: $confirmingClear) {
             Button("Cancel", role: .cancel) {}
+                .accessibilityIdentifier("Settings.Memory.ClearAlert.Cancel")
             Button("Clear", role: .destructive) {
                 memoryStore.removeAll()
             }
+            .accessibilityIdentifier("Settings.Memory.ClearAlert.Confirm")
         } message: {
             Text("This removes every learned fact. It cannot be undone.")
         }
@@ -92,6 +96,7 @@ struct SettingsMemoryPanel: View {
             }
             .buttonStyle(.borderless)
             .font(.caption)
+            .accessibilityIdentifier("Settings.Memory.Row.Edit")
             Button(role: .destructive) {
                 memoryStore.remove(id: entry.id)
             } label: {
@@ -99,6 +104,7 @@ struct SettingsMemoryPanel: View {
             }
             .buttonStyle(.borderless)
             .font(.caption)
+            .accessibilityIdentifier("Settings.Memory.Row.Delete")
         }
         .padding(.vertical, 4)
     }
@@ -108,17 +114,20 @@ struct SettingsMemoryPanel: View {
             Form {
                 TextField("Memory", text: $editDraft, axis: .vertical)
                     .lineLimit(3...10)
+                    .accessibilityIdentifier("Settings.Memory.EditSheet.Field")
             }
             .navigationTitle("Edit Memory")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { editingEntry = nil }
+                        .accessibilityIdentifier("Settings.Memory.EditSheet.Cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         memoryStore.update(id: entry.id, content: editDraft)
                         editingEntry = nil
                     }
+                    .accessibilityIdentifier("Settings.Memory.EditSheet.Save")
                 }
             }
         }
