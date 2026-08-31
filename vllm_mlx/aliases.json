@@ -1695,6 +1695,7 @@
   "cogvideox-fun-5b-q4": {
     "hf_path": "dgrauet/CogVideoX-Fun-V1.5-5b-InP-mlx-q4",
     "modality": "video-gen",
+    "video_modes": ["text-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1707,6 +1708,7 @@
   "cogvideox-fun-5b-q8": {
     "hf_path": "dgrauet/CogVideoX-Fun-V1.5-5b-InP-mlx-q8",
     "modality": "video-gen",
+    "video_modes": ["text-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1719,6 +1721,7 @@
   "cogvideox-fun-5b-bf16": {
     "hf_path": "dgrauet/CogVideoX-Fun-V1.5-5b-InP-mlx",
     "modality": "video-gen",
+    "video_modes": ["text-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1731,6 +1734,7 @@
   "wan2.2-ti2v-5b-q8": {
     "hf_path": "Anes1032/Wan2.2-TI2V-5B-mlx-q8",
     "modality": "video-gen",
+    "video_modes": ["text-to-video", "image-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1743,6 +1747,7 @@
   "wan2.2-ti2v-5b-bf16": {
     "hf_path": "rickylin20260522/Wan2.2-TI2V-5B-mlx",
     "modality": "video-gen",
+    "video_modes": ["text-to-video", "image-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1755,6 +1760,7 @@
   "wan2.2-i2v-a14b-q8": {
     "hf_path": "Anes1032/Wan2.2-I2V-A14B-mlx-q8",
     "modality": "video-gen",
+    "video_modes": ["image-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1767,6 +1773,7 @@
   "wan2.2-t2v-a14b-bf16": {
     "hf_path": "rickylin20260522/Wan2.2-T2V-A14B-mlx",
     "modality": "video-gen",
+    "video_modes": ["text-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1779,6 +1786,7 @@
   "ltx-2.3-mlx-q4": {
     "hf_path": "notapalindrome/ltx23-mlx-av-q4",
     "modality": "video-gen",
+    "video_modes": ["text-to-video", "image-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,
@@ -1791,6 +1799,7 @@
   "ltx-2.5-mlx-q8": {
     "hf_path": "MrMofer/ltx-2.5-mlx-q8",
     "modality": "video-gen",
+    "video_modes": ["text-to-video", "image-to-video"],
     "tool_call_parser": null,
     "reasoning_parser": null,
     "is_hybrid": false,

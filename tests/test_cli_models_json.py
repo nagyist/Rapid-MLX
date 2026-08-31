@@ -40,6 +40,8 @@ def test_available_payload_shape() -> None:
         "mtp_draft_model",
         "mtp_speculative_tokens",
         "modality",
+        "video_modes",
+        "min_memory_gb",
         "is_builtin",
         "is_text_only",
     ):
@@ -50,6 +52,10 @@ def test_available_payload_shape() -> None:
     assert isinstance(entry["is_builtin"], bool)
     assert isinstance(entry["is_text_only"], bool)
     assert entry["size_bytes"] is None or isinstance(entry["size_bytes"], int)
+    assert entry["video_modes"] == []
+    assert entry["min_memory_gb"] is None or isinstance(
+        entry["min_memory_gb"], (int, float)
+    )
 
 
 def test_available_sections_are_split_by_modality() -> None:
@@ -59,6 +65,30 @@ def test_available_sections_are_split_by_modality() -> None:
     assert all(e["modality"] == "video-gen" for e in payload["video"])
     assert all(e["modality"] == "image-gen" for e in payload["image"])
     assert all(e["modality"] == "audio" for e in payload["audio"])
+
+
+def test_video_entries_expose_pre_serve_modes_and_memory_floor() -> None:
+    payload = _available_models_json_payload()
+    expected_modes = {
+        "cogvideox-fun-5b-q4": ["text-to-video"],
+        "cogvideox-fun-5b-q8": ["text-to-video"],
+        "cogvideox-fun-5b-bf16": ["text-to-video"],
+        "wan2.2-ti2v-5b-q8": ["text-to-video", "image-to-video"],
+        "wan2.2-ti2v-5b-bf16": ["text-to-video", "image-to-video"],
+        "wan2.2-i2v-a14b-q8": ["image-to-video"],
+        "wan2.2-t2v-a14b-bf16": ["text-to-video"],
+        "ltx-2.3-mlx-q4": ["text-to-video", "image-to-video"],
+        "ltx-2.5-mlx-q8": ["text-to-video", "image-to-video"],
+    }
+    by_alias = {entry["alias"]: entry for entry in payload["video"]}
+
+    assert set(by_alias) == set(expected_modes)
+    for alias, modes in expected_modes.items():
+        assert by_alias[alias]["video_modes"] == modes
+        assert by_alias[alias]["min_memory_gb"] > 0
+
+    assert all(entry["video_modes"] == [] for entry in payload["text"])
+    assert all(entry["video_modes"] == [] for entry in payload["image"])
 
 
 def test_cached_payload_shape() -> None:

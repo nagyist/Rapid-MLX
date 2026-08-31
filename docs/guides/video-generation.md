@@ -7,6 +7,15 @@ Video generation requires Python 3.11 or newer because the upstream
 `mlx-video-with-audio` runtime does not support Python 3.10. Rapid-MLX's core
 text and audio features continue to support Python 3.10.
 
+## Discover capabilities before serving
+
+`rapid-mlx models --json` lists video aliases separately from other model
+types. Each video entry includes `video_modes` (`text-to-video`,
+`image-to-video`, or both) and `min_memory_gb`, so clients can choose a
+compatible checkpoint before downloading or starting it. After the model is
+serving, `GET /v1/videos/capabilities` remains the source for its live size,
+duration, frame-rate, workload, reference-image, and optional-control limits.
+
 ## Motion and conditioning controls
 
 `POST /v1/videos` accepts optional controls in addition to `seconds`:
