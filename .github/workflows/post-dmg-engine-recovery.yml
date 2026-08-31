@@ -12,6 +12,10 @@ on:
         description: "Version whose Desktop DMG is already published but engine Release is missing (for example 0.13.0-rc2)."
         required: true
         type: string
+      desktop_run_id:
+        description: "Exact successful rapid-mac-release workflow_dispatch run that published this Desktop tag."
+        required: true
+        type: string
       reason:
         description: "Operator audit note for the recovery."
         required: true
@@ -30,6 +34,7 @@ jobs:
     outputs:
       version: ${{ steps.identity.outputs.version }}
       release_sha: ${{ steps.identity.outputs.release_sha }}
+      desktop_run_id: ${{ steps.identity.outputs.desktop_run_id }}
       open_ids: ${{ steps.blockers.outputs.open_ids }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -41,6 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ inputs.version }}
+          DESKTOP_RUN_ID: ${{ inputs.desktop_run_id }}
           REASON: ${{ inputs.reason }}
           HAVE_PAT: ${{ secrets.RELEASE_PAT != '' }}
           REPO: ${{ github.repository }}
@@ -52,6 +58,10 @@ jobs:
             exit 1
           fi
           python3 scripts/release_version.py validate "$VERSION"
+          if ! [[ "$DESKTOP_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::desktop_run_id must be the positive integer ID of the exact Desktop promotion run" >&2
+            exit 1
+          fi
           if [ -z "$REASON" ]; then
             echo "::error::a non-empty recovery reason is required" >&2
             exit 1
@@ -104,6 +114,7 @@ jobs:
           python3 scripts/check_desktop_publish.py \
             --app-tag "$APP_TAG" \
             --accepted-sha "$RELEASE_SHA" \
+            --expected-run-id "$DESKTOP_RUN_ID" \
             --repo "$REPO" \
             --workflow rapid-mac-release.yml \
             --deadline-min 5 \
@@ -113,11 +124,13 @@ jobs:
           {
             echo "version=$VERSION"
             echo "release_sha=$RELEASE_SHA"
+            echo "desktop_run_id=$DESKTOP_RUN_ID"
           } >> "$GITHUB_OUTPUT"
           {
             echo "VERSION=$VERSION"
             echo "APP_TAG=$APP_TAG"
             echo "RELEASE_SHA=$RELEASE_SHA"
+            echo "DESKTOP_RUN_ID=$DESKTOP_RUN_ID"
             echo "REASON=$REASON"
           } > recovery-identity.txt
 
@@ -164,6 +177,7 @@ jobs:
         env:
           VERSION: ${{ steps.identity.outputs.version }}
           RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+          DESKTOP_RUN_ID: ${{ steps.identity.outputs.desktop_run_id }}
           OPEN_IDS: ${{ steps.blockers.outputs.open_ids }}
         run: |
           set -euo pipefail
@@ -172,6 +186,7 @@ jobs:
             echo ""
             echo "Version: $VERSION"
             echo "Immutable Desktop candidate SHA: $RELEASE_SHA"
+            echo "Exact Desktop promotion run: $DESKTOP_RUN_ID"
             echo "Open release-blocker set: ${OPEN_IDS:-none}"
             echo ""
             cat recovery-evidence/desktop-publication-evidence.txt
@@ -227,6 +242,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           VERSION: ${{ needs.verify-published-desktop.outputs.version }}
           RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}
+          DESKTOP_RUN_ID: ${{ needs.verify-published-desktop.outputs.desktop_run_id }}
           EXPECTED_OPEN_IDS: ${{ needs.verify-published-desktop.outputs.open_ids }}
           NOTES_FILE: ${{ github.workspace }}/evidence/release-notes.md
           REASON: ${{ inputs.reason }}
@@ -243,6 +259,7 @@ jobs:
           fi
           grep -Fx "VERSION=$VERSION" evidence/recovery-identity.txt
           grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-identity.txt
+          grep -Fx "DESKTOP_RUN_ID=$DESKTOP_RUN_ID" evidence/recovery-identity.txt
 
           # Approval can wait while waiver policy changes on main. Refresh the
           # policy tree after approval; the immutable Desktop tag remains the
@@ -253,6 +270,7 @@ jobs:
           python3 scripts/check_desktop_publish.py \
             --app-tag "rapid-mac-v${VERSION}" \
             --accepted-sha "$RELEASE_SHA" \
+            --expected-run-id "$DESKTOP_RUN_ID" \
             --repo "$REPO" \
             --workflow rapid-mac-release.yml \
             --deadline-min 5 \

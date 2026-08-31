@@ -19,6 +19,8 @@ RECOVER=$(sed -n '/^  recover-engine-release:/,$p' "$WORKFLOW")
 contains "$ALL" "workflow_dispatch:" "recovery is explicit, never automatic"
 lacks "$ALL" "push:" "recovery cannot run from an ordinary main push"
 contains "$VERIFY" 'EVENT_REF: ${{ github.ref }}' "preflight binds dispatch to main"
+contains "$VERIFY" 'DESKTOP_RUN_ID: ${{ inputs.desktop_run_id }}' "operator supplies the exact Desktop promotion run"
+contains "$VERIFY" 'desktop_run_id must be the positive integer ID' "Desktop promotion run ID is validated before evidence"
 contains "$VERIFY" 'refs/tags/${APP_TAG}^{commit}' "Desktop tag is the recovery identity SSOT"
 contains "$VERIFY" 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main' "candidate must belong to main history"
 contains "$VERIFY" 'git show "${RELEASE_SHA}:pyproject.toml"' "version is read from the recovered candidate"
@@ -26,6 +28,12 @@ contains "$VERIFY" 'recovery reason must be a single line' "multiline recovery r
 contains "$VERIFY" 'recovery reason must contain non-whitespace text' "blank recovery reasons fail before evidence"
 contains "$VERIFY" 'if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]' "a mismatched existing engine tag fails before approval"
 contains "$VERIFY" 'scripts/check_desktop_publish.py' "exact Desktop publication is verified before approval"
+if [ "$(grep -cF -- '--expected-run-id "$DESKTOP_RUN_ID"' "$WORKFLOW")" -eq 2 ]; then
+  ok "both Desktop publication checks bind the exact promotion run"
+else
+  bad "both Desktop publication checks bind the exact promotion run"
+fi
+contains "$VERIFY" 'echo "desktop_run_id=$DESKTOP_RUN_ID"' "exact Desktop promotion run crosses the job boundary"
 contains "$VERIFY" 'scripts/check_release_blockers.py' "release blockers are checked before approval"
 contains "$VERIFY" 'scripts/build_release_notes.sh' "notes are generated for the immutable candidate"
 contains "$VERIFY" 'git worktree add --detach "$RECOVERY_SOURCE" "$RELEASE_SHA"' "curated notes are read from the immutable candidate tree"
@@ -44,6 +52,7 @@ contains "$RECOVER" "LIVE_HAVE_PAT: \${{ secrets.RELEASE_PAT != '' }}" "PAT pres
 lacks "$RECOVER" 'needs.verify-published-desktop.outputs.have_pat' "protected job never trusts a stale pre-approval PAT output"
 contains "$RECOVER" 'scripts/check_desktop_publish.py' "Desktop publication is re-verified after approval"
 contains "$RECOVER" 'grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-identity.txt' "downloaded evidence is bound to the approved SHA"
+contains "$RECOVER" 'grep -Fx "DESKTOP_RUN_ID=$DESKTOP_RUN_ID" evidence/recovery-identity.txt' "downloaded evidence is bound to the approved Desktop run"
 contains "$RECOVER" '--expected-open-ids "$EXPECTED_OPEN_IDS"' "blocker set drift fails closed"
 contains "$RECOVER" 'git fetch --force origin refs/heads/main:refs/remotes/origin/main' "waiver policy is refreshed after approval"
 contains "$RECOVER" '--waivers-dir "$LIVE_WAIVER_SOURCE/docs/development/release-blockers"' "blocker recheck consumes live waiver policy"
@@ -70,6 +79,7 @@ chmod +x "$TMP/reverify.sh"
 printf '%s\n' \
   'VERSION=0.13.0' \
   'RELEASE_SHA=0000000000000000000000000000000000000001' \
+  'DESKTOP_RUN_ID=123456789' \
   > "$TMP/evidence/recovery-identity.txt"
 
 cat > "$TMP/bin/python3" <<'SH'
@@ -82,7 +92,12 @@ case "$1" in
     fi
     exit "${BLOCKERS_RC:-0}"
     ;;
-  *check_desktop_publish.py) exit "${DESKTOP_RC:-0}" ;;
+  *check_desktop_publish.py)
+    if ! printf ' %s ' "$*" | grep -Fq -- " --expected-run-id $DESKTOP_RUN_ID "; then
+      exit 64
+    fi
+    exit "${DESKTOP_RC:-0}"
+    ;;
 esac
 exit 0
 SH
@@ -119,6 +134,7 @@ run_transaction() {
       LIVE_HAVE_PAT="${LIVE_HAVE_PAT:-true}" \
       VERSION=0.13.0 \
       RELEASE_SHA=0000000000000000000000000000000000000001 \
+      DESKTOP_RUN_ID=123456789 \
       EXPECTED_OPEN_IDS= \
       REPO=raullenchai/Rapid-MLX \
       LIVE_WAIVER_DIR="$TMP/recovery-live-main/docs/development/release-blockers" \
