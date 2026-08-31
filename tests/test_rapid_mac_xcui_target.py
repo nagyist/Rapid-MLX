@@ -1,3 +1,4 @@
+import plistlib
 from pathlib import Path
 
 import yaml
@@ -83,6 +84,16 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "build/Rapid-MLX Desktop.app" in runner
     assert "lsregister" in runner
     assert "xcodebuild -version" in runner
+    assert "/usr/bin/automationmodetool" in runner
+    assert 'DERIVED_DATA="${RAPID_XCUI_DERIVED_DATA:' in runner
+    assert "${RESULT_BUNDLE%.xcresult}-DerivedData" in runner
+    assert '-derivedDataPath "$DERIVED_DATA"' in runner
+    assert "CODE_SIGN_STYLE=Manual" in runner
+    assert "CODE_SIGNING_ALLOWED=YES" in runner
+    assert "CODE_SIGNING_REQUIRED=YES" in runner
+    assert "CODE_SIGN_IDENTITY=-" in runner
+    assert "CODE_SIGNING_ALLOWED=NO" not in runner
+    assert '${test_selection[@]+"${test_selection[@]}"}' in runner
     assert "XCUIApplication(url: appURL)" in source
     assert 'appendingPathComponent("build/Rapid-MLX Desktop.app")' in source
     assert source.count('"CFFIXED_USER_HOME": testHome.path') == 1
@@ -146,6 +157,27 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     )
     assert "isExecutableFile" in source
     assert "RapidUITests-$(date +%s)-$$.xcresult" in runner
+
+
+def test_xcui_runner_can_reserve_its_loopback_listener():
+    project_source = yaml.safe_load(
+        (MAC / "Tests/RapidUITests/project.yml").read_text()
+    )
+    project = (
+        MAC / "Tests/RapidUITests/RapidUITests.xcodeproj/project.pbxproj"
+    ).read_text()
+    entitlements_path = MAC / "Tests/RapidUITests/RapidUITests.entitlements"
+    entitlements = plistlib.loads(entitlements_path.read_bytes())
+
+    assert "RapidUITests.entitlements" in project_source["fileGroups"]
+    assert (
+        project_source["targets"]["RapidUITests"]["settings"]["base"][
+            "CODE_SIGN_ENTITLEMENTS"
+        ]
+        == "RapidUITests.entitlements"
+    )
+    assert project.count("CODE_SIGN_ENTITLEMENTS = RapidUITests.entitlements;") == 2
+    assert entitlements == {"com.apple.security.network.server": True}
 
 
 def test_swift_source_parent_traversal_resolves_rapid_mac_fixture():

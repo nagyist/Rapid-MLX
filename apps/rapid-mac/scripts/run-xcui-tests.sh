@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="$ROOT/Tests/RapidUITests/RapidUITests.xcodeproj"
 APP="$ROOT/build/Rapid-MLX Desktop.app"
 RESULT_BUNDLE="${RAPID_XCUI_RESULT_BUNDLE:-$ROOT/build/RapidUITests-$(date +%s)-$$.xcresult}"
+DERIVED_DATA="${RAPID_XCUI_DERIVED_DATA:-${RESULT_BUNDLE%.xcresult}-DerivedData}"
 ONLY_TESTING="${RAPID_XCUI_ONLY_TESTING:-}"
 
 [[ -d "$APP" ]] || { echo "error: build the app first: $APP" >&2; exit 1; }
@@ -17,6 +18,9 @@ xcodebuild -version >/dev/null 2>&1 || {
     echo "error: generated Xcode project missing: $PROJECT" >&2
     exit 1
 }
+if [[ -x /usr/bin/automationmodetool ]]; then
+    /usr/bin/automationmodetool
+fi
 
 # XCUIApplication(bundleIdentifier:) resolves through LaunchServices.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -31,6 +35,11 @@ xcodebuild test \
     -project "$PROJECT" \
     -scheme RapidUITests \
     -destination 'platform=macOS' \
+    -derivedDataPath "$DERIVED_DATA" \
     -resultBundlePath "$RESULT_BUNDLE" \
-    "${test_selection[@]}" \
-    CODE_SIGNING_ALLOWED=NO
+    ${test_selection[@]+"${test_selection[@]}"} \
+    CODE_SIGN_STYLE=Manual \
+    CODE_SIGNING_ALLOWED=YES \
+    CODE_SIGNING_REQUIRED=YES \
+    CODE_SIGN_IDENTITY=- \
+    DEVELOPMENT_TEAM=

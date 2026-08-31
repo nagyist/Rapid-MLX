@@ -11,6 +11,20 @@ Run it with full Xcode after building the app:
 ./scripts/run-xcui-tests.sh
 ```
 
+The runner needs no Apple signing identity: the script requests Xcode's local
+ad-hoc identity, verifies each run in its own DerivedData directory, and prints
+the host's Automation Mode state before launch. Do not replace that with
+`CODE_SIGNING_ALLOWED=NO`; Xcode copies and modifies its runner bundle, and an
+unsigned copy has an invalid resource seal that Gatekeeper can kill before any
+test starts.
+
+If Xcode reports `Timed out while enabling automation mode` even though
+`automationmodetool` prints `ENABLED`, treat it as a stale per-user
+`testmanagerd` service, not as a product-test failure. Stop other UI tests,
+terminate that service once (`pkill -9 -x testmanagerd`), and rerun with a new
+result-bundle path. Launchd starts a fresh service on demand. A second identical
+failure is a host blocker and must not be retried again.
+
 The target is additive; do not remove an AX journey until its semantic and
 structural assertions have equivalent native coverage.
 
