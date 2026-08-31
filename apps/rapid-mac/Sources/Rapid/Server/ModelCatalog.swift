@@ -719,7 +719,7 @@ enum ModelCatalog {
                     entry.alias,
                     CatalogProfileCapability(
                         isBuiltin: entry.isBuiltinProfile == true,
-                        isTextOnly: !entry.taskTypes.contains(.visionLanguage)
+                        isTextOnly: entry.isTextOnly == true
                     )
                 )
             }
@@ -801,6 +801,7 @@ enum ModelCatalog {
                     == (target["model_identity_digest"] is String),
                   let capabilities = row["capabilities"] as? [String: Any],
                   let rawTasks = capabilities["task_types"] as? [String],
+                  let isTextOnly = capabilities["is_text_only"] as? Bool,
                   let availability = row["availability"] as? [String: Any],
                   ["cli", "server", "desktop", "website"].allSatisfy({
                     availability[$0] is Bool
@@ -885,7 +886,7 @@ enum ModelCatalog {
                 operationModes: operations,
                 runtimeAdapter: runtimeAdapter,
                 isBuiltinProfile: origin == "builtin",
-                isTextOnly: !tasks.contains(.visionLanguage)
+                isTextOnly: isTextOnly
             ))
         }
         return entries
@@ -1019,7 +1020,8 @@ enum ModelCatalog {
         return mergeAtomicAndCached(
             atomic: atomic,
             cached: await cachedTask,
-            excluded: projection.excluded
+            excluded: projection.excluded,
+            speculative: projection.speculative
         )
     }
 
@@ -1029,7 +1031,8 @@ enum ModelCatalog {
     static func mergeAtomicAndCached(
         atomic: [ModelEntry],
         cached: [(String, String?, String?)],
-        excluded: Set<String>
+        excluded: Set<String>,
+        speculative: [String: SpeculativeDecodingPreset] = [:]
     ) -> [ModelEntry] {
         var cachedByAlias: [String: (repo: String?, size: String?)] = [:]
         var cachedByRepo: [String: (repo: String, size: String?)] = [:]
@@ -1045,9 +1048,14 @@ enum ModelCatalog {
             }
         }
 
+        let enrichedAtomic = atomic.map { entry -> ModelEntry in
+            var enriched = entry
+            enriched.speculativeDecodingPreset = speculative[entry.alias]
+            return enriched
+        }
         var consumedExternal: Set<String> = []
-        var seenAliases = Set(atomic.map(\.alias))
-        var entries = atomic.map { entry -> ModelEntry in
+        var seenAliases = Set(enrichedAtomic.map(\.alias))
+        var entries = enrichedAtomic.map { entry -> ModelEntry in
             let cachedHit = cachedByAlias[entry.alias]
             let siblingHit = entry.hfRepo.flatMap { cachedByRepo[$0] }
             let externalRepo = entry.hfRepo.flatMap { repo in
