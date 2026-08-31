@@ -260,21 +260,74 @@ def _completed_job_record(job: _VideoJob) -> dict:
     }
 
 
-def _persist_completed_job(job: _VideoJob) -> None:
-    """Atomically commit one completed job after its MP4 is durable."""
-    job_dir = _jobs_root / job.id
-    metadata_path = job_dir / _VIDEO_JOB_METADATA
-    temporary_path: Path | None = None
+def _video_directory_open_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:  # pragma: no cover - POSIX guard
+        raise OSError("secure video directory access is unavailable")
+    return int(os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0))
+
+
+def _open_video_job_directory(video_id: str) -> tuple[int, int]:
+    """Open the configured root and one owned job directory without links."""
+    root_fd = os.open(_jobs_root, _video_directory_open_flags())
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            prefix=".job-",
-            suffix=".json.tmp",
-            dir=job_dir,
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
+        job_fd = os.open(
+            video_id,
+            _video_directory_open_flags(),
+            dir_fd=root_fd,
+        )
+    except BaseException:
+        os.close(root_fd)
+        raise
+    return root_fd, job_fd
+
+
+def _open_video_output(job_fd: int) -> int:
+    """Open and validate a non-empty regular MP4 relative to its job dir."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:  # pragma: no cover - POSIX guard
+        raise OSError("secure video output access is unavailable")
+    output_fd = os.open(
+        "output.mp4",
+        os.O_RDONLY
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0),
+        dir_fd=job_fd,
+    )
+    try:
+        output_stat = os.fstat(output_fd)
+        if not stat.S_ISREG(output_stat.st_mode) or output_stat.st_size <= 0:
+            raise OSError("video output is not a non-empty regular file")
+    except BaseException:
+        os.close(output_fd)
+        raise
+    return output_fd
+
+
+def _persist_completed_job(job: _VideoJob) -> None:
+    """Durably commit one completed MP4 and its atomic manifest."""
+    root_fd, job_fd = _open_video_job_directory(job.id)
+    temporary_name = f".job-{uuid.uuid4().hex}.json.tmp"
+    try:
+        output_fd = _open_video_output(job_fd)
+        try:
+            os.fsync(output_fd)
+        finally:
+            os.close(output_fd)
+
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=job_fd,
+        )
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as temporary:
             json.dump(
                 _completed_job_record(job),
                 temporary,
@@ -284,10 +337,22 @@ def _persist_completed_job(job: _VideoJob) -> None:
             )
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.replace(temporary_path, metadata_path)
+        os.replace(
+            temporary_name,
+            _VIDEO_JOB_METADATA,
+            src_dir_fd=job_fd,
+            dst_dir_fd=job_fd,
+        )
+        # Persist the output/manifest entries, then the job directory's entry
+        # in the configured root. Only after both barriers may the API expose
+        # the job as completed.
+        os.fsync(job_fd)
+        os.fsync(root_fd)
     finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary_name, dir_fd=job_fd)
+        os.close(job_fd)
+        os.close(root_fd)
 
 
 def _load_completed_job(job_dir: Path) -> _VideoJob | None:
@@ -1164,23 +1229,10 @@ async def retrieve_video_content(video_id: str):
     # restored job directory or output file for a symlink between startup
     # validation and download. O_NONBLOCK also prevents a substituted FIFO
     # from stalling the event loop before fstat can reject it.
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:  # pragma: no cover - POSIX guard
-        raise HTTPException(status_code=410, detail="video content has expired")
-    base_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
     root_fd = job_fd = output_fd = None
     try:
-        root_fd = os.open(_jobs_root, base_flags | directory)
-        job_fd = os.open(job.id, base_flags | directory, dir_fd=root_fd)
-        output_fd = os.open(
-            "output.mp4",
-            base_flags | getattr(os, "O_NONBLOCK", 0),
-            dir_fd=job_fd,
-        )
-        output_stat = os.fstat(output_fd)
-        if not stat.S_ISREG(output_stat.st_mode) or output_stat.st_size <= 0:
-            raise OSError("video output is not a non-empty regular file")
+        root_fd, job_fd = _open_video_job_directory(job.id)
+        output_fd = _open_video_output(job_fd)
         source = os.fdopen(output_fd, "rb")
         output_fd = None
     except OSError as exc:

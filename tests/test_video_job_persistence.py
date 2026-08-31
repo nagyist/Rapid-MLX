@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -268,7 +269,7 @@ def test_failed_metadata_replace_leaves_no_partial_manifest(
     job_dir.mkdir()
     (job_dir / "output.mp4").write_bytes(b"mp4")
 
-    def fail_replace(source, destination) -> None:
+    def fail_replace(source, destination, **kwargs) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(video.os, "replace", fail_replace)
@@ -277,6 +278,51 @@ def test_failed_metadata_replace_leaves_no_partial_manifest(
 
     assert not (job_dir / "job.json").exists()
     assert not list(job_dir.glob(".job-*.json.tmp"))
+
+
+def test_persistence_orders_crash_consistency_barriers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = tmp_path / "videos"
+    video.configure_video_jobs(store)
+    job = _completed_job("video_" + "7" * 32)
+    job_dir = store / job.id
+    job_dir.mkdir()
+    output = job_dir / "output.mp4"
+    output.write_bytes(b"mp4")
+    events: list[str] = []
+    original_fsync = video.os.fsync
+    original_replace = video.os.replace
+
+    def track_fsync(fd: int) -> None:
+        opened = video.os.fstat(fd)
+        if opened.st_ino == output.stat().st_ino:
+            events.append("output")
+        elif stat.S_ISREG(opened.st_mode):
+            events.append("manifest")
+        elif opened.st_ino == job_dir.stat().st_ino:
+            events.append("job-directory")
+        elif opened.st_ino == store.stat().st_ino:
+            events.append("store-directory")
+        original_fsync(fd)
+
+    def track_replace(source, destination, **kwargs) -> None:
+        events.append("replace")
+        original_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(video.os, "fsync", track_fsync)
+    monkeypatch.setattr(video.os, "replace", track_replace)
+
+    video._persist_completed_job(job)
+
+    assert events == [
+        "output",
+        "manifest",
+        "replace",
+        "job-directory",
+        "store-directory",
+    ]
+    assert (job_dir / "job.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -398,6 +444,145 @@ async def test_download_rejects_nonregular_output_swapped_after_restore(
         await video.retrieve_video_content(job.id)
 
     assert exc.value.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_job_directory_symlink_swapped_after_restore(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "videos"
+    video.configure_video_jobs(store)
+    job = _completed_job("video_" + "6" * 32)
+    _write_completed_job(job)
+    video.start_video_jobs()
+
+    original = store / job.id
+    original.rename(store / f"{job.id}-original")
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "output.mp4").write_bytes(b"server-readable-data")
+    original.symlink_to(replacement, target_is_directory=True)
+
+    with pytest.raises(video.HTTPException) as exc:
+        await video.retrieve_video_content(job.id)
+
+    assert exc.value.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_queued_job_with_active_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingEngine:
+        model_name = "notapalindrome/ltx23-mlx-av-q4"
+
+        def generate(self, *, output_path: Path, **kwargs) -> None:
+            started.set()
+            release.wait(timeout=5)
+            output_path.write_bytes(b"generated-mp4")
+
+    monkeypatch.setattr(video, "_video_engine", lambda: BlockingEngine())
+    first = await video.create_video(
+        prompt="Active job",
+        model="ltx-2.3-mlx-q4",
+        seconds="1",
+        size="512x512",
+        seed=4,
+        input_reference=None,
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    queued = await video.create_video(
+        prompt="Queued job",
+        model="ltx-2.3-mlx-q4",
+        seconds="1",
+        size="512x512",
+        seed=5,
+        input_reference=None,
+    )
+
+    try:
+        await video.shutdown_video_jobs(timeout=0)
+        assert video._jobs[queued["id"]].error == {
+            "code": "video_server_shutdown",
+            "message": "Video generation was cancelled during server shutdown.",
+        }
+        assert video._jobs[queued["id"]].generation_finished is True
+    finally:
+        release.set()
+        for _ in range(200):
+            if not video._generation_threads and not video._cleanup_tasks:
+                break
+            await asyncio.sleep(0.01)
+        assert not video._generation_threads
+        assert first["id"] in video._jobs
+
+
+@pytest.mark.asyncio
+async def test_failed_job_never_enters_generation_gate() -> None:
+    job = video._VideoJob(
+        id="video_" + "5" * 32,
+        model="ltx-2.3-mlx-q4",
+        prompt="Already failed",
+        seconds="1",
+        size="512x512",
+        status="failed",
+        created_at=1,
+    )
+
+    class UnexpectedEngine:
+        video_family = "ltx-2.3"
+
+        def generate(self, **kwargs) -> None:
+            raise AssertionError("failed job reached generation")
+
+    await video._run_job(
+        job,
+        engine=UnexpectedEngine(),
+        width=512,
+        height=512,
+        num_frames=25,
+        fps=24,
+        seed=6,
+        image_path=None,
+        negative_prompt=None,
+        guidance_scale=None,
+        conditioning_strength=None,
+    )
+
+    assert job.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_new_job_evicts_oldest_finished_job_at_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oldest_id = "video_" + f"{0:032x}"
+    for index in range(video._MAX_JOBS):
+        job = _completed_job("video_" + f"{index:032x}", created_at=index)
+        video._jobs[job.id] = job
+
+    class FakeEngine:
+        model_name = "notapalindrome/ltx23-mlx-av-q4"
+
+        def generate(self, *, output_path: Path, **kwargs) -> None:
+            output_path.write_bytes(b"generated-mp4")
+
+    monkeypatch.setattr(video, "_video_engine", lambda: FakeEngine())
+    created = await video.create_video(
+        prompt="Newest result",
+        model="ltx-2.3-mlx-q4",
+        seconds="1",
+        size="512x512",
+        seed=7,
+        input_reference=None,
+    )
+    await _wait_for_completion(created["id"])
+
+    assert oldest_id not in video._jobs
+    assert created["id"] in video._jobs
 
 
 def test_video_output_directory_rejects_a_file(tmp_path: Path) -> None:
