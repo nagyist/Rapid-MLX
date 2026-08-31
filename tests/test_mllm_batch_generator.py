@@ -1905,6 +1905,38 @@ def test_exact_prefix_cache_restores_two_dimensional_input():
     assert request.input_ids.tolist() == [[3, 4]]
 
 
+def test_exact_prefix_cache_drops_all_valid_mask_after_restore():
+    manager = _ExactPrefixCache(warm_cache=[object()], prefix_len=3)
+    gen = _make_prefix_cache_generator(manager)
+    request = _make_ids_request(5)
+    request.attention_mask = mx.ones((1, 5), dtype=mx.int32)
+
+    assert gen._lookup_exact_text_prefix(request) is manager.warm_cache
+    assert request.input_ids.tolist() == [3, 4]
+    assert request.attention_mask is None
+
+
+@pytest.mark.parametrize(
+    "auxiliary_inputs",
+    [
+        {"attention_mask": mx.array([[0, 1, 1, 1, 1]], dtype=mx.int32)},
+        {"extra_kwargs": {"position_ids": mx.arange(5)[None, :]}},
+    ],
+)
+def test_exact_prefix_cache_bypasses_sequence_aligned_auxiliary_inputs(
+    auxiliary_inputs,
+):
+    manager = _ExactPrefixCache(warm_cache=[object()], prefix_len=3)
+    gen = _make_prefix_cache_generator(manager)
+    request = _make_ids_request(5)
+    for name, value in auxiliary_inputs.items():
+        setattr(request, name, value)
+
+    assert gen._lookup_exact_text_prefix(request) is None
+    assert manager.lookups == []
+    assert request.input_ids.tolist() == [0, 1, 2, 3, 4]
+
+
 def test_exact_prefix_cache_short_prompt_counts_miss_without_lookup():
     manager = _ExactPrefixCache()
     gen = _make_prefix_cache_generator(manager)

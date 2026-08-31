@@ -876,6 +876,11 @@ class MLLMBatchGenerator:
             or getattr(self, "_prefix_cache_mode", None) != "exact"
             or not _is_text_only_request(request)
             or request.input_ids is None
+            # Exact APC restores KV state only. Sequence-aligned processor
+            # outputs cannot be shortened generically, so keep the cold path
+            # unless the only auxiliary input is a semantically empty mask.
+            or request.extra_kwargs
+            or not _attention_mask_is_droppable(request.attention_mask)
         ):
             return None
 
@@ -901,6 +906,10 @@ class MLLMBatchGenerator:
             request.input_ids = request.input_ids[prefix_len:]
         else:
             request.input_ids = request.input_ids[:, prefix_len:]
+        # An all-valid mask carries no information and no longer matches the
+        # suffix-only IDs after restoring KV state. Let the model rebuild its
+        # causal mask from the restored cache length instead.
+        request.attention_mask = None
         logger.info(
             "[mllm_apc] request=%s HIT prompt_tokens=%d cached=%d remaining=%d",
             request.request_id[:12],
