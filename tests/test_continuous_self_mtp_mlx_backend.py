@@ -323,6 +323,22 @@ def test_one_token_remaining_uses_target_only_cycle():
     assert [call[-1] for call in forward.calls if call[0] == "target"][-1] == 0
 
 
+def test_cohort_uses_uniform_depth_for_scalar_confirmed_boundary():
+    runtime, forward, _cache_events = _runtime()
+    lane0, _ = _prepare(runtime, 0, [1, 2])
+    lane1, _ = _prepare(runtime, 1, [5, 6])
+    lane1.lane.max_tokens = lane1.lane.ntoks + 2  # Room for only K=1.
+    batch = attach_self_mtp_lanes(None, [lane0, lane1])
+
+    proposal = propose_batched_self_mtp(batch)
+
+    assert proposal.draft_depths == (1, 1)
+    verify = [call for call in forward.calls if call[0] == "target"][-1]
+    assert verify[1].shape == (2, 2)
+    assert verify[-1] == 1
+    abort_batched_self_mtp(batch, proposal)
+
+
 def test_transformed_sampling_fails_closed_without_residual_hooks():
     runtime, _forward, _events = _runtime()
     runtime = ContinuousSelfMTPRuntime(

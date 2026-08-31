@@ -341,14 +341,11 @@ class RapidMLXSelfMTPBackend:
         logits_processor: Callable[[SelfMTPLane, Any, Any], Any] | None = None,
         prefill_step_size: int = 512,
         draft_depth: int = 2,
-        speculation_rollback: bool = False,
     ) -> None:
         if prefill_step_size < 1:
             raise ValueError("prefill_step_size must be positive")
         if draft_depth != 2:
             raise ValueError("the first Rapid continuous self-MTP backend is K=2")
-        if not isinstance(speculation_rollback, bool):
-            raise ValueError("speculation_rollback must be boolean")
         self.target_cache_factory = target_cache_factory
         self.draft_cache_factory = draft_cache_factory
         self.ops = array_ops or _MLXArrayOps()
@@ -357,15 +354,6 @@ class RapidMLXSelfMTPBackend:
         self.draft_depth = draft_depth
         self._proposal_boundaries: dict[int, _ProposalBoundary] = {}
         self._proposal_lock = Lock()
-        # Rollback protocol for the verify forward.  Default (False) keeps the
-        # model's n_confirmed snapshot path (correct for pure full-attention
-        # caches).  True drives the engine's start_speculation/trim_ragged
-        # rollback by confirming nothing, which is what a GatedDeltaNet hybrid
-        # needs: with n_confirmed=0 the GDN records an exact per-forward
-        # rollback instead of taking its snapshot path, so the ragged trim can
-        # rewind it.  Opt-in because it changes the GDN's confirmed-boundary
-        # numerics for the verify forward.
-        self.speculation_rollback = speculation_rollback
 
     def _cache(self, existing: Any, factory: Callable[[], Any] | None, name: str):
         value = existing
@@ -515,7 +503,7 @@ class RapidMLXSelfMTPBackend:
                 lanes=tuple(_lane_boundary(lane) for lane in lanes),
                 caches=tuple(_cache_boundary(cache) for cache in target + draft_cache),
             )
-        depths = tuple(
+        lane_depths = tuple(
             min(
                 self.draft_depth,
                 lane.num_draft,
@@ -523,6 +511,12 @@ class RapidMLXSelfMTPBackend:
             )
             for lane in lanes
         )
+        # The injected target ABI accepts one confirmed-prefix scalar for the
+        # whole tensor.  Keep the verify width uniform across the cohort so a
+        # short row can never inherit another row's recurrent-cache boundary.
+        # Near-terminal companions spend at most one cycle at the smaller K.
+        shared_depth = min(lane_depths)
+        depths = tuple(shared_depth for _lane in lanes)
         if max(depths) == 0:
             verify_ids = self.ops.uint32([[lane.cur] for lane in lanes])
             target_logits, target_hidden = self._forward_pair(
@@ -660,7 +654,7 @@ class RapidMLXSelfMTPBackend:
                 forwards.target(
                     verify_ids,
                     target,
-                    n_confirmed=0 if self.speculation_rollback else max(depths),
+                    n_confirmed=max(depths),
                 ),
                 "target forward",
             )

@@ -2160,7 +2160,6 @@ def _normalize_speculative_config_or_exit(args):
             "mtp_disable_auto_k": False,
             "mtp_continuous_batching": False,
             "mtp_allow_dynamic_membership": False,
-            "mtp_speculation_rollback": False,
             "suffix_decoding": False,
         }
         for name, value in defaults.items():
@@ -2438,7 +2437,6 @@ def _normalize_speculative_config_or_exit(args):
         args.spec_decode = "mtp"
         args.mtp_continuous_batching = config.continuous_batching
         args.mtp_allow_dynamic_membership = config.allow_dynamic_membership
-        args.mtp_speculation_rollback = config.speculation_rollback
         if legacy_enable_mtp_requested:
             args.enable_mtp = True
             if config.num_speculative_tokens is not None:
@@ -4244,7 +4242,6 @@ def serve_command(args):
         mtp_allow_dynamic_membership=getattr(
             args, "mtp_allow_dynamic_membership", False
         ),
-        mtp_speculation_rollback=getattr(args, "mtp_speculation_rollback", False),
         # SuffixDecoding
         enable_suffix_decoding=args.suffix_decoding,
         suffix_max_draft=args.suffix_max_draft,
@@ -10520,10 +10517,8 @@ Examples:
             '\'{"method":"ddtree"}\', and MTP with '
             '\'{"method":"mtp","num_speculative_tokens":3,'
             '"disable_auto_k":false,"continuous_batching":false,'
-            '"allow_dynamic_membership":false,"speculation_rollback":false}\'. '
-            "Continuous self-MTP, dynamic membership, and speculation_rollback "
-            "(the start_speculation/trim_ragged rollback needed for "
-            "GatedDeltaNet hybrids) are default-off. "
+            '"allow_dynamic_membership":false}\'. '
+            "Continuous self-MTP and dynamic membership are default-off. "
             "SuffixDecoding is an explicit, "
             "workload-specific flag for high prompt/output-overlap traffic "
             "and is available with "

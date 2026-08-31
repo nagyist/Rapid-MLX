@@ -124,7 +124,6 @@ def assemble_continuous_self_mtp_runtime(
     array_ops: Any = None,
     logits_processor: Any = None,
     prefill_step_size: int = 512,
-    speculation_rollback: bool = False,
 ) -> ContinuousSelfMTPRuntime:
     """Build a ready runtime from an MTP-injected Rapid model.
 
@@ -193,7 +192,6 @@ def assemble_continuous_self_mtp_runtime(
             array_ops=array_ops,
             logits_processor=logits_processor,
             prefill_step_size=prefill_step_size,
-            speculation_rollback=speculation_rollback,
         ),
         caches=RapidRaggedCacheAdapter(
             preflight=preflight_ragged_cache,
