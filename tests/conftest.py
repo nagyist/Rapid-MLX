@@ -209,6 +209,8 @@ _RAPID_MLX_DIR_ENV_VARS = (
     "RAPID_MLX_CONFIG_HOME",
 )
 
+_AGENT_CONFIG_HOME_ENV_VARS = ("CODEX_HOME", "HERMES_HOME", "DSH_HOME")
+
 
 @pytest.fixture(autouse=True)
 def _hermetic_hf_and_config_dirs(tmp_path, monkeypatch, request):
@@ -274,6 +276,9 @@ def _hermetic_hf_and_config_dirs(tmp_path, monkeypatch, request):
     # first-run/config/bench state under ~/.rapid-mlx.
     for var in _RAPID_MLX_DIR_ENV_VARS:
         monkeypatch.setenv(var, str(tmp_path / var.lower()))
+
+    for var in _AGENT_CONFIG_HOME_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
 
     if request.node.get_closest_marker("real_hf_cache"):
         yield

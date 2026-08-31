@@ -16,9 +16,21 @@ re-litigation of the decision.
 
 from __future__ import annotations
 
+import sys
 from unittest import mock
 
+import pytest
+
 from vllm_mlx.doctor import env_health as eh
+
+
+@pytest.fixture(autouse=True)
+def clean_runtime_probe_state(monkeypatch):
+    """Keep host server processes out of doctor's runtime selection."""
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    yield
+    eh._RUNTIME_PROBE_CACHE.clear()
+
 
 # ---------------------------------------------------------------------------
 # Rip 1: YouTube cookies row removed from Network section

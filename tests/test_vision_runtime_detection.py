@@ -36,6 +36,17 @@ import sys
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def clean_runtime_probe_state(monkeypatch):
+    """Keep host server processes out of doctor's runtime selection."""
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    yield
+    from vllm_mlx.doctor import env_health
+
+    env_health._RUNTIME_PROBE_CACHE.clear()
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Simulators
 # ─────────────────────────────────────────────────────────────────────────
@@ -349,11 +360,15 @@ def test_doctor_vision_row_not_ok_and_names_pil_when_pil_missing(monkeypatch):
     # mlx-vlm metadata present (Homebrew --no-deps), PIL not importable.
     def fake_safe_version(dist):
         if dist == "mlx-vlm":
-            return "0.6.5"
+            return "0.6.16"
         return None
 
     monkeypatch.setattr(env_health, "_safe_version", fake_safe_version)
-    monkeypatch.setattr(env_health, "_pil_importable", lambda: False)
+    monkeypatch.setattr(
+        env_health,
+        "_pil_importable",
+        lambda runtime=None, packages=None: False,
+    )
 
     section = env_health.section_optional_packages()
 
@@ -387,11 +402,15 @@ def test_doctor_vision_row_ok_when_pil_present(monkeypatch):
 
     def fake_safe_version(dist):
         if dist == "mlx-vlm":
-            return "0.6.5"
+            return "0.6.16"
         return None
 
     monkeypatch.setattr(env_health, "_safe_version", fake_safe_version)
-    monkeypatch.setattr(env_health, "_pil_importable", lambda: True)
+    monkeypatch.setattr(
+        env_health,
+        "_pil_importable",
+        lambda runtime=None, packages=None: True,
+    )
 
     section = env_health.section_optional_packages()
     vision_row = _find_row(section, "mlx-vlm", "vision")
@@ -416,7 +435,16 @@ def test_doctor_vision_row_warns_when_mlx_vlm_truly_absent(monkeypatch):
     monkeypatch.setattr(env_health, "_safe_version", lambda dist: None)
     # PIL state is irrelevant when mlx-vlm itself is absent, but pin it
     # present so a spurious PIL mention can't sneak in via the absent path.
-    monkeypatch.setattr(env_health, "_pil_importable", lambda: True)
+    monkeypatch.setattr(
+        env_health,
+        "_pil_importable",
+        lambda runtime=None, packages=None: True,
+    )
+    monkeypatch.setattr(
+        env_health,
+        "_visible_without_metadata",
+        lambda dist, runtime=None: False,
+    )
 
     section = env_health.section_optional_packages()
     vision_row = _find_row(section, "mlx-vlm", "vision")
@@ -525,7 +553,7 @@ def test_doctor_vision_row_red_when_pillow_damaged(monkeypatch):
     from vllm_mlx.doctor.env_health import CheckStatus
 
     def fake_safe_version(dist):
-        return "0.6.5" if dist == "mlx-vlm" else None
+        return "0.6.16" if dist == "mlx-vlm" else None
 
     monkeypatch.setattr(env_health, "_safe_version", fake_safe_version)
     _simulate_pillow_damaged(monkeypatch)
