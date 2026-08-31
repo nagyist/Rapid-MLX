@@ -1766,6 +1766,77 @@ def test_mtp_running_limit_serializes_requests_without_changing_queue_capacity()
     assert scheduler._max_running_sequences() == 17
 
 
+def test_mtp_running_limit_uses_only_attested_continuous_capacity():
+    from types import SimpleNamespace
+
+    from vllm_mlx.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(
+        spec_decode="mtp",
+        max_num_seqs=8,
+        mtp_continuous_batching=True,
+        mtp_allow_dynamic_membership=True,
+    )
+    scheduler.spec_decode_runtime_attempted = True
+    scheduler.spec_decode_runtime_method = "mtp"
+
+    router_config = SimpleNamespace(
+        allow_dynamic_membership=True,
+        max_lanes=4,
+    )
+    runtime_capabilities = SimpleNamespace(dynamic_membership=True)
+    scheduler.batch_generator = SimpleNamespace(
+        _continuous_mtp_router=SimpleNamespace(config=router_config),
+        _continuous_mtp_runtime=SimpleNamespace(
+            capabilities=runtime_capabilities,
+        ),
+    )
+
+    assert scheduler._max_running_sequences() == 4
+
+    # Every layer of the feature-detected contract is fail-closed.  A stale
+    # config flag, router, or runtime descriptor cannot expose the legacy
+    # single-request verifier to a multi-row generation batch.
+    for owner, field in (
+        (scheduler.config, "mtp_allow_dynamic_membership"),
+        (router_config, "allow_dynamic_membership"),
+        (runtime_capabilities, "dynamic_membership"),
+    ):
+        setattr(owner, field, False)
+        assert scheduler._max_running_sequences() == 1
+        setattr(owner, field, True)
+
+
+def test_mtp_running_limit_clamps_malformed_continuous_capacity_to_one():
+    from types import SimpleNamespace
+
+    from vllm_mlx.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(
+        spec_decode="mtp",
+        max_num_seqs=8,
+        mtp_continuous_batching=True,
+        mtp_allow_dynamic_membership=True,
+    )
+    scheduler.spec_decode_runtime_attempted = True
+    scheduler.spec_decode_runtime_method = "mtp"
+    scheduler.batch_generator = SimpleNamespace(
+        _continuous_mtp_router=SimpleNamespace(
+            config=SimpleNamespace(
+                allow_dynamic_membership=True,
+                max_lanes="invalid",
+            )
+        ),
+        _continuous_mtp_runtime=SimpleNamespace(
+            capabilities=SimpleNamespace(dynamic_membership=True),
+        ),
+    )
+
+    assert scheduler._max_running_sequences() == 1
+
+
 def test_mtp_install_gate_miss_restores_plain_batch_width_in_same_schedule_tick():
     """An unsupported MTP runtime must not serialize ordinary decoding."""
     from unittest.mock import MagicMock

@@ -278,7 +278,9 @@ def plan_router_install(
     cache_quantized: bool = False,
     cache_windowed: bool = False,
     max_lanes: int = 4,
+    min_batch_lanes: int = 2,
     hard_reserve_bytes: int = 8 * 1024**3,
+    allow_dynamic_membership: bool = False,
 ) -> ContinuousMTPRouterInstallDecision:
     """Feature-detect a model and return an install plan without mutation."""
     candidate = getattr(model, "language_model", model)
@@ -331,8 +333,9 @@ def plan_router_install(
         config=BatchedMTPConfig(
             enabled=enabled,
             max_lanes=max_lanes,
+            min_batch_lanes=min_batch_lanes,
             hard_reserve_bytes=hard_reserve_bytes,
-            allow_dynamic_membership=False,
+            allow_dynamic_membership=allow_dynamic_membership,
         ),
         runtime=runtime,
     )
@@ -361,13 +364,14 @@ def _runtime_refusals(
     reasons: list[str] = []
     if config.enabled is not True:
         reasons.append("continuous self-MTP is disabled")
-    if runtime.model_family not in {"qwen4_exp", "qwen3_5"}:
+    if runtime.model_family != "qwen3_5":
         reasons.append(f"unsupported model family: {runtime.model_family}")
     descriptor = runtime.capability_descriptor
     required_descriptor = {
         "protocol_version": 1,
         "recursive_draft_depth": 2,
         "fixed_membership": True,
+        "dynamic_join": True,
         "quantized_cache": False,
         "windowed_cache": False,
         "xtc": False,
@@ -379,6 +383,8 @@ def _runtime_refusals(
         reasons.append("quantized cache is unsupported")
     if runtime.cache_windowed:
         reasons.append("windowed cache is unsupported")
+    if config.allow_dynamic_membership and not runtime.capabilities.dynamic_membership:
+        reasons.append("dynamic membership is not attested")
     reasons.extend(
         f"missing capability: {name}" for name in runtime.capabilities.missing_core()
     )

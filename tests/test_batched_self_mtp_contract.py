@@ -8,11 +8,9 @@ from dataclasses import replace
 import pytest
 
 from vllm_mlx.spec_decode.mtp.batched import (
-    BatchedMTPBookkeeper,
     BatchedMTPCapabilities,
     BatchedMTPConfig,
     BatchedMTPRoute,
-    BatchedMTPTransactionError,
     LaneAdmission,
     SamplingContract,
     assess_lane,
@@ -195,76 +193,15 @@ def test_single_eligible_lane_uses_plain_decode_instead_of_waiting():
     assert decision.plain_lane_ids == ("a",)
 
 
-def test_proposal_ticket_binds_epoch_order_and_verify_shape():
-    ledger = BatchedMTPBookkeeper(("a", "b", "c"))
-    ticket = ledger.begin_proposal(draft_tokens=2)
-
-    assert ticket.membership_epoch == 1
-    assert ticket.lane_ids == ("a", "b", "c")
-    assert ticket.verify_rows == 9
-
-    receipt = ledger.commit(
-        ticket,
-        emitted_counts={"c": 3, "a": 1, "b": 2},
-        terminal_lane_ids=("c",),
+def test_live_adapter_can_explicitly_admit_a_serial_continuous_cohort():
+    decision = plan_admission(
+        [LaneAdmission("a")],
+        config=_config(min_batch_lanes=1),
+        capabilities=_capabilities(),
+        free_bytes=1000,
     )
-    assert receipt.emitted_counts == (("a", 1), ("b", 2), ("c", 3))
-    assert receipt.total_emitted == 6
-    assert ledger.committed_tokens("b") == 2
-    # Commit reports terminal lanes; the coordinator detaches them only after
-    # it has committed the corresponding model/cache transaction.
-    assert ledger.lane_ids == ("a", "b", "c")
-
-
-def test_membership_cannot_change_during_proposal_and_abort_unlocks_it():
-    ledger = BatchedMTPBookkeeper(("a", "b"))
-    ticket = ledger.begin_proposal(draft_tokens=1)
-
-    with pytest.raises(BatchedMTPTransactionError, match="membership cannot change"):
-        ledger.attach(("c",))
-    with pytest.raises(BatchedMTPTransactionError, match="membership cannot change"):
-        ledger.detach(("a",))
-
-    ledger.abort(ticket)
-    assert ledger.attach(("c",)) == 2
-    assert ledger.lane_ids == ("a", "b", "c")
-
-
-def test_stale_or_double_commit_is_rejected():
-    ledger = BatchedMTPBookkeeper(("a", "b"))
-    first = ledger.begin_proposal(draft_tokens=1)
-    ledger.abort(first)
-    second = ledger.begin_proposal(draft_tokens=1)
-
-    with pytest.raises(BatchedMTPTransactionError, match="stale or foreign"):
-        ledger.commit(first, emitted_counts={"a": 1, "b": 1})
-
-    ledger.commit(second, emitted_counts={"a": 1, "b": 2})
-    with pytest.raises(BatchedMTPTransactionError, match="no proposal"):
-        ledger.commit(second, emitted_counts={"a": 1, "b": 2})
-
-
-@pytest.mark.parametrize(
-    "counts",
-    [
-        {"a": 1},
-        {"a": 0, "b": 1},
-        {"a": 3, "b": 1},
-        {"a": True, "b": 1},
-    ],
-)
-def test_commit_rejects_incomplete_or_impossible_counts(counts):
-    ledger = BatchedMTPBookkeeper(("a", "b"))
-    ticket = ledger.begin_proposal(draft_tokens=1)
-    with pytest.raises(BatchedMTPTransactionError):
-        ledger.commit(ticket, emitted_counts=counts)
-    assert ledger.outstanding == ticket
-
-
-def test_detach_advances_epoch_and_preserves_remaining_order():
-    ledger = BatchedMTPBookkeeper(("a", "b", "c"))
-    assert ledger.detach(("b",)) == 2
-    assert ledger.lane_ids == ("a", "c")
+    assert decision.route is BatchedMTPRoute.BATCHED_MTP
+    assert decision.batched_lane_ids == ("a",)
 
 
 def test_inputs_are_validated_without_model_or_array_dependencies():
@@ -275,10 +212,6 @@ def test_inputs_are_validated_without_model_or_array_dependencies():
             capabilities=_capabilities(),
             free_bytes=1000,
         )
-    with pytest.raises(ValueError, match="positive integer"):
-        BatchedMTPBookkeeper(("a",)).begin_proposal(draft_tokens=True)
-    with pytest.raises(ValueError, match="positive integer"):
-        BatchedMTPBookkeeper(("a",)).begin_proposal(draft_tokens="2")
     with pytest.raises(ValueError, match="policy flags"):
         BatchedMTPConfig(enabled=1)
     with pytest.raises(ValueError, match="free_bytes must be an integer"):

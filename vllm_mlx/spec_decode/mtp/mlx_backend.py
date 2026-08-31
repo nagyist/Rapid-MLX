@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Protocol
 
 from .continuous_engine import (
@@ -39,22 +40,6 @@ class ArrayOps(Protocol):
     def logprobs(self, logits: Any) -> Any: ...
 
     def argmax_int(self, logprobs: Any) -> int: ...
-
-
-class ResidualSamplingHooks(Protocol):
-    """Exact transformed-distribution hooks supplied by a later PR."""
-
-    def logprobs(self, logits: Any, temperature: float) -> Any: ...
-
-    def sample(self, logprobs: Any, temperature: float) -> int: ...
-
-    def verify(
-        self,
-        target_logprobs: Any,
-        draft_logprobs: Sequence[Any],
-        draft_tokens: Sequence[int],
-        temperature: float,
-    ) -> tuple[int, int]: ...
 
 
 class _MLXArrayOps:
@@ -86,11 +71,38 @@ class _MLXArrayOps:
 
 @dataclass(frozen=True)
 class _CyclePayload:
+    boundary_key: int
     old_curs: tuple[int, ...]
     old_seed_hidden: tuple[Any, ...]
     drafts: tuple[tuple[int, ...], ...]
     verify_hidden: tuple[Any, ...]
     bonuses: tuple[int, ...]
+
+
+_MISSING = object()
+
+
+@dataclass(frozen=True)
+class _LaneBoundary:
+    cur: int
+    seed_hidden: Any
+    token_prefix: Any
+    ntoks: int
+    pending_hidden: Any
+    pending_tokens: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _CacheBoundary:
+    cache: Any
+    attributes: tuple[tuple[str, Any], ...]
+    children: tuple[_CacheBoundary, ...]
+
+
+@dataclass(frozen=True)
+class _ProposalBoundary:
+    lanes: tuple[_LaneBoundary, ...]
+    caches: tuple[_CacheBoundary, ...]
 
 
 def _as_group(value: Any, name: str) -> list[Any]:
@@ -124,6 +136,97 @@ def _cache_children(cache: Any) -> tuple[Any, ...]:
     if isinstance(children, (list, tuple)):
         return tuple(children)
     return ()
+
+
+_CACHE_BOUNDARY_ATTRIBUTES = (
+    "cache",
+    "keys",
+    "values",
+    "offset",
+    "_idx",
+    "left_padding",
+    "lengths",
+    "_right_padding",
+    "rollback_state",
+    "n_confirmed_for_mtp",
+)
+
+
+def _freeze_cache_attribute(name: str, value: Any) -> Any:
+    if name == "cache" and isinstance(value, list):
+        return tuple(value)
+    return value
+
+
+def _cache_boundary(cache: Any) -> _CacheBoundary:
+    children = _cache_children(cache)
+    attributes = tuple(
+        (
+            name,
+            _freeze_cache_attribute(name, getattr(cache, name, _MISSING)),
+        )
+        for name in _CACHE_BOUNDARY_ATTRIBUTES
+    )
+    return _CacheBoundary(
+        cache=cache,
+        attributes=attributes,
+        children=tuple(_cache_boundary(child) for child in children),
+    )
+
+
+def _plain_vector(value: Any) -> Any:
+    if value is None or value is _MISSING:
+        return value
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return tolist()
+    return value
+
+
+def _restore_cache_boundary(boundary: _CacheBoundary) -> None:
+    cache = boundary.cache
+    saved = dict(boundary.attributes)
+    # A non-uniform ragged rewind shifts cache rows in-place. Restoring only
+    # cursors would then certify a layout that no longer exists. Refuse that
+    # restoration so the engine poisons and discards the cohort.
+    old_padding = saved.get("left_padding", _MISSING)
+    current_padding = getattr(cache, "left_padding", _MISSING)
+    if (
+        old_padding is not _MISSING
+        and current_padding is not _MISSING
+        and _plain_vector(old_padding) != _plain_vector(current_padding)
+    ):
+        raise ContinuousSelfMTPUnsupported(
+            "ragged cache rows moved after the proposal boundary"
+        )
+    for child in boundary.children:
+        _restore_cache_boundary(child)
+    for name, value in boundary.attributes:
+        if value is _MISSING:
+            if name in getattr(cache, "__dict__", {}):
+                delattr(cache, name)
+            continue
+        setattr(cache, name, list(value) if name == "cache" else value)
+
+
+def _lane_boundary(lane: SelfMTPLane) -> _LaneBoundary:
+    return _LaneBoundary(
+        cur=lane.cur,
+        seed_hidden=lane.seed_hidden,
+        token_prefix=lane.token_prefix,
+        ntoks=lane.ntoks,
+        pending_hidden=lane.pending_hidden,
+        pending_tokens=tuple(lane.pending_tokens),
+    )
+
+
+def _restore_lane_boundary(lane: SelfMTPLane, boundary: _LaneBoundary) -> None:
+    lane.cur = boundary.cur
+    lane.seed_hidden = boundary.seed_hidden
+    lane.token_prefix = boundary.token_prefix
+    lane.ntoks = boundary.ntoks
+    lane.pending_hidden = boundary.pending_hidden
+    lane.pending_tokens = list(boundary.pending_tokens)
 
 
 def _set_cache_speculation(group: Sequence[Any], *, on: bool) -> None:
@@ -235,7 +338,6 @@ class RapidMLXSelfMTPBackend:
         target_cache_factory: Callable[[], Any] | None = None,
         draft_cache_factory: Callable[[], Any] | None = None,
         array_ops: ArrayOps | None = None,
-        residual_sampling: ResidualSamplingHooks | None = None,
         logits_processor: Callable[[SelfMTPLane, Any, Any], Any] | None = None,
         prefill_step_size: int = 512,
         draft_depth: int = 2,
@@ -250,10 +352,11 @@ class RapidMLXSelfMTPBackend:
         self.target_cache_factory = target_cache_factory
         self.draft_cache_factory = draft_cache_factory
         self.ops = array_ops or _MLXArrayOps()
-        self.residual_sampling = residual_sampling
         self.logits_processor = logits_processor
         self.prefill_step_size = int(prefill_step_size)
         self.draft_depth = draft_depth
+        self._proposal_boundaries: dict[int, _ProposalBoundary] = {}
+        self._proposal_lock = Lock()
         # Rollback protocol for the verify forward.  Default (False) keeps the
         # model's n_confirmed snapshot path (correct for pure full-attention
         # caches).  True drives the engine's start_speculation/trim_ragged
@@ -291,16 +394,9 @@ class RapidMLXSelfMTPBackend:
         if lane.sampling.temperature == 0:
             logprobs = self.ops.logprobs(logits)
             return self.ops.argmax_int(logprobs), logprobs
-        hooks = self.residual_sampling
-        if hooks is None:
-            raise ContinuousSelfMTPUnsupported(
-                "transformed sampling requires exact residual hooks"
-            )
-        validate_sampling = getattr(hooks, "validate_sampling", None)
-        if callable(validate_sampling):
-            validate_sampling(lane.sampling)
-        logprobs = hooks.logprobs(logits, lane.sampling.temperature)
-        return hooks.sample(logprobs, lane.sampling.temperature), logprobs
+        raise ContinuousSelfMTPUnsupported(
+            "Qwen3.8 dense continuous MTP supports greedy sampling only"
+        )
 
     def _prefix(self, lane: SelfMTPLane, extra: Sequence[int]) -> Any:
         if not extra:
@@ -324,16 +420,10 @@ class RapidMLXSelfMTPBackend:
             raise ContinuousSelfMTPUnsupported("Rapid continuous self-MTP requires K=2")
         if spec.sampling.uses_xtc:
             raise ContinuousSelfMTPUnsupported("XTC has no exact verifier")
-        if spec.sampling.temperature > 0 and self.residual_sampling is None:
+        if spec.sampling.temperature > 0:
             raise ContinuousSelfMTPUnsupported(
-                "transformed sampling requires exact residual hooks"
+                "Qwen3.8 dense continuous MTP supports greedy sampling only"
             )
-        if self.residual_sampling is not None:
-            validate_sampling = getattr(
-                self.residual_sampling, "validate_sampling", None
-            )
-            if callable(validate_sampling):
-                validate_sampling(spec.sampling)
         if spec.sampling.has_logits_processors and self.logits_processor is None:
             raise ContinuousSelfMTPUnsupported(
                 "logits processors require an exact injected hook"
@@ -417,6 +507,14 @@ class RapidMLXSelfMTPBackend:
         target, draft_cache = _validate_pair(caches)
         if not lanes:
             raise ValueError("cannot propose an empty batch")
+        boundary_key = id(caches)
+        with self._proposal_lock:
+            if boundary_key in self._proposal_boundaries:
+                raise RuntimeError("a proposal boundary is already open")
+            self._proposal_boundaries[boundary_key] = _ProposalBoundary(
+                lanes=tuple(_lane_boundary(lane) for lane in lanes),
+                caches=tuple(_cache_boundary(cache) for cache in target + draft_cache),
+            )
         depths = tuple(
             min(
                 self.draft_depth,
@@ -426,12 +524,41 @@ class RapidMLXSelfMTPBackend:
             for lane in lanes
         )
         if max(depths) == 0:
-            raise ContinuousSelfMTPUnsupported(
-                "all lanes are terminal; no K=2 proposal can be formed"
+            verify_ids = self.ops.uint32([[lane.cur] for lane in lanes])
+            target_logits, target_hidden = self._forward_pair(
+                forwards.target(verify_ids, target, n_confirmed=0),
+                "target forward",
+            )
+            outputs = []
+            bonuses = []
+            hidden_rows = []
+            for row, lane in enumerate(lanes):
+                token, logprobs = self._distribution(
+                    lane,
+                    self._prefix(lane, [lane.cur]),
+                    target_logits[row, 0],
+                )
+                bonuses.append(token)
+                outputs.append((MTPToken(token, logprobs, False),))
+                hidden_rows.append(target_hidden[row : row + 1, :1])
+            return CycleComputation(
+                lane_uids=tuple(lane.uid for lane in lanes),
+                draft_depths=depths,
+                accepted_lengths=tuple(0 for _ in lanes),
+                target_drops=tuple(0 for _ in lanes),
+                draft_drops=tuple(0 for _ in lanes),
+                outputs=tuple(outputs),
+                payload=_CyclePayload(
+                    boundary_key=boundary_key,
+                    old_curs=tuple(lane.cur for lane in lanes),
+                    old_seed_hidden=tuple(lane.seed_hidden for lane in lanes),
+                    drafts=tuple(() for _ in lanes),
+                    verify_hidden=tuple(hidden_rows),
+                    bonuses=tuple(bonuses),
+                ),
             )
 
         drafts: list[list[int]] = [[] for _ in lanes]
-        draft_logprobs: list[list[Any]] = [[] for _ in lanes]
         draft_hidden = [lane.seed_hidden for lane in lanes]
 
         first_lengths = [
@@ -483,13 +610,12 @@ class RapidMLXSelfMTPBackend:
             if depth == 0:
                 continue
             position = valid - 1
-            token, logprobs = self._distribution(
+            token, _ = self._distribution(
                 lane,
                 self._prefix(lane, [lane.cur]),
                 first_logits[row, position],
             )
             drafts[row].append(token)
-            draft_logprobs[row].append(logprobs)
             draft_hidden[row] = first_hidden[row : row + 1, position : position + 1]
             lane.pending_hidden = None
             lane.pending_tokens = []
@@ -514,13 +640,12 @@ class RapidMLXSelfMTPBackend:
             for row, (lane, active) in enumerate(zip(lanes, second_lengths)):
                 if not active:
                     continue
-                token, logprobs = self._distribution(
+                token, _ = self._distribution(
                     lane,
                     self._prefix(lane, [lane.cur] + drafts[row]),
                     second_logits[row, -1],
                 )
                 drafts[row].append(token)
-                draft_logprobs[row].append(logprobs)
 
         verify_width = max(depth + 1 for depth in depths)
         verify_rows = [
@@ -555,42 +680,15 @@ class RapidMLXSelfMTPBackend:
                 logits = self._apply_processor(
                     lane, prefix, target_logits[row, position]
                 )
-                if lane.sampling.temperature == 0:
-                    logprobs = self.ops.logprobs(logits)
-                    token = self.ops.argmax_int(logprobs)
-                else:
-                    hooks = self.residual_sampling
-                    if hooks is None:
-                        raise ContinuousSelfMTPUnsupported(
-                            "transformed sampling requires exact residual hooks"
-                        )
-                    logprobs = hooks.logprobs(logits, lane.sampling.temperature)
-                    token = -1
+                logprobs = self.ops.logprobs(logits)
+                token = self.ops.argmax_int(logprobs)
                 target_lps.append(logprobs)
                 target_tokens.append(token)
 
-            if lane.sampling.temperature == 0:
-                n_accept = 0
-                while (
-                    n_accept < depth
-                    and target_tokens[n_accept] == drafts[row][n_accept]
-                ):
-                    n_accept += 1
-                bonus = target_tokens[n_accept]
-            else:
-                hooks = self.residual_sampling
-                assert hooks is not None
-                stacked_target = self.ops.concatenate(
-                    [self.ops.expand_dims(value, 0) for value in target_lps], axis=0
-                )
-                n_accept, bonus = hooks.verify(
-                    stacked_target,
-                    draft_logprobs[row],
-                    drafts[row],
-                    lane.sampling.temperature,
-                )
-                if n_accept < 0 or n_accept > depth:
-                    raise RuntimeError("residual verifier returned invalid acceptance")
+            n_accept = 0
+            while n_accept < depth and target_tokens[n_accept] == drafts[row][n_accept]:
+                n_accept += 1
+            bonus = target_tokens[n_accept]
             accepted.append(n_accept)
             bonuses.append(int(bonus))
             output_rows.append(
@@ -615,6 +713,7 @@ class RapidMLXSelfMTPBackend:
             draft_drops=depths,
             outputs=tuple(output_rows),
             payload=_CyclePayload(
+                boundary_key=boundary_key,
                 old_curs=tuple(lane.cur for lane in lanes),
                 old_seed_hidden=tuple(lane.seed_hidden for lane in lanes),
                 drafts=tuple(tuple(row) for row in drafts),
@@ -679,6 +778,29 @@ class RapidMLXSelfMTPBackend:
                 ],
                 axis=0,
             )
+        with self._proposal_lock:
+            boundary = self._proposal_boundaries.pop(payload.boundary_key, None)
+        if boundary is None:
+            raise RuntimeError("commit has no matching proposal boundary")
+
+    def abort(
+        self,
+        lanes: Sequence[SelfMTPLane],
+        caches: SelfMTPCachePair,
+        computation: CycleComputation | None,
+        cause: BaseException | None,
+    ) -> None:
+        del computation, cause
+        with self._proposal_lock:
+            boundary = self._proposal_boundaries.pop(id(caches), None)
+        if boundary is None:
+            raise RuntimeError("abort has no matching proposal boundary")
+        if len(boundary.lanes) != len(lanes):
+            raise RuntimeError("proposal lane membership changed before abort")
+        for cache_boundary in boundary.caches:
+            _restore_cache_boundary(cache_boundary)
+        for lane, lane_boundary in zip(lanes, boundary.lanes):
+            _restore_lane_boundary(lane, lane_boundary)
 
     def detach_lane(self, lane: SelfMTPLane, caches: SelfMTPCachePair) -> None:
         """Flush owed hidden/token pairs into the detached draft cache."""
@@ -797,10 +919,14 @@ class RapidRaggedCacheAdapter:
     ) -> None:
         target, draft = _validate_pair(caches)
         # Cross-group preflight gives atomic failure before either cache moves.
-        self._preflight(target, target_drops, verify_size=verify_width, validate=True)
+        if any(target_drops):
+            self._preflight(
+                target, target_drops, verify_size=verify_width, validate=True
+            )
         if any(draft_drops):
             self._preflight(draft, draft_drops, verify_size=verify_width, validate=True)
-        self._trim(target, target_drops, verify_size=verify_width, validate=False)
+        if any(target_drops):
+            self._trim(target, target_drops, verify_size=verify_width, validate=False)
         if any(draft_drops):
             self._trim(draft, draft_drops, verify_size=verify_width, validate=False)
 
@@ -839,5 +965,4 @@ __all__ = [
     "ArrayOps",
     "RapidMLXSelfMTPBackend",
     "RapidRaggedCacheAdapter",
-    "ResidualSamplingHooks",
 ]

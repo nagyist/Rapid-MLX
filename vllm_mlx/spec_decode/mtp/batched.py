@@ -7,18 +7,16 @@ coordinator must satisfy before it may run a batched propose/verify pass:
 
 * the feature is explicit-opt-in and every required capability is fail-closed;
 * lane admission respects a hard memory reserve and degrades draft depth;
-* a proposal is bound to an ordered membership epoch; and
-* membership cannot change until that proposal is committed or aborted.
+* fixed-membership lane admission is deterministic and fail-closed.
 
-It does not execute model work, mutate caches, or sample tokens.  Those remain
-the responsibility of the future coordinator, which should use
-:class:`BatchedMTPBookkeeper` as its transaction ledger.
+It does not execute model work, mutate caches, or own transaction state. The
+reviewed continuous engine is the sole transaction authority.
 """
 
 from __future__ import annotations
 
 import enum
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
@@ -94,8 +92,8 @@ class BatchedMTPConfig:
             self.min_batch_lanes, int
         ):
             raise ValueError("min_batch_lanes must be an integer")
-        if self.min_batch_lanes < 2:
-            raise ValueError("min_batch_lanes must be at least 2")
+        if self.min_batch_lanes < 1:
+            raise ValueError("min_batch_lanes must be positive")
         if self.min_batch_lanes > self.max_lanes:
             raise ValueError("min_batch_lanes cannot exceed max_lanes")
         if self.hard_reserve_bytes < 0:
@@ -310,208 +308,13 @@ def plan_admission(
     )
 
 
-class BatchedMTPTransactionError(RuntimeError):
-    """A propose/commit or membership-epoch invariant was violated."""
-
-
-@dataclass(frozen=True)
-class ProposalTicket:
-    """Opaque proof that a proposal belongs to one ordered membership epoch."""
-
-    transaction_id: int
-    membership_epoch: int
-    lane_ids: tuple[str, ...]
-    draft_tokens: int
-    verify_rows: int
-
-
-@dataclass(frozen=True)
-class CommitReceipt:
-    transaction_id: int
-    membership_epoch: int
-    emitted_counts: tuple[tuple[str, int], ...]
-    terminal_lane_ids: tuple[str, ...]
-    total_emitted: int
-
-
-class BatchedMTPBookkeeper:
-    """Pure-Python membership and propose-to-commit transaction ledger."""
-
-    def __init__(self, lane_ids: Iterable[str] = ()) -> None:
-        self._lane_ids: list[str] = []
-        self._membership_epoch = 0
-        self._next_transaction_id = 1
-        self._outstanding: ProposalTicket | None = None
-        self._committed_tokens: dict[str, int] = {}
-        initial = tuple(lane_ids)
-        if initial:
-            self.attach(initial)
-
-    @property
-    def lane_ids(self) -> tuple[str, ...]:
-        return tuple(self._lane_ids)
-
-    @property
-    def membership_epoch(self) -> int:
-        return self._membership_epoch
-
-    @property
-    def outstanding(self) -> ProposalTicket | None:
-        return self._outstanding
-
-    def committed_tokens(self, lane_id: str) -> int:
-        try:
-            return self._committed_tokens[lane_id]
-        except KeyError as exc:
-            raise KeyError(f"unknown lane_id: {lane_id}") from exc
-
-    def _require_membership_boundary(self) -> None:
-        if self._outstanding is not None:
-            raise BatchedMTPTransactionError(
-                "membership cannot change while a proposal is outstanding"
-            )
-
-    @staticmethod
-    def _validate_ids(lane_ids: Iterable[str]) -> tuple[str, ...]:
-        ids = tuple(lane_ids)
-        if any(not isinstance(lane_id, str) or not lane_id for lane_id in ids):
-            raise ValueError("lane_id values must be non-empty strings")
-        if len(ids) != len(set(ids)):
-            raise ValueError("lane_id values must be unique")
-        return ids
-
-    def attach(self, lane_ids: Iterable[str]) -> int:
-        """Attach lanes at a transaction boundary and return the new epoch."""
-
-        self._require_membership_boundary()
-        ids = self._validate_ids(lane_ids)
-        duplicates = set(ids).intersection(self._lane_ids)
-        if duplicates:
-            raise BatchedMTPTransactionError(
-                f"lane already attached: {', '.join(sorted(duplicates))}"
-            )
-        if ids:
-            self._lane_ids.extend(ids)
-            self._committed_tokens.update((lane_id, 0) for lane_id in ids)
-            self._membership_epoch += 1
-        return self._membership_epoch
-
-    def detach(self, lane_ids: Iterable[str]) -> int:
-        """Detach lanes at a transaction boundary and return the new epoch."""
-
-        self._require_membership_boundary()
-        ids = self._validate_ids(lane_ids)
-        unknown = set(ids).difference(self._lane_ids)
-        if unknown:
-            raise BatchedMTPTransactionError(
-                f"lane not attached: {', '.join(sorted(unknown))}"
-            )
-        if ids:
-            removed = set(ids)
-            self._lane_ids = [
-                lane_id for lane_id in self._lane_ids if lane_id not in removed
-            ]
-            for lane_id in ids:
-                del self._committed_tokens[lane_id]
-            self._membership_epoch += 1
-        return self._membership_epoch
-
-    def begin_proposal(self, *, draft_tokens: int) -> ProposalTicket:
-        """Open one proposal for the current ordered membership."""
-
-        if self._outstanding is not None:
-            raise BatchedMTPTransactionError("a proposal is already outstanding")
-        if not self._lane_ids:
-            raise BatchedMTPTransactionError("cannot propose with no attached lanes")
-        if (
-            isinstance(draft_tokens, bool)
-            or not isinstance(draft_tokens, int)
-            or draft_tokens < 1
-        ):
-            raise ValueError("draft_tokens must be a positive integer")
-        ticket = ProposalTicket(
-            transaction_id=self._next_transaction_id,
-            membership_epoch=self._membership_epoch,
-            lane_ids=tuple(self._lane_ids),
-            draft_tokens=draft_tokens,
-            verify_rows=(draft_tokens + 1) * len(self._lane_ids),
-        )
-        self._next_transaction_id += 1
-        self._outstanding = ticket
-        return ticket
-
-    def _require_ticket(self, ticket: ProposalTicket) -> None:
-        if self._outstanding is None:
-            raise BatchedMTPTransactionError("no proposal is outstanding")
-        if ticket != self._outstanding:
-            raise BatchedMTPTransactionError("stale or foreign proposal ticket")
-        if ticket.membership_epoch != self._membership_epoch:
-            raise BatchedMTPTransactionError("proposal membership epoch is stale")
-        if ticket.lane_ids != tuple(self._lane_ids):
-            raise BatchedMTPTransactionError("proposal lane order is stale")
-
-    def commit(
-        self,
-        ticket: ProposalTicket,
-        *,
-        emitted_counts: Mapping[str, int],
-        terminal_lane_ids: Iterable[str] = (),
-    ) -> CommitReceipt:
-        """Commit per-lane accepted counts, without changing membership."""
-
-        self._require_ticket(ticket)
-        if set(emitted_counts) != set(ticket.lane_ids):
-            raise BatchedMTPTransactionError(
-                "emitted_counts must contain every proposal lane exactly once"
-            )
-        ordered: list[tuple[str, int]] = []
-        maximum = ticket.draft_tokens + 1
-        for lane_id in ticket.lane_ids:
-            count = emitted_counts[lane_id]
-            if isinstance(count, bool) or not isinstance(count, int):
-                raise BatchedMTPTransactionError("emitted counts must be integers")
-            if count < 1 or count > maximum:
-                raise BatchedMTPTransactionError(
-                    f"emitted count for {lane_id} must be between 1 and {maximum}"
-                )
-            ordered.append((lane_id, count))
-
-        terminal = self._validate_ids(terminal_lane_ids)
-        unknown_terminal = set(terminal).difference(ticket.lane_ids)
-        if unknown_terminal:
-            raise BatchedMTPTransactionError(
-                "terminal lanes must belong to the committed proposal"
-            )
-
-        for lane_id, count in ordered:
-            self._committed_tokens[lane_id] += count
-        self._outstanding = None
-        return CommitReceipt(
-            transaction_id=ticket.transaction_id,
-            membership_epoch=ticket.membership_epoch,
-            emitted_counts=tuple(ordered),
-            terminal_lane_ids=terminal,
-            total_emitted=sum(count for _, count in ordered),
-        )
-
-    def abort(self, ticket: ProposalTicket) -> None:
-        """Discard bookkeeping for an uncommitted proposal."""
-
-        self._require_ticket(ticket)
-        self._outstanding = None
-
-
 __all__ = [
     "AdmissionDecision",
-    "BatchedMTPBookkeeper",
     "BatchedMTPCapabilities",
     "BatchedMTPConfig",
     "BatchedMTPRoute",
-    "BatchedMTPTransactionError",
-    "CommitReceipt",
     "LaneAdmission",
     "LaneGate",
-    "ProposalTicket",
     "SamplingContract",
     "assess_lane",
     "plan_admission",

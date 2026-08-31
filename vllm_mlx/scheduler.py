@@ -830,10 +830,10 @@ def _install_continuous_mtp_router(
         int(getattr(config, "max_num_seqs", 4)),
         int(getattr(config, "completion_batch_size", 32)),
     )
-    if max_lanes < 2:
+    if max_lanes < 1:
         logger.warning(
-            "[MTP-continuous] completion capacity is below the two-lane "
-            "minimum; retaining vendored MTP/plain decode"
+            "[MTP-continuous] completion capacity has no lanes; retaining "
+            "vendored MTP/plain decode"
         )
         return False
     decision = plan_router_install(
@@ -842,6 +842,10 @@ def _install_continuous_mtp_router(
         cache_quantized=cache_quantized,
         cache_windowed=bool(getattr(config, "use_paged_cache", False)),
         max_lanes=max_lanes,
+        # Preserve the mature singleton verifier for one-user traffic.  The
+        # continuous coordinator pays for ragged bookkeeping even at B=1 and
+        # is admitted only when there is real batching work to amortize it.
+        min_batch_lanes=2,
         allow_dynamic_membership=bool(
             getattr(config, "mtp_allow_dynamic_membership", False)
         ),
@@ -886,19 +890,35 @@ def _install_continuous_mtp_router(
         return False
 
     def _response_factory(**kwargs):
-        # mlx-lm's Response grew MTP fields in the unified source.  Preserve
-        # compatibility with 0.31 patch levels that lack constructor kwargs by
-        # attaching the sidecar fields after constructing the common surface.
+        # Response fields vary across mlx-lm 0.31 patch levels. Build exactly
+        # the installed constructor surface, fill newly required bookkeeping
+        # fields with their neutral value, then attach Rapid-only sidecars.
+        parameters = inspect.signature(response_type).parameters
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        constructor = {}
         extras = {}
-        for name in ("mtp_state", "lane_rng", "rng_draws"):
-            if name in kwargs:
-                extras[name] = kwargs.pop(name)
-        try:
-            response = response_type(**kwargs, **extras)
-        except TypeError:
-            response = response_type(**kwargs)
-            for name, value in extras.items():
-                setattr(response, name, value)
+        for name, value in kwargs.items():
+            if accepts_kwargs or name in parameters:
+                constructor[name] = value
+            else:
+                extras[name] = value
+        for name, parameter in parameters.items():
+            if (
+                name not in constructor
+                and parameter.default is inspect.Parameter.empty
+                and parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            ):
+                constructor[name] = None
+        response = response_type(**constructor)
+        for name, value in extras.items():
+            setattr(response, name, value)
         return response
 
     def _cache_offset(value: Any) -> int:
@@ -919,14 +939,14 @@ def _install_continuous_mtp_router(
             return 0
 
     def _metadata(sequence: Any):
+        if len(sequence) < 8:
+            return None
         uid, segments, maximum, caches, history, _sampler, processors, _matcher = (
-            sequence
+            sequence[:8]
         )
         request_id = None if uid_to_request_id is None else uid_to_request_id.get(uid)
         request = (
-            None
-            if requests is None or request_id is None
-            else requests.get(request_id)
+            None if requests is None or request_id is None else requests.get(request_id)
         )
         if request is None:
             return None
@@ -956,8 +976,7 @@ def _install_continuous_mtp_router(
             stop_tokens=frozenset(stop_tokens),
             sampling=SamplingContract(
                 greedy=greedy,
-                has_logits_processors=bool(processors)
-                or scheduler_owned_termination,
+                has_logits_processors=bool(processors) or scheduler_owned_termination,
                 uses_xtc=False,
             ),
             temperature=float(params.temperature),
@@ -1008,6 +1027,12 @@ def _install_continuous_mtp_router(
             response_factory=_response_factory,
         )
         batch_gen._continuous_mtp_driver = driver
+        logger.info(
+            "[MTP-continuous] admitted continuous cohort "
+            "route=continuous_planned lanes=%d draft_depth=%d",
+            len(specs),
+            int(routed.admission.draft_tokens) if routed.admission else 0,
+        )
 
     def _stage_joins() -> None:
         if driver is None or not driver.dynamic_membership:
@@ -7308,14 +7333,38 @@ class Scheduler:
         """Return the batch width supported by the live speculative runtime.
 
         Before the lazy MTP install gate runs, admit one request so an
-        unsupported batch cannot form. A successful install keeps B=1; a
-        definitive gate miss restores the operator's ordinary-decode width.
+        unsupported batch cannot form.  The legacy verifier stays at B=1.
+        A continuous coordinator may expose its attested lane capacity only
+        after both the routing and runtime capability gates have installed;
+        a definitive gate miss restores the operator's ordinary-decode width.
         """
         if getattr(self.config, "spec_decode", "none") != "mtp":
             return self.config.max_num_seqs
         if not getattr(self, "spec_decode_runtime_attempted", False):
             return 1
         if getattr(self, "spec_decode_runtime_method", None) == "mtp":
+            batch_generator = getattr(self, "batch_generator", None)
+            router = getattr(batch_generator, "_continuous_mtp_router", None)
+            runtime = getattr(batch_generator, "_continuous_mtp_runtime", None)
+            router_config = getattr(router, "config", None)
+            runtime_capabilities = getattr(runtime, "capabilities", None)
+            if (
+                getattr(self.config, "mtp_continuous_batching", False)
+                and getattr(self.config, "mtp_allow_dynamic_membership", False)
+                and getattr(router_config, "allow_dynamic_membership", False)
+                and getattr(runtime_capabilities, "dynamic_membership", False)
+            ):
+                try:
+                    return max(
+                        1,
+                        min(
+                            int(self.config.max_num_seqs),
+                            int(router_config.max_lanes),
+                        ),
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    # Optional speculative acceleration must fail closed.
+                    pass
             return 1
         return self.config.max_num_seqs
 
@@ -7966,6 +8015,17 @@ class Scheduler:
                     getattr(response, "prompt_cache", None) is None
                     and request.batch_uid is not None
                     and self.batch_generator is not None
+                    and (
+                        (
+                            continuous_driver := getattr(
+                                self.batch_generator,
+                                "_continuous_mtp_driver",
+                                None,
+                            )
+                        )
+                        is not None
+                        and continuous_driver.owns_uid(request.batch_uid)
+                    )
                 ):
                     try:
                         extracted = self.batch_generator.remove(
