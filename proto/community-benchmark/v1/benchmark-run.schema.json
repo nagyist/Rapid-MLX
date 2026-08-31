@@ -79,7 +79,7 @@
         "media_kind": {"enum": ["image", "video"]}, "media_count": {"type": "integer", "minimum": 1, "maximum": 64},
         "width": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "height": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "frames": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
         "target_prompt_tokens": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "target_output_tokens": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
-      }}]
+      }}, {"if": {"properties": {"media_kind": {"const": "video"}}, "required": ["media_kind"]}, "then": {"required": ["frames"]}, "else": {"not": {"required": ["frames"]}}}]
     },
     "imageCase": {
       "allOf": [{"$ref": "#/$defs/caseBase"}, {"type": "object", "additionalProperties": false, "required": ["case_id", "warmup_rounds", "measured_rounds", "mode", "width", "height", "steps", "guidance_millionths", "seed", "image_count"], "properties": {

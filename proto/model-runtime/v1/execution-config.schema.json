@@ -70,12 +70,16 @@
     "kvCache": {
       "type": "object", "additionalProperties": false, "required": ["mode", "dtype"],
       "properties": {
-        "mode": {"enum": ["full_precision", "quantized", "offloaded"]},
+        "mode": {"enum": ["full_precision", "quantized"]},
         "dtype": {"enum": ["float32", "float16", "bfloat16", "q8", "q6", "q4", "q3", "q2", "other", "unknown"]},
         "bits_x2": {"type": "integer", "minimum": 2, "maximum": 64},
         "group_size": {"type": "integer", "minimum": 1, "maximum": 4096}
       },
-      "allOf": [{"if": {"properties": {"mode": {"const": "quantized"}}}, "then": {"required": ["bits_x2", "group_size"]}}]
+      "allOf": [{
+        "if": {"properties": {"mode": {"const": "quantized"}}, "required": ["mode"]},
+        "then": {"required": ["bits_x2", "group_size"], "properties": {"dtype": {"enum": ["q8", "q6", "q4", "q3", "q2", "other"]}}},
+        "else": {"properties": {"dtype": {"enum": ["float32", "float16", "bfloat16"]}}, "not": {"anyOf": [{"required": ["bits_x2"]}, {"required": ["group_size"]}]}}
+      }]
     },
     "languageFeatures": {
       "type": "object", "additionalProperties": false,
@@ -129,7 +133,11 @@
       "properties": {
         "kind": {"const": "video_generation"},
         "diffusion": {"$ref": "#/$defs/diffusionFeatures"},
-        "temporal_chunking": {"type": "object", "additionalProperties": false, "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}, "frames_per_chunk": {"type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991}}}
+        "temporal_chunking": {
+          "type": "object", "additionalProperties": false, "required": ["enabled"],
+          "properties": {"enabled": {"type": "boolean"}, "frames_per_chunk": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}},
+          "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"required": ["frames_per_chunk"]}, "else": {"not": {"required": ["frames_per_chunk"]}}}]
+        }
       }
     }
   }
