@@ -86,6 +86,7 @@ def test_load_model_enables_native_tool_format_when_parser_supports_it(monkeypat
     # fetch — skip the config prefetch so the empty hermetic cache never turns
     # this into a real download.
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
 
     server.load_model("mlx-community/Qwen3.5-9B-4bit")
 
@@ -117,6 +118,8 @@ def test_load_model_tracks_explicit_served_model_name(monkeypatch, served, expec
     monkeypatch.setattr(server, "_served_model_name_set", not expected, raising=False)
     # #2518: no config prefetch — the repo id is a label for the stub engine.
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
 
     server.load_model("mlx-community/Qwen3.5-9B-4bit", served_model_name=served)
 
@@ -135,6 +138,7 @@ def _stub_routing_globals(monkeypatch, server):
     monkeypatch.setattr(server, "_mcp_manager", None, raising=False)
     monkeypatch.setattr(server, "_enable_tool_logits_bias", False, raising=False)
     monkeypatch.setattr(server, "_model_alias", None, raising=False)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
 
 
 def test_load_model_materializes_config_before_hybrid_routing_probe(
@@ -201,6 +205,7 @@ def test_load_model_genuine_vlm_stays_on_mllm_lane(monkeypatch):
 
     _stub_routing_globals(monkeypatch, server)
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
     monkeypatch.setattr(api_utils, "is_mllm_model", lambda name: True)
     monkeypatch.setattr(api_utils, "mllm_backbone_cache_mode", lambda name: None)
     # This routing unit test runs in the Linux/no-MLX CI lane. Runtime health
@@ -282,6 +287,69 @@ def test_load_model_explicit_text_lane_does_not_require_vision_runtime(monkeypat
 
     assert server._engine is not None
     assert server._engine.kwargs["force_text"] is True
+
+
+def test_metadata_preflight_rejects_before_subfolder_weight_download(monkeypatch):
+    """A subfolder VLM must fail before its complete checkpoint is fetched."""
+    from vllm_mlx import server
+    from vllm_mlx.api import utils as api_utils
+    from vllm_mlx.models import mllm
+
+    monkeypatch.setattr(
+        server,
+        "_prefetch_routing_metadata",
+        lambda _name: "/cache/metadata-only/vision-model",
+    )
+    monkeypatch.setattr(api_utils, "is_mllm_model", lambda _name: True)
+    monkeypatch.setattr(api_utils, "mllm_backbone_cache_mode", lambda _name: None)
+    monkeypatch.setattr(
+        "vllm_mlx.utils.tokenizer._resolve_subfolder_checkpoint",
+        lambda _name: (_ for _ in ()).throw(
+            AssertionError("weight-bearing subfolder resolution ran too early")
+        ),
+    )
+    monkeypatch.setattr(
+        mllm,
+        "_require_mlx_vlm",
+        lambda model_name=None: (_ for _ in ()).throw(
+            ImportError(f"invalid vision runtime for {model_name}")
+        ),
+    )
+
+    with pytest.raises(ImportError, match="metadata-only"):
+        server._resolve_serving_checkpoint("publisher/vision-alias")
+
+
+def test_routing_metadata_prefetch_excludes_weight_shards(monkeypatch):
+    from vllm_mlx import server
+
+    calls = []
+    monkeypatch.setattr(
+        "vllm_mlx.model_aliases.resolve_model",
+        lambda _name: "publisher/multi-variant",
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.model_aliases.resolve_subfolder", lambda _name: "4bit"
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda repo, **kwargs: calls.append((repo, kwargs)) or "/cache/snapshot",
+    )
+
+    path = server._prefetch_routing_metadata("vision-4bit")
+
+    assert path == "/cache/snapshot/4bit"
+    assert calls == [
+        (
+            "publisher/multi-variant",
+            {
+                "allow_patterns": [
+                    "4bit/config.json",
+                    "4bit/model.safetensors.index.json",
+                ]
+            },
+        )
+    ]
 
 
 def test_load_model_threads_saved_cli_alias_into_checkpoint_resolution(monkeypatch):
@@ -382,6 +450,7 @@ def test_materialized_checkpoint_keeps_catalog_vision_memory_floor(monkeypatch):
         lambda _name: ModelProfile(vision_min_memory_gb=32.0),
     )
     monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
     monkeypatch.setattr(
         model_metadata,
         "read_model_metadata",
@@ -629,6 +698,7 @@ def test_load_model_infers_programmatic_max_tokens_explicit(monkeypatch):
     monkeypatch.setattr(server, "_model_alias", None, raising=False)
     # #2518: no config prefetch — the repo id is a label for the stub engine.
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
 
     server.load_model("mlx-community/Qwen3.5-9B-4bit")
     cfg = get_config()
@@ -676,6 +746,7 @@ def test_load_model_mtp_kwarg_translates_to_scheduler_config(
     # (``scheduler_config_stub`` shims ``mlx`` on the no-MLX lane, so the
     # ``importorskip`` above does NOT skip this test there.)
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
 
     with pytest.warns(DeprecationWarning, match="load_model\\(mtp=True\\)"):
         server.load_model("mlx-community/Qwen3.5-9B-4bit", mtp=True)
@@ -779,6 +850,7 @@ def test_load_model_response_cache_reconfigure_failure_forces_disabled(monkeypat
 
     # #2518: no config prefetch — the repo id is a label for the stub engine.
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
+    monkeypatch.setattr(server, "_prefetch_routing_metadata", lambda name: name)
 
     # load_model must NOT raise (best-effort), but must force the cache safe.
     server.load_model("mlx-community/Qwen3.5-9B-4bit")

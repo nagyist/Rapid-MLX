@@ -40,6 +40,7 @@ import gc
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import uvicorn
@@ -1731,6 +1732,31 @@ class _ServingCheckpoint:
     is_mllm: bool = False
 
 
+def _prefetch_routing_metadata(model_name: str) -> str:
+    """Return a config/index-only checkpoint path for pre-weight routing."""
+    if os.path.exists(model_name):
+        return model_name
+
+    from huggingface_hub import snapshot_download
+
+    from ._download_gate import _escape_variant_glob_literal, pulled_variant
+    from .model_aliases import resolve_model, resolve_subfolder
+
+    repo_id = resolve_model(model_name)
+    catalog_subfolder = resolve_subfolder(model_name)
+    explicit_subfolder = catalog_subfolder if model_name != repo_id else None
+    subfolder = explicit_subfolder or pulled_variant(repo_id) or catalog_subfolder
+    prefix = f"{_escape_variant_glob_literal(subfolder)}/" if subfolder else ""
+    snapshot = snapshot_download(
+        repo_id,
+        allow_patterns=[
+            f"{prefix}config.json",
+            f"{prefix}model.safetensors.index.json",
+        ],
+    )
+    return str(Path(snapshot) / subfolder) if subfolder else str(snapshot)
+
+
 def _resolve_serving_checkpoint(
     model_name: str,
     *,
@@ -1749,6 +1775,30 @@ def _resolve_serving_checkpoint(
     from .utils.tokenizer import _resolve_subfolder_checkpoint
 
     model_path = resolve_model(model_name)
+    profile = resolve_profile(model_name) or resolve_profile(model_path)
+    # Desktop/direct callers have no CLI boot guard. Fetch only lightweight
+    # routing evidence, decide the provisional lane, and reject an unusable
+    # vision runtime before the subfolder resolver or normal prefetch can pull
+    # model tensors. The final decision below is repeated after the complete
+    # checkpoint materializes so single-file weight evidence remains exact.
+    if not force_text:
+        if force_mllm:
+            preflight_is_mllm = True
+            preflight_path = model_path
+        else:
+            preflight_path = _prefetch_routing_metadata(model_name)
+            preflight_decision = resolve_serving_lane_decision(
+                preflight_path,
+                vision_min_memory_gb=(
+                    profile.vision_min_memory_gb if profile is not None else None
+                ),
+                requested_spec_decode=requested_spec_decode,
+            )
+            preflight_is_mllm = getattr(preflight_decision, "is_mllm", False)
+        if preflight_is_mllm:
+            from .models.mllm import _require_mlx_vlm
+
+            _require_mlx_vlm(preflight_path)
     # Resolve a multi-variant repository before reading metadata or choosing a
     # serving lane. This is the one checkpoint-identity choke point shared by
     # startup and residency: an explicit alias keeps its declared subfolder,
@@ -1769,7 +1819,6 @@ def _resolve_serving_checkpoint(
         if metadata is not None and metadata.snapshot_dir is not None
         else checkpoint_path
     )
-    profile = resolve_profile(model_name) or resolve_profile(model_path)
     decision = resolve_serving_lane_decision(
         load_path,
         force_mllm=force_mllm,
@@ -1856,6 +1905,21 @@ def load_model(
             model reaches ``AsyncEngineCore``. Default False keeps every
             existing caller's behavior unchanged.
     """
+    if force_mllm and force_text:
+        raise ValueError(
+            "force_mllm and force_text are mutually exclusive — "
+            "pick at most one to override auto-detection."
+        )
+    if force_hybrid and no_hybrid:
+        raise ValueError(
+            "force_hybrid and no_hybrid are mutually exclusive — "
+            "pick at most one to override auto-detection."
+        )
+    if force_spec_decode and no_spec_decode:
+        raise ValueError(
+            "force_spec_decode and no_spec_decode are mutually exclusive — "
+            "pick at most one to override auto-detection."
+        )
     max_tokens_was_supplied = max_tokens is not None
     if max_tokens is None:
         max_tokens = 32768
@@ -2174,21 +2238,6 @@ def load_model(
     except Exception as _e:  # pragma: no cover — defensive belt-and-suspenders
         logger.debug(f"mxfp4/moe guardrail probe failed (non-fatal): {_e}")
 
-    if force_mllm and force_text:
-        raise ValueError(
-            "force_mllm and force_text are mutually exclusive — "
-            "pick at most one to override auto-detection."
-        )
-    if force_hybrid and no_hybrid:
-        raise ValueError(
-            "force_hybrid and no_hybrid are mutually exclusive — "
-            "pick at most one to override auto-detection."
-        )
-    if force_spec_decode and no_spec_decode:
-        raise ValueError(
-            "force_spec_decode and no_spec_decode are mutually exclusive — "
-            "pick at most one to override auto-detection."
-        )
     if force_openai_harmony_streaming and no_openai_harmony_streaming:
         raise ValueError(
             "force_openai_harmony_streaming and no_openai_harmony_streaming "
