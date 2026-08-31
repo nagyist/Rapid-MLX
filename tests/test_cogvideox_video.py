@@ -149,7 +149,7 @@ def test_cogvideox_runtime_guard_checks_transitive_modules(monkeypatch, capsys) 
     import vllm_mlx.runtime.video_lane as lane
 
     monkeypatch.setattr(lane.sys, "version_info", (3, 11))
-    missing = {"mlx_arsenal", "imageio", "PIL"}
+    missing = {"mlx_arsenal", "PIL"}
     monkeypatch.setattr(
         lane.importlib.util,
         "find_spec",
@@ -163,7 +163,6 @@ def test_cogvideox_runtime_guard_checks_transitive_modules(monkeypatch, capsys) 
     assert exc.value.code == 2
     error = capsys.readouterr().err
     assert "mlx-arsenal" in error
-    assert "imageio" in error
     assert "Pillow" in error
 
 

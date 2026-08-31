@@ -181,6 +181,7 @@ final class MemoryLoadConfirmationQueue {
             id: old.id,
             alias: old.alias,
             hfPath: old.hfPath,
+            videoOutputDirectory: old.videoOutputDirectory,
             isAutoRespawn: old.isAutoRespawn,
             severity: ModelSizing.memorySafety(
                 footprintGB: old.footprintGB,
@@ -409,6 +410,36 @@ final class ServerManager {
             alias: alias,
             hfPath: hfPath,
             residencyEligible: false
+        )
+    }
+
+    /// Prepare the process contract used by the future Video surface. Video
+    /// aliases cannot join the resident chat/image engine, and completed
+    /// artifacts must survive process exits in an app-owned directory.
+    @discardableResult
+    func ensureVideoServing(
+        alias: String,
+        hfPath: String?,
+        minimumMemoryGB: Double?
+    ) async -> Bool {
+        let outputDirectory = ApplicationSupportLocator.videoArtifactsDirectory()
+        do {
+            try FileManager.default.createDirectory(
+                at: outputDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            appendLogLines([
+                "Rapid couldn't prepare its video library. Check that Application Support is writable, then try again."
+            ])
+            return false
+        }
+        return await ensureServing(
+            alias: alias,
+            hfPath: hfPath,
+            estimatedMemoryGB: minimumMemoryGB,
+            residencyEligible: false,
+            videoOutputDirectory: outputDirectory.path
         )
     }
 
@@ -917,6 +948,10 @@ final class ServerManager {
     /// descendants that keep the port / GPU memory alive. We spawn the
     /// child into its own process group and always signal `-pgid`.
     private var child: ProcessGroupChild?
+
+    /// Output contract of the live process, retained across watchdog
+    /// respawns. `nil` for chat/image/audio launches.
+    private var launchedVideoOutputDirectory: String?
 
     /// True while we are deliberately stopping the child. The
     /// `terminationHandler` checks this to decide whether to surface the
@@ -1550,7 +1585,8 @@ final class ServerManager {
         replacementGroup: ResidentModelReplacementGroup? = nil,
         imageMode: ResidentImageMode? = nil,
         residencyEligible: Bool = true,
-        catalogEntryHint: CatalogEntryHint? = nil
+        catalogEntryHint: CatalogEntryHint? = nil,
+        videoOutputDirectory: String? = nil
     ) async -> Bool {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -1613,11 +1649,13 @@ final class ServerManager {
         // sidecars: their 404 fallback stops and restarts the model on every
         // chat send before the request can leave the app.
         if case .ready(let current) = state, current == trimmed,
-           !speculativeSettingChanged, !requiresImageLaneRestart {
+           !speculativeSettingChanged, !requiresImageLaneRestart,
+           launchedVideoOutputDirectory == videoOutputDirectory {
             return true
         }
         if replacementGroup == nil, isModelResident(trimmed),
-           !speculativeSettingChanged, !requiresImageLaneRestart {
+           !speculativeSettingChanged, !requiresImageLaneRestart,
+           launchedVideoOutputDirectory == videoOutputDirectory {
             return true
         }
 
@@ -1696,6 +1734,7 @@ final class ServerManager {
                     warning: ModelSizing.MemoryWarning(
                         alias: trimmed,
                         hfPath: hfPath,
+                        videoOutputDirectory: videoOutputDirectory,
                         isAutoRespawn: false,
                         severity: safety,
                         footprintGB: footprint,
@@ -1873,7 +1912,9 @@ final class ServerManager {
             hfPath: hfPath,
             memoryRequestID: memoryRequestID,
             memoryAdmission: replacementMemoryAdmission,
-            catalogEntryHint: provenCatalogHint
+            catalogEntryHint: provenCatalogHint,
+            videoOutputDirectory: videoOutputDirectory,
+            estimatedMemoryGB: estimatedMemoryGB
         )
         // ``start`` also returns without spawning when the pre-load
         // memory guard parks the load on a confirmation prompt. Reading
@@ -2268,7 +2309,9 @@ final class ServerManager {
             alias: currentWarning.alias,
             hfPath: currentWarning.hfPath,
             isAutoRespawn: currentWarning.isAutoRespawn,
-            bypassMemoryGuard: true
+            bypassMemoryGuard: true,
+            videoOutputDirectory: currentWarning.videoOutputDirectory,
+            estimatedMemoryGB: currentWarning.footprintGB
         )
         memoryConfirmRunning.remove(seq)
         memoryConfirmations.completeConfirmedLaunch(warningID: currentWarning.id)
@@ -2302,7 +2345,9 @@ final class ServerManager {
         memoryRequestID: UUID? = nil,
         isLaunchAutoStart: Bool = false,
         memoryAdmission: MemoryAdmissionContext? = nil,
-        catalogEntryHint: CatalogEntryHint? = nil
+        catalogEntryHint: CatalogEntryHint? = nil,
+        videoOutputDirectory: String? = nil,
+        estimatedMemoryGB: Double? = nil
     ) async {
         // Issue #278: a manual restart is the user taking over the
         // lifecycle — reset the budget at entry so a previously
@@ -2372,9 +2417,10 @@ final class ServerManager {
                planned: memoryAdmission,
                live: memorySnapshotProvider()
            ) {
-            let footprint = ModelSizing.estimate(alias: trimmedAlias)
+            let footprintGB = estimatedMemoryGB
+                ?? ModelSizing.estimate(alias: trimmedAlias).totalGB
             let safety = ModelSizing.memorySafety(
-                footprint: footprint,
+                footprintGB: footprintGB,
                 usedBytes: snapshot.usedBytes,
                 totalBytes: snapshot.totalBytes
             )
@@ -2402,9 +2448,10 @@ final class ServerManager {
                 let warning = ModelSizing.MemoryWarning(
                     alias: trimmedAlias,
                     hfPath: hfPath,
+                    videoOutputDirectory: videoOutputDirectory,
                     isAutoRespawn: isAutoRespawn,
                     severity: safety,
-                    footprintGB: footprint.totalGB,
+                    footprintGB: footprintGB,
                     freeGB: Double(snapshot.freeBytes) / Double(1 << 30),
                     totalGB: Double(snapshot.totalBytes) / Double(1 << 30),
                     plannedReleaseGB: Double(memoryAdmission?.plannedReleaseBytes ?? 0)
@@ -2722,7 +2769,8 @@ final class ServerManager {
             // can add their first connector long after the app launched, and
             // a path captured in ``init`` would still be nil on the next
             // start. Nil whenever connectors are off or empty.
-            mcpConfigPath: mcpConfigPathProvider?()
+            mcpConfigPath: mcpConfigPathProvider?(),
+            videoOutputDirectory: videoOutputDirectory
         )
 
         // Issue #503: resolve the user's "Models folder" preference for
@@ -2872,6 +2920,7 @@ final class ServerManager {
         }
 
         self.child = process
+        self.launchedVideoOutputDirectory = videoOutputDirectory
         self.launchedPerformanceAlias = trimmedAlias
         self.launchedPerformanceFlags = performanceFlags
         // Codex r1 P3 (#17): only publish the bearer after the spawn
@@ -3330,9 +3379,11 @@ final class ServerManager {
         }
         let wasExpected = expectedStop
         let preservedLastServedAlias = preservingLastServedAliasDuringStop
+        let exitedVideoOutputDirectory = launchedVideoOutputDirectory
         expectedStop = false
         preservingLastServedAliasDuringStop = false
         child = nil
+        launchedVideoOutputDirectory = nil
         launchedImageInputLane = nil
         // #17: the child owns the secret; the secret is meaningless
         // (and a leak vector) once the child is gone.
@@ -3420,7 +3471,10 @@ final class ServerManager {
             attempts: autoRespawnAttempts,
             retryLimit: Self.autoRespawnRetryLimit
         ) {
-            scheduleAutoRespawn(alias: alias)
+            scheduleAutoRespawn(
+                alias: alias,
+                videoOutputDirectory: exitedVideoOutputDirectory
+            )
         }
     }
 
@@ -3541,14 +3595,17 @@ final class ServerManager {
     ///
     /// Tests bypass the ``Task.sleep`` delay by calling
     /// ``runScheduledAutoRespawn(alias:)`` directly via the internal seam.
-    private func scheduleAutoRespawn(alias: String) {
+    private func scheduleAutoRespawn(alias: String, videoOutputDirectory: String? = nil) {
         autoRespawnTask?.cancel()
         let nanos = UInt64(Self.autoRespawnDelay * 1_000_000_000)
         autoRespawnTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: nanos)
             guard let self else { return }
             if Task.isCancelled { return }
-            await self.runScheduledAutoRespawn(alias: alias)
+            await self.runScheduledAutoRespawn(
+                alias: alias,
+                videoOutputDirectory: videoOutputDirectory
+            )
         }
     }
 
@@ -3557,7 +3614,10 @@ final class ServerManager {
     /// Re-checks every precondition that could have flipped while the
     /// timer was sleeping (user clicked Stop, user clicked Restart,
     /// user picked a different alias, the binary disappeared).
-    internal func runScheduledAutoRespawn(alias: String) async {
+    internal func runScheduledAutoRespawn(
+        alias: String,
+        videoOutputDirectory: String? = nil
+    ) async {
         // User took manual action between the crash and the timer
         // firing — bail without burning a retry slot. ``.crashed``
         // for our alias is the ONLY state where auto-respawn is
@@ -3579,7 +3639,11 @@ final class ServerManager {
         // Issue #278: pass ``isAutoRespawn: true`` so ``start()``'s
         // entry-reset (added for manual-restart parity) doesn't
         // wipe the attempt counter we just incremented.
-        await start(alias: alias, isAutoRespawn: true)
+        await start(
+            alias: alias,
+            isAutoRespawn: true,
+            videoOutputDirectory: videoOutputDirectory
+        )
     }
 
     /// Cancel any pending auto-respawn and clear the attempt counter.
@@ -4116,7 +4180,8 @@ final class ServerManager {
         host: String,
         port: Int,
         extraFlags: [String] = [],
-        mcpConfigPath: String? = nil
+        mcpConfigPath: String? = nil,
+        videoOutputDirectory: String? = nil
     ) -> [String] {
         // Defense in depth: ``start(alias:)`` already calls
         // ``isValidAlias`` before reaching here, but a future caller
@@ -4156,6 +4221,9 @@ final class ServerManager {
         // when the alias is the recommended pick for THIS Mac's RAM — so a
         // hand-picked model on a larger Mac keeps its full capabilities.
         args.append(contentsOf: extraFlags)
+        if let videoOutputDirectory, !videoOutputDirectory.isEmpty {
+            args.append(contentsOf: ["--video-output-dir", videoOutputDirectory])
+        }
         // Issue #1716: point the child at the connector config the app owns
         // (``MCPConfigStore``). Only non-nil when the user has turned
         // connectors on AND has at least one enabled server — MCP spawns
