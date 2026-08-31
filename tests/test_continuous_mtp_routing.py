@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import ast
+from collections import deque
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -323,6 +324,108 @@ def test_scheduler_wiring_diverts_next_and_refusal_precedes_mutation():
     router_call = create_source.index("_install_continuous_mtp_router(")
     vendored_call = create_source.index("_install_mtp_vendored(", router_call)
     assert router_call < vendored_call
+
+
+def test_live_installer_forms_fixed_initial_cohort_without_dynamic_join(monkeypatch):
+    from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
+    from vllm_mlx.spec_decode.mtp import continuous_runtime
+    from vllm_mlx.spec_decode.mtp.continuous_driver import ContinuousMTPDriver
+    from vllm_mlx.spec_decode.mtp.continuous_engine import (
+        ContinuousSelfMTPCapabilities,
+    )
+
+    class _BatchGenerator:
+        class _GenerationBatch:
+            Response = SimpleNamespace
+
+        def __init__(self):
+            self._generation_batch = self._GenerationBatch()
+            self._unprocessed_sequences = deque()
+
+        def next(self):
+            return [], []
+
+        def close(self):
+            return None
+
+        def remove(self, _uids, *_args, **_kwargs):
+            return {}
+
+    batch_gen = _BatchGenerator()
+    requests = {}
+    uid_to_request_id = {}
+    for uid in (1, 2):
+        request_id = f"req-{uid}"
+        requests[request_id] = SimpleNamespace(
+            sampling_params=SimpleNamespace(
+                temperature=0.0,
+                stop=None,
+            ),
+            has_tools=False,
+        )
+        uid_to_request_id[uid] = request_id
+        batch_gen._unprocessed_sequences.append(
+            (
+                uid,
+                [[10 + uid, 20 + uid]],
+                16,
+                [SimpleNamespace(offset=0, nbytes=0)],
+                [],
+                object(),
+                [],
+                None,
+                None,
+            )
+        )
+
+    capabilities = ContinuousSelfMTPCapabilities(
+        target_return_hidden=True,
+        mtp_return_hidden=True,
+        confirmed_target_forward=True,
+        ragged_rollback=True,
+        atomic_cache_commit=True,
+        dynamic_membership=False,
+    )
+    runtime = SimpleNamespace(capabilities=capabilities)
+    monkeypatch.setattr(
+        continuous_runtime,
+        "assemble_continuous_self_mtp_runtime",
+        lambda *_args, **_kwargs: runtime,
+    )
+
+    created = {}
+    driver = SimpleNamespace(dynamic_membership=False, has_work=True)
+
+    def _create(_cls, specs, installed_runtime, **_kwargs):
+        created["uids"] = tuple(spec.uid for spec in specs)
+        created["runtime"] = installed_runtime
+        return driver
+
+    monkeypatch.setattr(ContinuousMTPDriver, "create", classmethod(_create))
+
+    config = SchedulerConfig(
+        spec_decode="mtp",
+        mtp_continuous_batching=True,
+        mtp_allow_dynamic_membership=False,
+        max_num_seqs=4,
+        completion_batch_size=4,
+    )
+    assert _install_continuous_mtp_router(
+        batch_gen,
+        _Model(),
+        config,
+        requests=requests,
+        uid_to_request_id=uid_to_request_id,
+        free_bytes_getter=lambda: 16 * 1024**3,
+    )
+
+    prompt_responses, completion_responses = batch_gen.next()
+
+    assert prompt_responses == []
+    assert completion_responses == []
+    assert created == {"uids": (1, 2), "runtime": runtime}
+    assert batch_gen._continuous_mtp_driver is driver
+    assert list(batch_gen._unprocessed_sequences) == []
 
 
 def test_cli_and_scheduler_config_carry_the_default_off_opt_in_by_ast():
