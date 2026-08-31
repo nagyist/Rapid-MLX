@@ -24,8 +24,8 @@
   },
   "workload": {
     "protocol_id": "rapid-image-speed", "protocol_version": 1, "protocol_strength": "registered",
-    "protocol_digest": "sha256:afb7f2890d7815b25382126ea18c81e54a4992f8ed725b3e11b08347f2791f6c", "task_type": "image_generation",
-    "dataset": {"id": "rapid-public-prompts", "version": 1, "digest": "sha256:526bd7c56bd256cadeb57a6f5560dd160b30038a7eedea1be052296da2ba697b"},
+    "protocol_digest": "sha256:176afc2f841db939d04c25b91fbd5030f349ed77f1a5adc564cc4c68666fa438", "task_type": "image_generation",
+    "dataset": {"id": "rapid-public-prompts", "version": 1, "digest": "sha256:1364a3627ef40d98e2920fe188f0941fe6f4a78ea306e4c81964e3b6b705c44c"},
     "concurrency": 1,
     "cases": [{"case_id": "t2i-1024-square", "warmup_rounds": 1, "measured_rounds": 1, "mode": "text_to_image", "width": 1024, "height": 1024, "steps": 20, "guidance_millionths": 3500000, "seed": 12648430, "image_count": 1}]
   },
