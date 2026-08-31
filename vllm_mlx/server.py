@@ -1833,6 +1833,7 @@ def _preflight_vision_runtime(
         preflight_path = _prefetch_routing_metadata(model_name)
         from .model_metadata import (
             checkpoint_has_multimodal_weights,
+            config_indicates_multimodal,
             read_model_metadata,
         )
 
@@ -1846,7 +1847,16 @@ def _preflight_vision_runtime(
             )
             is True
         )
-    if not has_vision_weights:
+        # An unsharded cold checkpoint has no index/header available without
+        # downloading its sole weight file.  A VLM config plus an independently
+        # VLM-identifying repo/alias name is sufficient conservative evidence;
+        # a blandly named text-only fork remains inconclusive and is deferred.
+        has_named_vision_identity = bool(
+            metadata is not None
+            and config_indicates_multimodal(getattr(metadata, "config", None) or {})
+            and is_mllm_model(model_name)
+        )
+    if not has_vision_weights and not (not force_mllm and has_named_vision_identity):
         return
     decision = resolve_serving_lane_decision(
         preflight_path,
