@@ -122,10 +122,12 @@ def test_unexpected_first_parent_commit_fails_closed(tmp_path):
         )
 
 
-def test_exact_source_sha_accepts_the_live_pull_request_check_shape(monkeypatch):
-    fixture = (
-        ROOT / "tests/fixtures/github-check-runs-2792-exact-head.json"
-    ).read_bytes()
+def _mock_source_pr(monkeypatch, *, changes: dict | None = None):
+    source = json.loads(
+        (ROOT / "tests/fixtures/github-pull-2792-attestation.json").read_text()
+    )
+    source.update(changes or {})
+    payload = json.dumps(source).encode()
 
     class Response(io.BytesIO):
         def __enter__(self):
@@ -134,37 +136,60 @@ def test_exact_source_sha_accepts_the_live_pull_request_check_shape(monkeypatch)
         def __exit__(self, *_args):
             self.close()
 
+    def urlopen(request, timeout):
+        assert request.full_url.endswith("/pulls/2792")
+        return Response(payload)
+
     monkeypatch.setattr(
         attestation.urllib.request,
         "urlopen",
-        lambda _request, timeout: Response(fixture),
+        urlopen,
     )
-    assert attestation.exact_head_guard_succeeded(
+
+
+def test_exact_source_sha_accepts_the_live_pull_request_attestation(monkeypatch):
+    _mock_source_pr(monkeypatch)
+    assert attestation.source_pr_attested(
         "raullenchai/Rapid-MLX",
+        2792,
         "fd384c93e2a8182a0547e24f098e3063bd4c9b2e",
         "fixture-token",
     )
 
 
 def test_check_for_a_different_sha_cannot_authorize_source(monkeypatch):
-    fixture = (
-        ROOT / "tests/fixtures/github-check-runs-2792-exact-head.json"
-    ).read_bytes()
-
-    class Response(io.BytesIO):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            self.close()
-
-    monkeypatch.setattr(
-        attestation.urllib.request,
-        "urlopen",
-        lambda _request, timeout: Response(fixture),
-    )
-    assert not attestation.exact_head_guard_succeeded(
+    _mock_source_pr(monkeypatch)
+    assert not attestation.source_pr_attested(
         "raullenchai/Rapid-MLX",
+        2792,
         "0000000000000000000000000000000000000000",
+        "fixture-token",
+    )
+
+
+def test_source_from_a_fork_cannot_authorize_candidate(monkeypatch):
+    _mock_source_pr(
+        monkeypatch,
+        changes={
+            "head": {
+                "sha": "fd384c93e2a8182a0547e24f098e3063bd4c9b2e",
+                "repo": {"full_name": "someone/fork"},
+            }
+        },
+    )
+    assert not attestation.source_pr_attested(
+        "raullenchai/Rapid-MLX",
+        2792,
+        "fd384c93e2a8182a0547e24f098e3063bd4c9b2e",
+        "fixture-token",
+    )
+
+
+def test_missing_attestation_cannot_authorize_source(monkeypatch):
+    _mock_source_pr(monkeypatch, changes={"body": "No proof.", "labels": []})
+    assert not attestation.source_pr_attested(
+        "raullenchai/Rapid-MLX",
+        2792,
+        "fd384c93e2a8182a0547e24f098e3063bd4c9b2e",
         "fixture-token",
     )

@@ -340,8 +340,8 @@ class TestMergifyAttestationWorkflow:
         )
         assert resolver["run"] == "python scripts/check_mergify_mlx_attestation.py"
         assert job["permissions"] == {
-            "checks": "read",
             "contents": "read",
+            "pull-requests": "read",
         }
 
     def test_guard_uses_the_immutable_event_base_and_resolver_output(self):

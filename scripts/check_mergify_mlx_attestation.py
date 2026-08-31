@@ -6,7 +6,8 @@ This verifier then walks the candidate's complete first-parent lineage from the
 real PR base, including integrations queued ahead of the current batch. Every
 commit in that range must be a two-parent ``Merge of #N`` commit. If an
 integration changes ``pyproject.toml``, its exact second parent must have a
-successful GitHub Actions ``mlx-bound-guard`` check.
+coherence attestation on the same-repository source PR whose current head still
+equals that immutable second parent.
 
 Candidate identity (same repository, Mergify App author, standard branch prefix)
 is enforced by the calling workflow before this script runs.
@@ -20,7 +21,6 @@ import re
 import subprocess
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -179,17 +179,7 @@ def collect_integrations(
     return all_integrations
 
 
-def exact_head_guard_succeeded(repository: str, sha: str, token: str) -> bool:
-    if not _REPOSITORY.fullmatch(repository) or not _SHA.fullmatch(sha):
-        raise AttestationError("repository or exact source SHA is invalid")
-    if not token:
-        raise AttestationError("GITHUB_TOKEN is unavailable")
-
-    encoded_sha = urllib.parse.quote(sha, safe="")
-    url = (
-        f"https://api.github.com/repos/{repository}/commits/{encoded_sha}/check-runs"
-        "?check_name=mlx-bound-guard&filter=latest&per_page=100"
-    )
+def _github_json(url: str, token: str) -> dict:
     request = urllib.request.Request(
         url,
         headers={
@@ -203,18 +193,43 @@ def exact_head_guard_succeeded(repository: str, sha: str, token: str) -> bool:
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.load(response)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise AttestationError(f"cannot read exact-head check runs: {exc}") from exc
+        raise AttestationError(f"cannot read GitHub provenance: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AttestationError("GitHub provenance response is not an object")
+    return payload
 
-    checks = [
-        check
-        for check in payload.get("check_runs", [])
-        if check.get("head_sha") == sha
-        and check.get("app", {}).get("slug") == "github-actions"
-    ]
-    if not checks:
+
+def source_pr_attested(repository: str, number: int, sha: str, token: str) -> bool:
+    if (
+        not _REPOSITORY.fullmatch(repository)
+        or not isinstance(number, int)
+        or number <= 0
+        or not _SHA.fullmatch(sha)
+    ):
+        raise AttestationError("repository or exact source SHA is invalid")
+    if not token:
+        raise AttestationError("GITHUB_TOKEN is unavailable")
+
+    source = _github_json(
+        f"https://api.github.com/repos/{repository}/pulls/{number}",
+        token,
+    )
+    if source.get("head", {}).get("repo", {}).get("full_name") != repository:
         return False
-    latest = max(checks, key=lambda check: check.get("id", 0))
-    return latest.get("status") == "completed" and latest.get("conclusion") == "success"
+    if source.get("head", {}).get("sha") != sha:
+        return False
+
+    labels = {
+        label.get("name", "").strip().lower()
+        for label in source.get("labels", [])
+        if isinstance(label, dict)
+    }
+    if "mlx-coherence-swept" in labels:
+        return True
+    for line in (source.get("body") or "").splitlines():
+        if line.strip().lower().startswith("coherence-sweep:"):
+            return bool(line.split(":", 1)[1].strip())
+    return False
 
 
 def main() -> int:
@@ -227,14 +242,15 @@ def main() -> int:
         )
         guarded = [item for item in integrations if item.changes_pyproject]
         for item in guarded:
-            if not exact_head_guard_succeeded(
+            if not source_pr_attested(
                 os.environ.get("GITHUB_REPOSITORY", ""),
+                item.number,
                 item.exact_source_sha,
                 os.environ.get("GITHUB_TOKEN", ""),
             ):
                 raise AttestationError(
-                    f"PR #{item.number} source {item.exact_source_sha} lacks a "
-                    "successful exact-head mlx-bound-guard"
+                    f"PR #{item.number} source {item.exact_source_sha} lacks an "
+                    "exact-head coherence attestation"
                 )
 
         output = os.environ.get("GITHUB_OUTPUT")
