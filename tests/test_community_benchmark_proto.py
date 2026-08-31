@@ -292,6 +292,19 @@ def test_component_change_changes_identity_digest() -> None:
     assert _digest(projection) != before
 
 
+def test_unquantized_identity_rejects_quantization_only_fields(
+    schemas, registry
+) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "model-identity.image.example.json")
+    quantization = example["components"][1]["quantization"]
+    assert quantization["kind"] == "none"
+    quantization.update({"method": "bogus", "weight_bits_x2": 7, "group_size": 64})
+    errors = list(
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
+    )
+    assert errors
+
+
 def test_task_discriminator_rejects_cross_modality_execution(schemas, registry) -> None:
     example = _load(RUNTIME_ROOT / "examples" / "execution.image.example.json")
     example["task_type"] = "video_generation"
@@ -319,6 +332,23 @@ def test_mtp_and_quantized_kv_require_reproducibility_fields(schemas, registry) 
 def test_scaled_config_values_reject_floats(schemas, registry) -> None:
     run = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
     run["workload"]["cases"][0]["guidance_millionths"] = 3.5
+    assert list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(run)
+    )
+
+
+def test_digest_projected_values_reject_unsafe_integers(schemas, registry) -> None:
+    unsafe = 9007199254740992
+    execution = _load(RUNTIME_ROOT / "examples" / "execution.image.example.json")
+    execution["resources"]["wired_memory_limit_mib"] = unsafe
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            execution
+        )
+    )
+
+    run = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    run["workload"]["protocol_version"] = unsafe
     assert list(
         _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(run)
     )

@@ -104,6 +104,7 @@
         "base_dtype": {"enum": ["float32", "float16", "bfloat16", "other", "unknown"]}
       },
       "allOf": [
+        {"if": {"properties": {"kind": {"const": "none"}}, "required": ["kind"]}, "then": {"not": {"anyOf": [{"required": ["method"]}, {"required": ["weight_bits_x2"]}, {"required": ["activation_bits_x2"]}, {"required": ["group_size"]}]}}},
         {"if": {"properties": {"kind": {"enum": ["weights", "weights_and_activations"]}}, "required": ["kind"]}, "then": {"required": ["method", "weight_bits_x2"]}},
         {"if": {"properties": {"kind": {"const": "weights_and_activations"}}, "required": ["kind"]}, "then": {"required": ["activation_bits_x2"]}}
       ]
