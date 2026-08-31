@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Contract tests for the shared community-benchmark wire protocol."""
+"""Contract tests for atomic model/runtime and community benchmark schemas."""
 
 from __future__ import annotations
 
@@ -14,16 +14,17 @@ jsonschema = pytest.importorskip("jsonschema")
 referencing = pytest.importorskip("referencing")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PROTO_ROOT = REPO_ROOT / "proto" / "community-benchmark" / "v1"
-EXAMPLES_ROOT = PROTO_ROOT / "examples"
-PROTOCOLS_ROOT = PROTO_ROOT / "protocols"
-CORPORA_ROOT = PROTO_ROOT / "corpora"
+PROTO_ROOT = REPO_ROOT / "proto"
+RUNTIME_ROOT = PROTO_ROOT / "model-runtime" / "v1"
+CATALOG_ROOT = PROTO_ROOT / "model-catalog" / "v1"
+BENCH_ROOT = PROTO_ROOT / "community-benchmark" / "v1"
 
-SCHEMA_FILES = (
-    "model-identity.schema.json",
-    "machine-observation.schema.json",
-    "execution-config.schema.json",
-    "benchmark-run.schema.json",
+SCHEMA_PATHS = (
+    RUNTIME_ROOT / "model-identity.schema.json",
+    RUNTIME_ROOT / "machine-observation.schema.json",
+    RUNTIME_ROOT / "execution-config.schema.json",
+    CATALOG_ROOT / "model-alias.schema.json",
+    BENCH_ROOT / "benchmark-run.schema.json",
 )
 
 
@@ -33,7 +34,7 @@ def _load(path: Path) -> dict:
 
 @pytest.fixture(scope="module")
 def schemas() -> dict[str, dict]:
-    return {name: _load(PROTO_ROOT / name) for name in SCHEMA_FILES}
+    return {path.name: _load(path) for path in SCHEMA_PATHS}
 
 
 @pytest.fixture(scope="module")
@@ -47,267 +48,8 @@ def registry(schemas):
 
 def _validator(schema: dict, registry):
     return jsonschema.Draft202012Validator(
-        schema,
-        registry=registry,
-        format_checker=jsonschema.FormatChecker(),
+        schema, registry=registry, format_checker=jsonschema.FormatChecker()
     )
-
-
-def test_all_protocol_schemas_are_valid_draft_2020_12(schemas) -> None:
-    for schema in schemas.values():
-        jsonschema.Draft202012Validator.check_schema(schema)
-        assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-
-
-def test_model_identity_example_validates(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "model-identity.example.json")
-    _validator(schemas["model-identity.schema.json"], registry).validate(example)
-
-
-def test_composed_benchmark_run_example_validates_offline(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    _validator(schemas["benchmark-run.schema.json"], registry).validate(example)
-
-
-@pytest.mark.parametrize(
-    ("section", "forbidden_key", "forbidden_value"),
-    (
-        ("model", "local_path", "/Users/alice/models/qwen"),
-        ("machine", "hostname", "alice-macbook"),
-        ("execution", "environment", {"TOKEN": "secret"}),
-    ),
-)
-def test_upload_rejects_fields_outside_privacy_allowlist(
-    schemas, registry, section, forbidden_key, forbidden_value
-) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    example[section][forbidden_key] = forbidden_value
-
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any(
-        "Additional properties are not allowed" in error.message for error in errors
-    )
-
-
-def test_client_cannot_upload_server_verdicts(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    example["validation"] = {
-        "verified": True,
-        "comparable": True,
-        "rank": 1,
-    }
-
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("validation" in error.message for error in errors)
-
-
-def test_repository_identity_requires_immutable_revision(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "model-identity.example.json")
-    del example["source"]["resolved_revision"]
-
-    errors = list(
-        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("resolved_revision" in error.message for error in errors)
-
-
-def test_repository_revision_identity_requires_digest(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "model-identity.example.json")
-    example["identity_strength"] = "repository_revision"
-    del example["identity_digest"]
-
-    errors = list(
-        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("identity_digest" in error.message for error in errors)
-
-
-def test_local_identity_rejects_repository_coordinates(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "model-identity.example.json")
-    example["identity_strength"] = "local_manifest"
-    example["source"]["kind"] = "local"
-
-    errors = list(
-        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-
-
-def test_quantized_model_requires_method_and_weight_bits(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "model-identity.example.json")
-    del example["quantization"]["method"]
-    del example["quantization"]["weight_bits_x2"]
-
-    errors = list(
-        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
-    )
-    assert {"method", "weight_bits_x2"}.issubset(
-        {
-            field
-            for error in errors
-            for field in ("method", "weight_bits_x2")
-            if field in error.message
-        }
-    )
-
-
-def test_mtp_requires_draft_depth(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    del example["execution"]["features"]["speculative_decoding"]["max_draft_tokens"]
-
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("max_draft_tokens" in error.message for error in errors)
-
-
-def test_external_draft_method_requires_draft_artifact(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    spec = example["execution"]["features"]["speculative_decoding"]
-    spec["method"] = "dflash"
-
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("draft_model_identity_digest" in error.message for error in errors)
-
-
-def test_quantized_kv_cache_requires_bit_width(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    del example["execution"]["features"]["kv_cache"]["bits_x2"]
-
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("bits_x2" in error.message for error in errors)
-
-
-def test_scaled_execution_values_reject_wire_floats(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    example["execution"]["generation"]["temperature_millionths"] = 0.7
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("is not of type 'integer'" in error.message for error in errors)
-
-
-def test_complete_machine_profile_requires_all_cohort_axes(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    del example["machine"]["profile"]["gpu_cores"]
-
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("gpu_cores" in error.message for error in errors)
-
-
-def test_partial_machine_profile_remains_valid_exploratory_data(
-    schemas, registry
-) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    example["machine"]["profile_completeness"] = "partial"
-    del example["machine"]["profile"]["gpu_cores"]
-    del example["machine"]["profile"]["performance_cores"]
-    del example["machine"]["profile"]["efficiency_cores"]
-    _validator(schemas["benchmark-run.schema.json"], registry).validate(example)
-
-
-def test_source_runtime_requires_immutable_revision(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    runtime = example["execution"]["runtime"]
-    runtime["distribution"] = "source"
-
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("rapid_mlx_revision" in error.message for error in errors)
-
-
-def test_failed_outcome_is_structured_and_does_not_require_measurements(
-    schemas, registry
-) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    example["outcome"] = {
-        "status": "failed",
-        "failure_code": "model_load_oom",
-    }
-    del example["measurements"]
-    _validator(schemas["benchmark-run.schema.json"], registry).validate(example)
-
-    example["outcome"]["error_message"] = "/Users/alice/private-model failed"
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("error_message" in error.message for error in errors)
-
-
-def test_completed_outcome_requires_measurements(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    del example["measurements"]
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("measurements" in error.message for error in errors)
-
-
-def test_randomized_experiment_requires_assignment_seed(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    del example["experiment"]["assignment_seed"]
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("assignment_seed" in error.message for error in errors)
-
-
-def test_experiment_can_vary_only_execution_fields(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    example["experiment"]["varied_fields"] = ["/machine/profile/memory_gib"]
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-    assert any("does not match" in error.message for error in errors)
-
-
-def test_single_token_case_has_ttft_but_no_decode_tps_window(schemas, registry) -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    example["workload"]["cases"][0]["target_output_tokens"] = 1
-    measurement = example["measurements"][0]
-    measurement["output_tokens"] = 1
-    measurement["decode_duration_ms"] = 0
-    _validator(schemas["benchmark-run.schema.json"], registry).validate(example)
-
-    measurement["decode_duration_ms"] = 0.1
-    errors = list(
-        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
-    )
-    assert errors
-
-
-def test_machine_profile_digest_does_not_change_with_run_conditions() -> None:
-    """The normative digest projection is profile-only, not a device ID."""
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    before = copy.deepcopy(example["machine"]["profile"])
-    example["machine"]["conditions_after"]["thermal_state"] = "serious"
-    example["machine"]["conditions_after"]["available_memory_mib"] = 1024
-    assert example["machine"]["profile"] == before
 
 
 def _reject_floats(value: object) -> None:
@@ -324,95 +66,281 @@ def _reject_floats(value: object) -> None:
 
 
 def _canonical(value: object) -> bytes:
-    """Rapid Canonical JSON v1 for schema-bounded values."""
     _reject_floats(value)
     return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
 
 
 def _digest(value: object) -> str:
     return f"sha256:{hashlib.sha256(_canonical(value)).hexdigest()}"
 
 
-def test_cross_language_digest_golden_vectors() -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    model = example["model"]
-    model_projection = {
-        key: model[key]
-        for key in ("schema_version", "source", "artifact", "quantization")
-    }
-    execution = example["execution"]
-    execution_projection = {
-        key: execution[key] for key in ("load", "generation", "features")
-    }
+def test_all_schemas_are_valid_draft_2020_12(schemas) -> None:
+    for schema in schemas.values():
+        jsonschema.Draft202012Validator.check_schema(schema)
+        assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
 
-    assert _digest(model_projection) == model["identity_digest"]
+
+@pytest.mark.parametrize("kind", ("llm", "vlm", "image", "video"))
+def test_all_model_pipeline_examples_validate_and_match_digest(
+    schemas, registry, kind
+) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / f"model-identity.{kind}.example.json")
+    _validator(schemas["model-identity.schema.json"], registry).validate(example)
+    projection = {
+        key: example[key] for key in ("schema_version", "pipeline_kind", "components")
+    }
+    assert _digest(projection) == example["identity_digest"]
+
+
+@pytest.mark.parametrize("kind", ("text", "vlm", "image", "video"))
+def test_all_execution_examples_validate_and_match_digest(
+    schemas, registry, kind
+) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / f"execution.{kind}.example.json")
+    _validator(schemas["execution-config.schema.json"], registry).validate(example)
+    projection = {key: example[key] for key in ("task_type", "resources", "task")}
+    assert _digest(projection) == example["config_digest"]
+
+
+def test_alias_is_a_reference_layer_not_embedded_identity(schemas, registry) -> None:
+    example = _load(CATALOG_ROOT / "examples" / "model-alias.example.json")
+    _validator(schemas["model-alias.schema.json"], registry).validate(example)
+    assert "hf_path" not in json.dumps(example)
+    assert "model_identity_digest" in example["target"]
+    assert "execution_config_digest" in example["execution_presets"][0]
+
+
+def test_promoted_alias_preset_requires_scoped_evidence(schemas, registry) -> None:
+    example = _load(CATALOG_ROOT / "examples" / "model-alias.example.json")
+    evidence = example["execution_presets"][0]["evidence"]
+    evidence["status"] = "promoted"
+    del evidence["machine_profile_digest"]
+    errors = list(
+        _validator(schemas["model-alias.schema.json"], registry).iter_errors(example)
+    )
+    assert any("machine_profile_digest" in error.message for error in errors)
+
+
+def test_unresolved_alias_has_no_identity_digest_or_presets(schemas, registry) -> None:
+    example = _load(CATALOG_ROOT / "examples" / "model-alias.example.json")
+    example["target"]["resolution_status"] = "unresolved"
+    del example["target"]["model_identity_digest"]
+    example["default_execution_preset_id"] = None
+    example["execution_presets"] = []
+    _validator(schemas["model-alias.schema.json"], registry).validate(example)
+
+
+@pytest.mark.parametrize("kind", ("image", "video"))
+def test_launch_modality_benchmark_examples_validate(schemas, registry, kind) -> None:
+    example = _load(BENCH_ROOT / "examples" / f"benchmark-run.{kind}.example.json")
+    _validator(schemas["benchmark-run.schema.json"], registry).validate(example)
+    assert example["model"]["pipeline_kind"] == f"{kind}_generation"
+    assert example["execution"]["task_type"] == f"{kind}_generation"
+    assert example["workload"]["task_type"] == f"{kind}_generation"
+
+
+def test_vlm_workload_and_measurement_union_is_reachable(schemas, registry) -> None:
+    base_id = schemas["benchmark-run.schema.json"]["$id"]
+    workload = {
+        "protocol_id": "custom-vlm",
+        "protocol_version": 1,
+        "protocol_strength": "custom",
+        "protocol_digest": "sha256:" + "a" * 64,
+        "task_type": "vision_language",
+        "dataset": {"id": "public-vlm", "version": 1, "digest": "sha256:" + "b" * 64},
+        "concurrency": 1,
+        "cases": [
+            {
+                "case_id": "one-image",
+                "warmup_rounds": 0,
+                "measured_rounds": 1,
+                "media_kind": "image",
+                "media_count": 1,
+                "width": 1024,
+                "height": 1024,
+                "target_output_tokens": 64,
+            }
+        ],
+    }
+    measurement = {
+        "case_id": "one-image",
+        "round_index": 1,
+        "total_duration_ms": 1000.0,
+        "peak_active_memory_mib": 4096,
+        "completed": True,
+        "prompt_tokens": 32,
+        "output_tokens": 64,
+        "ttft_ms": 400.0,
+        "decode_duration_ms": 600.0,
+        "media_encode_duration_ms": 250.0,
+    }
+    for name, value in (("workload", workload), ("measurement", measurement)):
+        _validator({"$ref": f"{base_id}#/$defs/{name}"}, registry).validate(value)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    (
+        ("model", "local_path", "/Users/alice/model"),
+        ("machine", "hostname", "alice-mac"),
+        ("execution", "environment", {"TOKEN": "secret"}),
+        ("workload", "prompt", "private prompt"),
+    ),
+)
+def test_upload_is_a_strict_privacy_allowlist(
+    schemas, registry, section, key, value
+) -> None:
+    example = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    example[section][key] = value
+    errors = list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
+    )
+    assert errors
+
+
+def test_client_cannot_upload_server_verdicts(schemas, registry) -> None:
+    example = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    example["validation"] = {"verified": True, "rank": 1}
+    assert list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
+    )
+
+
+def test_repository_identity_requires_all_component_revisions(
+    schemas, registry
+) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "model-identity.vlm.example.json")
+    del example["components"][1]["source"]["resolved_revision"]
+    errors = list(
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
+    )
+    assert any("resolved_revision" in error.message for error in errors)
+
+
+def test_unresolved_identity_has_no_digest_but_can_participate(
+    schemas, registry
+) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "model-identity.llm.example.json")
+    example["identity_strength"] = "unresolved"
+    del example["identity_digest"]
+    del example["components"][0]["source"]["resolved_revision"]
+    _validator(schemas["model-identity.schema.json"], registry).validate(example)
+
+
+def test_local_identity_rejects_repo_coordinates_and_requires_content_manifest(
+    schemas, registry
+) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "model-identity.llm.example.json")
+    example["identity_strength"] = "local_manifest"
+    example["components"][0]["source"]["kind"] = "local"
+    errors = list(
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
+    )
+    assert errors
+
+
+def test_model_display_edit_does_not_change_identity_digest() -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "model-identity.image.example.json")
+    projection = {
+        key: example[key] for key in ("schema_version", "pipeline_kind", "components")
+    }
+    before = _digest(projection)
+    example["display"]["alias"] = "renamed-image-model"
+    assert _digest(projection) == before
+
+
+def test_component_change_changes_identity_digest() -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "model-identity.image.example.json")
+    projection = {
+        key: example[key] for key in ("schema_version", "pipeline_kind", "components")
+    }
+    before = _digest(projection)
+    projection["components"][0]["source"]["resolved_revision"] = "f" * 40
+    assert _digest(projection) != before
+
+
+def test_task_discriminator_rejects_cross_modality_execution(schemas, registry) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "execution.image.example.json")
+    example["task_type"] = "video_generation"
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+
+
+def test_mtp_and_quantized_kv_require_reproducibility_fields(schemas, registry) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "execution.text.example.json")
+    del example["task"]["language"]["speculative_decoding"]["max_draft_tokens"]
+    del example["task"]["language"]["kv_cache"]["bits_x2"]
+    errors = list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+    messages = " ".join(error.message for error in errors)
+    assert "max_draft_tokens" in messages
+    assert "bits_x2" in messages
+
+
+def test_scaled_config_values_reject_floats(schemas, registry) -> None:
+    run = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    run["workload"]["cases"][0]["guidance_millionths"] = 3.5
+    assert list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(run)
+    )
+
+
+def test_failed_outcome_is_structured_without_measurements(schemas, registry) -> None:
+    run = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    run["outcome"] = {"status": "failed", "failure_code": "model_load_oom"}
+    del run["measurements"]
+    _validator(schemas["benchmark-run.schema.json"], registry).validate(run)
+    run["outcome"]["error_message"] = "/Users/alice/private-model failed"
+    assert list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(run)
+    )
+
+
+def test_registered_protocols_and_datasets_match_digests(schemas, registry) -> None:
+    workload_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": schemas["benchmark-run.schema.json"]["$id"] + "#/$defs/workload",
+    }
+    for path in (BENCH_ROOT / "protocols").glob("*.json"):
+        entry = _load(path)
+        workload = entry["workload"]
+        _validator(workload_schema, registry).validate(workload)
+        projection = {k: v for k, v in workload.items() if k != "protocol_digest"}
+        assert _digest(projection) == workload["protocol_digest"]
+        assert entry["protocol_digest"] == workload["protocol_digest"]
+    for path in (BENCH_ROOT / "datasets").glob("*.json"):
+        entry = _load(path)
+        projection = {k: v for k, v in entry.items() if k != "digest"}
+        assert _digest(projection) == entry["digest"]
+
+
+def test_registered_launch_examples_exactly_match_protocol_registry() -> None:
+    for kind in ("image", "video"):
+        run = _load(BENCH_ROOT / "examples" / f"benchmark-run.{kind}.example.json")
+        protocol = _load(BENCH_ROOT / "protocols" / f"rapid-{kind}-speed-v1.json")
+        assert run["workload"] == protocol["workload"]
+
+
+def test_machine_digest_is_profile_only() -> None:
+    run = _load(BENCH_ROOT / "examples" / "benchmark-run.image.example.json")
+    profile = copy.deepcopy(run["machine"]["profile"])
+    run["machine"]["conditions_after"]["thermal_state"] = "serious"
+    assert _digest(profile) == run["machine"]["profile_digest"]
+
+
+def test_canonical_json_handles_unicode_and_rejects_float_exponents() -> None:
+    value = {"path": "模型/权重.safetensors", "size_bytes": 123}
     assert (
-        _digest(example["machine"]["profile"]) == example["machine"]["profile_digest"]
+        _canonical(value).decode()
+        == '{"path":"模型/权重.safetensors","size_bytes":123}'
     )
-    assert _digest(execution_projection) == execution["config_digest"]
-
-
-def test_canonical_profile_handles_unicode_but_rejects_float_exponents() -> None:
-    value = {
-        "path": "模型/权重.safetensors",
-        "sha256": "a" * 64,
-        "size_bytes": 123,
-    }
-    assert _canonical(value).decode("utf-8") == (
-        '{"path":"模型/权重.safetensors","sha256":"' + "a" * 64 + '","size_bytes":123}'
-    )
-
     with pytest.raises(TypeError, match="forbids floating-point"):
         _canonical({"temperature": 0.7, "tiny": 1e-7})
-
-
-def test_registered_workload_exactly_matches_published_protocol() -> None:
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    entry = _load(PROTOCOLS_ROOT / "rapid-community-speed-v1.json")
-    workload = example["workload"]
-
-    assert workload == entry["workload"]
-    projection = {
-        key: value for key, value in workload.items() if key != "protocol_digest"
-    }
-    assert _digest(projection) == workload["protocol_digest"]
-    assert entry["protocol_digest"] == workload["protocol_digest"]
-
-    changed = copy.deepcopy(workload)
-    changed["cases"][0]["target_prompt_tokens"] = 513
-    assert changed["protocol_digest"] == workload["protocol_digest"]
-    assert changed != entry["workload"]
-
-
-def test_registered_corpus_digest_matches_generator_definition() -> None:
-    corpus = _load(CORPORA_ROOT / "rapid-synthetic-token-corpus-v1.json")
-    projection = {key: value for key, value in corpus.items() if key != "digest"}
-    assert _digest(projection) == corpus["digest"]
-
-
-def test_example_measurements_match_declared_cases() -> None:
-    """Pin the cross-array semantic invariant used by future ingestion."""
-    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    cases = {case["case_id"]: case for case in example["workload"]["cases"]}
-    seen: set[tuple[str, int]] = set()
-
-    for measurement in example["measurements"]:
-        case_id = measurement["case_id"]
-        assert case_id in cases
-        pair = (case_id, measurement["round_index"])
-        assert pair not in seen
-        seen.add(pair)
-
-    for case_id, case in cases.items():
-        assert (
-            sum(
-                measurement["case_id"] == case_id
-                for measurement in example["measurements"]
-            )
-            == case["measured_rounds"]
-        )

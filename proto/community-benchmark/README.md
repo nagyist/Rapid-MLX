@@ -1,184 +1,67 @@
 # Community benchmark protocol
 
-This directory is the cross-product source of truth for Rapid-MLX community
-benchmark payloads. Server, CLI, Desktop, and website code consume the same
-versioned JSON Schema contracts rather than maintaining product-specific field
-lists.
+Community benchmark is one consumer of the product-neutral atomic contracts:
 
-The folder is named `proto` in the sense of a shared wire protocol. The wire
-format is JSON, not Protocol Buffers, because submissions are public JSON and
-the website must be able to validate and render them without a binary codec.
+- [`../model-runtime/v1/`](../model-runtime/v1/) supplies model, machine, and
+  execution objects used by normal product flows as well as benchmarks.
+- [`../model-catalog/v1/`](../model-catalog/v1/) defines the alias/recommendation
+  layer built on those objects.
+- [`v1/benchmark-run.schema.json`](v1/benchmark-run.schema.json) adds only a
+  workload, raw measurements, outcome, collector, and run envelope.
 
-## Versions
+The run union supports `text_generation`, `vision_language`,
+`image_generation`, and `video_generation`. Image and video are first-class,
+not LLM records with optional media fields. Generation request choices such as
+resolution, frames, steps, guidance, prompt/output length, and seed live in the
+workload. Runtime choices such as MTP, KV cache, attention backend, VAE tiling,
+offload, and temporal chunking live in `ExecutionConfig`.
 
-- [`v1/model-identity.schema.json`](v1/model-identity.schema.json) identifies
-  the concrete weights, revision, format, and quantization.
-- [`v1/machine-observation.schema.json`](v1/machine-observation.schema.json)
-  separates a reusable hardware profile from volatile before/after conditions.
-- [`v1/execution-config.schema.json`](v1/execution-config.schema.json) records
-  the effective runtime, load, generation, MTP/speculative, KV-cache, prefix
-  cache, and prefill configuration.
-- [`v1/benchmark-run.schema.json`](v1/benchmark-run.schema.json) composes the
-  three reusable contracts with workload and raw measurements.
-- [`v1/protocols/`](v1/protocols/) and [`v1/corpora/`](v1/corpora/) bind a
-  registered protocol digest to the exact workload and corpus generator it
-  names.
+The production `community-benchmarks/schema.json` v1-v3 remains unchanged until
+a later rollout PR adds an adapter and switches producers/ingestion.
 
-Once a version has shipped, its accepted meaning is immutable. Additive fields
-still require a new version directory: `additionalProperties: false` is a
-deliberate privacy allowlist, so silently widening an old schema would silently
-widen user consent. Readers may support several version directories during a
-migration.
+## Registered protocols and datasets
 
-The existing `community-benchmarks/schema.json` v1-v3 contract remains the
-production wire format until a separate adapter/rollout PR switches producers
-and ingestion. These protocol files define that migration target; they do not
-change today's CLI upload behavior.
+For `protocol_strength: registered`, ingestion looks up `(protocol_id,
+protocol_version)` under `v1/protocols/` and requires exact RCJ-1 equality after
+removing no fields. It recomputes `protocol_digest` from the workload excluding
+only that field and verifies the dataset digest against `v1/datasets/`. Custom
+workloads are exploratory and never enter formal comparison or recommendation
+evidence.
 
-## Two validation layers
+Semantic validation also requires:
 
-JSON Schema enforces types, bounds, required fields, feature conditionals, and
-the public-data allowlist. Ingestion must also run semantic validation that JSON
-Schema cannot express cleanly:
+1. model, machine, execution, workload, and dataset digests are recomputed;
+2. model/execution/workload task types agree;
+3. component IDs and `(case_id, round_index)` pairs are unique;
+4. every measurement belongs to a case and each case has its declared rounds;
+5. actual dimensions, frames, image counts, and token counts meet protocol
+   tolerances;
+6. completed timing phases fit inside total duration within timer tolerance;
+7. timestamps are ordered and run duration is bounded;
+8. server-side correctness, duplicate, anomaly, identity, and trust checks run
+   before aggregation.
 
-1. Recompute every digest instead of trusting the client value.
-2. For `protocol_strength: registered`, look up `(protocol_id,
-   protocol_version)` in `v1/protocols/` and require the entire submitted
-   workload, including corpus, concurrency, cache state, and cases, to equal the
-   registered workload byte-for-byte after canonicalization. Also verify the
-   corpus digest against `v1/corpora/`. A changed workload with an unchanged
-   registered digest is invalid, not a new cohort.
-3. Require `completed_at >= started_at` and a bounded run duration.
-4. Require every measurement `case_id` to exist in `workload.cases`.
-5. Require unique `(case_id, round_index)` pairs and the declared number of
-   measured rounds for every case.
-6. Require observed token counts to satisfy the protocol tolerance and reject
-   incomplete samples from speed aggregates.
-7. Check `performance_cores + efficiency_cores == cpu_cores` when both optional
-   core counts are present.
-8. Apply deduplication, anomaly, correctness, identity, and trust checks on the
-   server.
-9. Require `total_duration_ms >= ttft_ms + decode_duration_ms` within the
-   protocol's documented timer tolerance.
-10. For an experiment group, require exactly one baseline; identical model,
-   machine profile, runtime stack, workload, and collector version; unique arms
-   and sequence indexes; close timestamps; and effective configs that differ
-   only at `varied_fields`. Reject a causal speedup when thermal, power, or
-   memory-pressure drift crosses the protocol threshold.
+Clients upload raw timing and memory observations, never TPS, frames/sec,
+rank, `verified`, `comparable`, or `outlier`. Prompt text, output text, image or
+video bytes, paths, exception strings, and environment values are outside the
+allowlist. Datasets use public IDs/digests; content is not repeated in uploads.
 
-The client cannot upload `verified`, `comparable`, `outlier`, rank, or a derived
-TPS summary. Those are server conclusions. The client uploads raw observations;
-the server derives display and recommendation evidence.
+## Comparison and recommendation
 
-A failed run uploads only a closed `outcome.failure_code` and any earlier
-completed samples; it never uploads exception text. Failures are censored
-model-fit evidence (especially OOM), not zero-speed samples and never members of
-a speed aggregate. Recording them prevents successful-run survivorship bias in
-model recommendations.
-
-`identity_strength: unresolved` deliberately remains valid so an arbitrary
-compatible model can participate as exploratory data. It has no
-`identity_digest`, cannot enter a formal comparison cohort, and cannot support a
-promoted recommendation until ingestion or the registry resolves it. This is a
-campaign participation lane, not a fail-open trust verdict.
-
-## Canonical digests
-
-Canonicalize each projection with **Rapid Canonical JSON v1 (RCJ-1)**, hash the
-UTF-8 bytes with SHA-256, encode lowercase hexadecimal, and prefix the result
-with `sha256:`. RCJ-1 deliberately excludes JSON floating-point numbers, the
-source of Python/Swift/JavaScript exponent and rounding drift. Fractional wire
-values use named scaled integers: probabilities and temperature use millionths;
-bit widths use `*_bits_x2` so 2.5-bit is represented as `5`.
-
-RCJ-1 is exactly:
-
-1. Objects use schema-defined ASCII keys sorted lexicographically by byte value;
-   arrays preserve their contract-defined order.
-2. Strings are NFC-normalized, encoded directly as UTF-8, and use the shortest
-   JSON escapes for quote, backslash, and controls. Slash and non-ASCII
-   characters are not escaped.
-3. Integers are restricted to `[-9007199254740991, 9007199254740991]` and use
-   base-10 with no leading zero, plus sign, exponent, decimal point, or negative
-   zero. Booleans and null are lowercase JSON literals.
-4. No insignificant whitespace or trailing newline is emitted. Any float is a
-   contract error rather than something a producer may canonicalize.
-
-The three digest values in
-[`v1/examples/benchmark-run.example.json`](v1/examples/benchmark-run.example.json)
-are normative cross-language golden vectors. A consumer must reproduce them
-byte-for-byte before it can emit v1 payloads.
-
-| Digest | Exact v1 projection | Excluded on purpose |
-| --- | --- | --- |
-| `model.identity_digest` | `{schema_version, source, artifact, quantization}` | `display`, `family`, `identity_strength` |
-| `machine.profile_digest` | `machine.profile` | OS, run conditions, install ID |
-| `execution.config_digest` | `{load, generation, features}` | runtime versions |
-| `workload.protocol_digest` | Registered workload excluding only `protocol_digest` | Result measurements |
-
-Artifact manifests have two closed v1 bases:
-
-- `huggingface_tree`: RCJ-1 array sorted by NFC repository-relative POSIX path;
-  each entry is `{path, size_bytes, blob_oid}` from the immutable resolved
-  revision. Paths are NFC-normalized and must not contain `..`.
-- `content_sha256`: RCJ-1 array sorted by NFC model-root-relative POSIX path;
-  each required config, tokenizer, and weight entry is
-  `{path, size_bytes, sha256}`. It hashes file content, never the absolute model
-  root. Local models must use this basis.
-
-The uploaded artifact contains only the resulting manifest digest, not manifest
-paths. The full manifest stays local unless a future, separately consented
-contract adds it.
-
-Display aliases and family metadata remain searchable, but never decide whether
-two artifacts are identical. Machine profile digests are deliberately shared by
-all Macs with the same declared configuration and must never contain serials,
-hardware UUIDs, MAC addresses, hostnames, or usernames.
-
-## Comparison and recommendation keys
-
-The server derives keys; clients do not upload them:
+The server derives:
 
 ```text
-artifact key      = model.identity_digest
-machine class key = machine.profile_digest
-environment key   = machine.os
-execution key     = execution.config_digest
-runtime key       = execution.runtime
-workload key      = workload.protocol_digest + case_id
+comparison cohort = model identity + pipeline/task type + machine profile
+                  + OS + runtime stack + execution config + workload protocol
 
-comparison cohort = artifact + machine + environment + execution + runtime + workload
-```
-
-Recommendation uses the same evidence without conflating model selection and
-runtime tuning:
-
-```text
 model-fit evidence:
-  artifact × machine profile × workload
+  model × machine profile × workload -> success/OOM/correctness/performance
 
 runtime-profile evidence:
-  artifact × machine profile × workload -> ranked execution configs
+  model × machine profile × workload -> ranked execution configs
 ```
 
-Available memory, power, thermal state, and memory pressure are safety and
-quality filters. They do not mutate the stable machine class. A promoted
-recommendation also remains gated by runtime compatibility and correctness; raw
-community results never write production defaults directly.
-
-Only `profile_completeness: complete` enters a formal machine cohort. Partial
-profiles remain visible exploratory evidence and cannot support a promoted
-machine-specific recommendation.
-
-Only `protocol_strength: registered` enters formal comparison or recommendation
-evidence. A custom workload remains shareable exploratory data and receives a
-server-recomputed digest, but cannot claim a registered protocol ID/version.
-
-## Privacy boundary
-
-The schemas do not admit prompt text, output text, free-form notes, file paths,
-environment variables, usernames, hostnames, IP addresses, hardware serials, or
-hardware UUIDs. `install_id`, when present, is random and resettable and is not
-part of model, machine, execution, or comparison identity. A client must obtain
-explicit submission consent before including it; ingestion must publish a
-retention/rotation policy and must not expose the raw value on the public site.
+Only complete machine profiles, resolved model identities, registered
+protocols, compatible runtime stacks, and correctness-passing runs support a
+promoted recommendation. Failed/OOM runs are censored fit evidence, not
+zero-speed samples.

@@ -1,17 +1,18 @@
 {
   "schema_version": 1,
-  "protocol_digest": "sha256:eeaecf41b3f18b95c7ff261de63418a25ec7906cb305ec65c54aa954e731ac39",
+  "protocol_digest": "sha256:271699cbc94a998c1528fe4b45dea4ffe2637649c53c9cd397b61a5fb0175af7",
   "workload": {
     "protocol_id": "rapid-community-speed",
     "protocol_version": 1,
     "protocol_strength": "registered",
-    "protocol_digest": "sha256:eeaecf41b3f18b95c7ff261de63418a25ec7906cb305ec65c54aa954e731ac39",
-    "corpus": {
+    "protocol_digest": "sha256:271699cbc94a998c1528fe4b45dea4ffe2637649c53c9cd397b61a5fb0175af7",
+    "task_type": "text_generation",
+    "dataset": {
       "id": "rapid-synthetic-token-corpus",
+      "version": 1,
       "digest": "sha256:451155d21587a4bf0079d5351d23cf50e7da1342ed546229823c3c92f68f2cde"
     },
     "concurrency": 1,
-    "prefix_cache_state": "disabled",
     "cases": [
       {
         "case_id": "pp512-tg128",
