@@ -893,28 +893,23 @@ wait_identifier() {
 settle_transcript_at_bottom() {
     local destination="$1" press_result="$2"
     see_main "$destination"
-    if ! jq -e '.data.ui_elements[]?
-                | select(.identifier == "Transcript.JumpToBottom")' \
-        "$destination" >/dev/null; then
-        return
-    fi
-
     # The window can expose both sidebar and transcript scrollbars. Correlate
-    # the transcript bar with its overlay button: it is the first vertical bar
-    # to the button's right. Keep that x-coordinate after the button hides.
+    # the transcript bar with the compose surface: it is the first vertical
+    # bar to the Send button's right. This anchor remains present after the
+    # Jump-to-latest overlay hides.
     local scroll_x before_value
     scroll_x="$(jq -r '
         ([.data.ui_elements[]?
-          | select(.identifier == "Transcript.JumpToBottom")
-          | .bounds.x] | first) as $jump_x
+          | select(.identifier == "ChatView.SendOrStopButton")
+          | .bounds.x] | first) as $compose_x
         | [.data.ui_elements[]?
            | select(.role == "AXScrollBar"
                     and (.value | type) == "number"
                     and .bounds.height > .bounds.width
-                    and .bounds.x > $jump_x)]
+                    and .bounds.x > $compose_x)]
         | sort_by(.bounds.x) | .[0].bounds.x // empty' "$destination")"
     [[ -n "$scroll_x" ]] \
-        || die "could not identify the transcript scrollbar beside Jump to latest"
+        || die "could not identify the transcript scrollbar beside the compose surface"
     before_value="$(jq -r --argjson scroll_x "$scroll_x" '
         [.data.ui_elements[]?
          | select(.role == "AXScrollBar"
@@ -923,8 +918,12 @@ settle_transcript_at_bottom() {
          | .value] | first // empty' "$destination")"
     [[ -n "$before_value" ]] \
         || die "transcript exposes no measurable scroll position before Jump to latest"
-    press "$destination" Transcript.JumpToBottom "$press_result" \
-        || die "transcript was not at its tail and Jump to latest was not pressable"
+    if jq -e '.data.ui_elements[]?
+              | select(.identifier == "Transcript.JumpToBottom")' \
+        "$destination" >/dev/null; then
+        press "$destination" Transcript.JumpToBottom "$press_result" \
+            || die "transcript was not at its tail and Jump to latest was not pressable"
+    fi
     local previous_value="" stable_samples=0
     for _ in {1..60}; do
         see_main "$destination"

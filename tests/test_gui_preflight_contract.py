@@ -190,7 +190,8 @@ def test_fresh_install_settles_transcript_before_structural_baseline():
 
     assert 'select(.identifier == "Transcript.JumpToBottom")' in helper
     assert 'press "$destination" Transcript.JumpToBottom "$press_result"' in helper
-    assert ".bounds.x > $jump_x" in helper
+    assert 'select(.identifier == "ChatView.SendOrStopButton")' in helper
+    assert ".bounds.x > $compose_x" in helper
     assert '--argjson scroll_x "$scroll_x"' in helper
     assert 'die "Jump to latest did not physically settle' in helper
 
@@ -226,6 +227,10 @@ def test_transcript_settler_waits_for_physical_scroll_stability(tmp_path):
                 "role": "AXScrollBar",
                 "value": value,
                 "bounds": {"x": 704, "width": 17, "height": 320},
+            },
+            {
+                "identifier": "ChatView.SendOrStopButton",
+                "bounds": {"x": 658, "width": 28, "height": 28},
             },
         ]
         if has_button:
@@ -266,6 +271,57 @@ def test_transcript_settler_waits_for_physical_scroll_stability(tmp_path):
     assert completed.stdout.strip() == "5"
 
 
+def test_transcript_settler_waits_when_jump_button_is_initially_absent(tmp_path):
+    """Pinned state can precede AppKit reaching the physical tail."""
+    source = HARNESS.read_text()
+    helper_body = source.split("settle_transcript_at_bottom() {", 1)[1].split("\n}", 1)[
+        0
+    ]
+    helper = f"settle_transcript_at_bottom() {{{helper_body}\n}}"
+
+    for index, value in enumerate((0.80, 1.00, 1.00)):
+        elements = [
+            {
+                "role": "AXScrollBar",
+                "value": value,
+                "bounds": {"x": 704, "width": 17, "height": 320},
+            },
+            {
+                "identifier": "ChatView.SendOrStopButton",
+                "bounds": {"x": 658, "width": 28, "height": 28},
+            },
+        ]
+        (tmp_path / f"fixture-{index}.json").write_text(
+            json.dumps({"data": {"ui_elements": elements}})
+        )
+
+    script = textwrap.dedent(
+        f"""
+        set -u
+        fixture_dir={str(tmp_path)!r}
+        calls=0
+        see_main() {{
+            local destination="$1" index="$calls"
+            (( index > 2 )) && index=2
+            cp "$fixture_dir/fixture-$index.json" "$destination"
+            calls=$((calls + 1))
+        }}
+        press() {{ printf 'unexpected press\\n' >&2; exit 98; }}
+        die() {{ printf '%s\\n' "$*" >&2; exit 97; }}
+        sleep() {{ :; }}
+        {helper}
+        settle_transcript_at_bottom "$fixture_dir/current.json" "$fixture_dir/press.json"
+        printf '%s\\n' "$calls"
+        """
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, check=False, text=True
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "3"
+
+
 def test_transcript_settler_rejects_a_stable_intermediate_position(tmp_path):
     """Progress plus a hidden button is not proof that the tail was reached."""
     source = HARNESS.read_text()
@@ -281,7 +337,11 @@ def test_transcript_settler_rejects_a_stable_intermediate_position(tmp_path):
                 "role": "AXScrollBar",
                 "value": value,
                 "bounds": {"x": 704, "width": 17, "height": 320},
-            }
+            },
+            {
+                "identifier": "ChatView.SendOrStopButton",
+                "bounds": {"x": 658, "width": 28, "height": 28},
+            },
         ]
         if has_button:
             elements.append(
