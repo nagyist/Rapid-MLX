@@ -9,9 +9,11 @@ import pytest
 from vllm_mlx.spec_decode.mtp.prepared_state import (
     PreparedMTPState,
     PreparedStateIdentity,
+    PreparedStateMetadata,
     RestoreReason,
     evaluate_restore,
     fingerprint_config,
+    fingerprint_tokens,
     prepare_mtp_state,
 )
 
@@ -237,3 +239,131 @@ def test_config_fingerprint_is_order_independent_and_value_sensitive() -> None:
 
     assert left == reordered
     assert left != changed
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"model_id": ""}, "model_id"),
+        ({"model_revision": 3}, "model_revision"),
+        ({"adapter_id": " "}, "adapter_id"),
+        ({"tokenizer_fingerprint": 3}, "tokenizer_fingerprint"),
+    ],
+)
+def test_identity_rejects_empty_or_non_string_fields(changes, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        _identity(**changes)
+
+
+def test_identity_from_config_uses_canonical_fingerprint() -> None:
+    identity = PreparedStateIdentity.from_config(
+        model_id="model",
+        model_revision="revision",
+        speculative_config={"k": 3, "method": "mtp"},
+        target_cache_layout="target",
+        mtp_cache_layout="draft",
+        seed_hidden_layout="hidden",
+    )
+    assert identity.speculative_config_fingerprint == fingerprint_config(
+        {"method": "mtp", "k": 3}
+    )
+
+
+@pytest.mark.parametrize("config", [[], {"bad": object()}, {"nan": float("nan")}])
+def test_config_fingerprint_rejects_noncanonical_input(config) -> None:
+    error = TypeError if isinstance(config, list) else ValueError
+    with pytest.raises(error):
+        fingerprint_config(config)
+
+
+@pytest.mark.parametrize("tokens", [[True], [-1], [1 << 64]])
+def test_token_fingerprint_rejects_invalid_ids(tokens) -> None:
+    with pytest.raises(ValueError, match="tokens|64-bit"):
+        fingerprint_tokens(tokens)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"prefix_tokens": (), "target_cache_tokens": 0, "mtp_cache_pairs": 0},
+        {"target_cache_tokens": True},
+        {"mtp_cache_pairs": -1},
+        {"captured_at": float("inf")},
+        {"captured_at": -1.0},
+    ],
+)
+def test_capture_rejects_empty_counts_and_bad_timestamps(changes) -> None:
+    kwargs = {
+        "identity": _identity(),
+        "prefix_tokens": tuple(range(2)),
+        "target_cache": object(),
+        "target_cache_tokens": 2,
+        "mtp_cache": object(),
+        "mtp_cache_pairs": 1,
+        "seed_hidden": object(),
+        "captured_at": 100.0,
+    }
+    kwargs.update(changes)
+    with pytest.raises(ValueError):
+        prepare_mtp_state(**kwargs)
+
+
+@pytest.mark.parametrize("minimum", [True, 0, 1.5])
+def test_restore_rejects_invalid_minimum(minimum) -> None:
+    state, prefix = _state()
+    with pytest.raises(ValueError, match="positive integer"):
+        _evaluate(state, prefix, min_useful_prefix_tokens=minimum)
+
+
+@pytest.mark.parametrize("max_age", [-1, float("inf")])
+def test_restore_rejects_invalid_max_age(max_age) -> None:
+    state, prefix = _state()
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        _evaluate(state, prefix, max_age_seconds=max_age)
+
+
+def test_restore_refuses_malformed_identity_time_and_live_values() -> None:
+    state, prefix = _state()
+    assert (
+        _evaluate(state, prefix, expected_identity=object()).reason
+        is RestoreReason.MALFORMED
+    )
+    assert _evaluate(state, prefix, now=object()).reason is RestoreReason.MALFORMED
+    assert _evaluate(state, prefix, now=99.0).reason is RestoreReason.STALE
+    assert (
+        _evaluate(state, prefix, target_cache_tokens=True).reason
+        is RestoreReason.MALFORMED
+    )
+    malformed_request = (True,) + prefix[1:] + (999,)
+    assert (
+        _evaluate(state, prefix, request_tokens=malformed_request).reason
+        is RestoreReason.MALFORMED
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        PreparedStateMetadata(
+            identity=_identity(),
+            covered_tokens=-1,
+            mtp_covered_pairs=0,
+            boundary_fingerprint="0" * 64,
+            captured_at=1.0,
+        ),
+        PreparedStateMetadata(
+            identity=_identity(),
+            covered_tokens=1,
+            mtp_covered_pairs=True,
+            boundary_fingerprint="0" * 64,
+            captured_at=1.0,
+        ),
+    ],
+)
+def test_restore_refuses_non_metadata_and_invalid_metadata_counts(metadata) -> None:
+    state, prefix = _state()
+    corrupt = PreparedMTPState(
+        metadata, state.target_cache, state.mtp_cache, state.seed_hidden
+    )
+    assert _evaluate(corrupt, prefix).reason is RestoreReason.MALFORMED

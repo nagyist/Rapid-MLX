@@ -415,3 +415,137 @@ def test_stop_token_configuration_fails_closed_on_unknown_lane_or_bad_token():
         generation.ContinuousMTPGenerationBatch.create(
             [_spec(1)], runtime, stop_tokens={1: {True}}
         )
+
+
+def test_wrapper_value_properties_and_constructor_guards():
+    runtime, _compute, _caches = _runtime()
+    detached, first = engine.prepare_self_mtp_lane(_spec(1), runtime)
+    core = engine.attach_self_mtp_lanes(None, [detached], runtime=runtime)
+    with pytest.raises(ValueError, match="one entry"):
+        generation.ContinuousMTPGenerationBatch(
+            batch=core,
+            first_tokens=[],
+            stop_tokens={1: frozenset()},
+        )
+
+    wrapper = generation.ContinuousMTPGenerationBatch(
+        batch=core,
+        first_tokens=[first],
+        stop_tokens={1: frozenset()},
+    )
+    assert wrapper.initial_pending is True
+    burst = wrapper.next_burst()
+    emission = burst.emissions[0]
+    assert emission.logprobs == ("lp-101",)
+    assert burst.cohort_detached is False
+    package = wrapper.detach_all()[0]
+    assert package.uid == package.lane.uid == 1
+    assert package.caches is package.detached.caches
+    assert package.logprobs == ("lp-101",)
+
+
+def test_create_and_resume_reject_invalid_cohorts():
+    runtime, _compute, _caches = _runtime()
+    with pytest.raises(ValueError, match="empty"):
+        generation.ContinuousMTPGenerationBatch.create([], runtime)
+    with pytest.raises(ValueError, match="unique"):
+        generation.ContinuousMTPGenerationBatch.create([_spec(1), _spec(1)], runtime)
+    with pytest.raises(ValueError, match="empty"):
+        generation.ContinuousMTPGenerationBatch.resume([])
+
+    wrapper = generation.ContinuousMTPGenerationBatch.create([_spec(1)], runtime)
+    wrapper.next_burst()
+    resumable = wrapper.detach_all()[0]
+    terminal = generation.ContinuousMTPDetachPackage(
+        detached=resumable.detached,
+        tokens=resumable.tokens,
+        stop_tokens=resumable.stop_tokens,
+        terminal=True,
+        finish_reason="stop",
+    )
+    with pytest.raises(ValueError, match="terminal"):
+        generation.ContinuousMTPGenerationBatch.resume([terminal])
+    with pytest.raises(ValueError, match="unique"):
+        generation.ContinuousMTPGenerationBatch.resume([resumable, resumable])
+
+    other_runtime, _compute, _caches = _runtime()
+    other = generation.ContinuousMTPGenerationBatch.create([_spec(2)], other_runtime)
+    other.next_burst()
+    other_package = other.detach_all()[0]
+    with pytest.raises(ValueError, match="different runtimes"):
+        generation.ContinuousMTPGenerationBatch.resume([resumable, other_package])
+
+    resumed = generation.ContinuousMTPGenerationBatch.resume([resumable])
+    assert resumed.initial_pending is False
+    assert resumed.lane_uids == (1,)
+
+
+def test_fixed_membership_explicit_detach_turns_over_the_whole_cohort():
+    runtime, _compute, _caches = _runtime(dynamic=False)
+    batch = generation.ContinuousMTPGenerationBatch.create(
+        [_spec(1), _spec(2)], runtime
+    )
+    batch.next_burst()
+
+    detached = batch.detach_lanes([1])
+
+    assert [package.uid for package in detached] == [1, 2]
+    assert batch.closed is True
+
+
+def test_dynamic_join_and_detach_validate_empty_duplicate_and_unknown_uids():
+    runtime, _compute, _caches = _runtime(dynamic=True)
+    wrapper = generation.ContinuousMTPGenerationBatch.create(
+        [_spec(1), _spec(2)], runtime
+    )
+    wrapper.next_burst()
+    assert wrapper.attach_lanes([]) == ()
+    with pytest.raises(ValueError, match="unique"):
+        wrapper.attach_lanes([_spec(3), _spec(3)])
+    assert wrapper.detach_lanes([]) == ()
+    with pytest.raises(ValueError, match="unique"):
+        wrapper.detach_lanes([1, 1])
+    with pytest.raises(KeyError, match="unknown"):
+        wrapper.detach_lanes([9])
+    detached = wrapper.detach_lanes([1])
+    assert detached[0].uid == 1
+    assert detached[0].terminal is False
+    assert wrapper.lane_uids == (2,)
+
+
+def test_initial_stop_and_corrupt_initial_state_paths():
+    runtime, _compute, _caches = _runtime(dynamic=True)
+    wrapper = generation.ContinuousMTPGenerationBatch.create(
+        [_spec(1), _spec(2)],
+        runtime,
+        stop_tokens={1: {101}},
+    )
+    burst = wrapper.next_burst()
+    assert burst.emissions[0].finish_reason == "stop"
+    assert burst.cohort_detached is True
+
+    wrapper = generation.ContinuousMTPGenerationBatch.create([_spec(3)], runtime)
+    wrapper._states[3].pending_initial = None
+    with pytest.raises(
+        generation.ContinuousMTPGenerationBatchError, match="no pending"
+    ):
+        wrapper._deliver_initial([3])
+
+
+def test_closed_cohort_and_exhausted_prefix_defensive_paths():
+    runtime, _compute, _caches = _runtime()
+    wrapper = generation.ContinuousMTPGenerationBatch.create([_spec(1)], runtime)
+    wrapper.next_burst()
+    detached = wrapper.detach_all()
+    assert wrapper._detach_cohort() is detached
+
+    state = generation._LaneDeliveryState(
+        uid=1,
+        max_tokens=1,
+        stop_tokens=frozenset(),
+        tokens=[_target(1)],
+    )
+    with pytest.raises(
+        generation.ContinuousMTPGenerationBatchError, match="exhausting"
+    ):
+        generation._bounded_prefix(state, [_target(2)])

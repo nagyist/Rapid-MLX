@@ -2491,6 +2491,34 @@ def test_generator_sampled_verify_accepts_matching_draft():
     assert counter.snapshot().accepts == 1
 
 
+def test_generator_sampled_verify_uses_request_local_rng():
+    """Sampled MTP consumes only the request-owned carried key."""
+    from vllm_mlx._seeded_sampler import RequestSeededRNG
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    lane_rng = RequestSeededRNG(42)
+    emitted = list(
+        mtp_generate_step(
+            mx.array([1], dtype=mx.uint32),
+            _MockedQwen35Model([7, 11, 13], [11]),
+            max_tokens=3,
+            temp=0.7,
+            top_p=0.95,
+            disable_auto_k=True,
+            accept_counter=MTPAcceptCounter(),
+            lane_rng=lane_rng,
+        )
+    )
+
+    assert [(token, drafted) for token, _lp, drafted in emitted] == [
+        (7, False),
+        (11, True),
+        (13, False),
+    ]
+    assert lane_rng.draws > 0
+
+
 def test_generator_accepted_draft_reports_target_logprobs(monkeypatch):
     """An accepted proposal exposes p_target, never the drafter's q row."""
     import mlx_lm.sample_utils as sample_utils
