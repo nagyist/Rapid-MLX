@@ -3,7 +3,7 @@
   "started_at": "2026-08-31T20:00:00Z", "completed_at": "2026-08-31T20:08:00Z",
   "collector": {"name": "rapid-mlx-community-bench", "version": "0.14.0"},
   "model": {
-    "schema_version": 1, "identity_strength": "registry_pinned", "pipeline_kind": "video_generation", "display": {"alias": "sample-video"},
+    "schema_version": 1, "identity_strength": "registry_pinned", "pipeline_kind": "video_generation",
     "components": [
       {"component_id": "primary", "role": "primary", "source": {"kind": "huggingface", "repo_id": "example-org/sample-video", "resolved_revision": "3333333333333333333333333333333333333333", "subfolder": "transformer"}, "artifact": {"format": "safetensors", "manifest_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777", "manifest_basis": "huggingface_tree"}, "quantization": {"kind": "weights", "method": "affine", "weight_bits_x2": 8}},
       {"component_id": "text-encoder", "role": "text_encoder", "source": {"kind": "huggingface", "repo_id": "example-org/sample-video", "resolved_revision": "3333333333333333333333333333333333333333", "subfolder": "text_encoder"}, "artifact": {"format": "safetensors", "manifest_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888", "manifest_basis": "huggingface_tree"}, "quantization": {"kind": "none", "base_dtype": "bfloat16"}},

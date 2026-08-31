@@ -10,21 +10,6 @@
     "schema_version": {"const": 1},
     "identity_strength": {"enum": ["registry_pinned", "repository_revision", "local_manifest", "unresolved"]},
     "pipeline_kind": {"enum": ["text_generation", "vision_language", "image_generation", "video_generation"]},
-    "display": {
-      "type": "object", "additionalProperties": false,
-      "properties": {
-        "alias": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^/\\\\\\r\\n]+$"},
-        "name": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^/\\\\\\r\\n]+$"}
-      }
-    },
-    "family": {
-      "type": "object", "additionalProperties": false,
-      "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[a-z0-9][a-z0-9._/-]*$"},
-        "architecture": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9._-]*$"},
-        "parameter_count": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
-      }
-    },
     "components": {
       "type": "array", "minItems": 1, "maxItems": 32,
       "items": {"$ref": "#/$defs/component"},

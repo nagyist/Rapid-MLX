@@ -291,14 +291,21 @@ def test_local_identity_rejects_repo_coordinates_and_requires_content_manifest(
     assert errors
 
 
-def test_model_display_edit_does_not_change_identity_digest() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("display", {"name": "Alice's private finance model"}),
+        ("family", {"id": "alice/private-model"}),
+    ),
+)
+def test_atomic_identity_rejects_client_authored_labels(
+    schemas, registry, field, value
+) -> None:
     example = _load(RUNTIME_ROOT / "examples" / "model-identity.image.example.json")
-    projection = {
-        key: example[key] for key in ("schema_version", "pipeline_kind", "components")
-    }
-    before = _digest(projection)
-    example["display"]["alias"] = "renamed-image-model"
-    assert _digest(projection) == before
+    example[field] = value
+    assert list(
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
+    )
 
 
 def test_component_change_changes_identity_digest() -> None:
