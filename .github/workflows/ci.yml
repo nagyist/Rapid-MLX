@@ -225,7 +225,6 @@ jobs:
     permissions:
       checks: read
       contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -246,39 +245,57 @@ jobs:
           BASE_BRANCH: ${{ github.base_ref || 'main' }}
         run: git fetch --no-tags origin "${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
 
-      # A Mergify speculative PR has a generated body and no source labels, so
-      # the normal label/trailer attestation is unavailable even though every
-      # source head already passed this exact guard before entering the queue.
-      # Reuse that result only for a same-repository candidate created by the
-      # Mergify GitHub App. Bind proof to the second parent of each immutable
-      # `Merge of #N` integration commit, never to the PR's movable current head.
-      # Any malformed lineage or failed exact-head proof fails closed.
-      - name: Verify Mergify source-head attestations
-        id: mergify-attestation
+      # A Mergify speculative PR has no source labels/body, so read its supported
+      # Git-note metadata with the official CLI. Reuse prior guard results only
+      # for a same-repository candidate created by the Mergify GitHub App. Bind
+      # proof to the second parent of each immutable `Merge of #N` integration
+      # commit, never to the PR's movable current head. Any malformed lineage or
+      # failed exact-head proof fails closed.
+      - name: Install Mergify CLI for trusted queue metadata
         if: >-
           github.event.pull_request.user.login == 'mergify[bot]' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           startsWith(github.head_ref, 'mergify/merge-queue/')
+        uses: Mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc  # v1.3.0
+        with:
+          mergify_cli_version: 2026.8.28.1
+
+      - name: Read trusted Mergify queue metadata
+        id: queue-info
+        if: >-
+          github.event.pull_request.user.login == 'mergify[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          startsWith(github.head_ref, 'mergify/merge-queue/')
+        run: mergify ci queue-info
+
+      - name: Verify Mergify source-head attestations
+        id: mergify-attestation
+        if: steps.queue-info.outcome == 'success'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          QUEUE_METADATA: ${{ steps.queue-info.outputs.queue_metadata }}
         with:
           script: |
-            const metadata = (context.payload.pull_request.body || "")
-              .match(/```yaml\s+([\s\S]*?)```/)?.[1];
-            const sourceBlock = metadata
-              ?.match(/^pull_requests:\s*\n((?:[ \t]+.*(?:\n|$))*)/m)?.[1];
-            const sourceNumbers = [...(sourceBlock || "")
-              .matchAll(/^\s*- number:\s*(\d+)\s*$/gm)]
-              .map((match) => Number(match[1]));
-
-            if (sourceNumbers.length === 0) {
+            let metadata;
+            try {
+              metadata = JSON.parse(process.env.QUEUE_METADATA || "");
+            } catch (error) {
+              core.setFailed(`Invalid Mergify queue metadata: ${error.message}`);
+              return;
+            }
+            const sourceNumbers = metadata.pull_requests
+              ?.map((source) => source.number)
+              .filter((number) => Number.isSafeInteger(number) && number > 0);
+            if (!sourceNumbers || sourceNumbers.length === 0 ||
+                sourceNumbers.length !== metadata.pull_requests.length ||
+                new Set(sourceNumbers).size !== sourceNumbers.length) {
               core.setFailed("Trusted Mergify candidate has no source PR metadata");
               return;
             }
 
             const candidateSha = context.payload.pull_request.head.sha;
-            const baseSha = metadata
-              .match(/^checking_base_sha:\s*([0-9a-f]{40})\s*$/m)?.[1];
-            if (!baseSha) {
+            const baseSha = metadata.checking_base_sha;
+            if (!/^[0-9a-f]{40}$/.test(baseSha || "")) {
               core.setFailed("Trusted Mergify candidate has no checking_base_sha");
               return;
             }

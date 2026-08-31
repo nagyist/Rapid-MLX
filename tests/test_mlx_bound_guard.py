@@ -9,6 +9,7 @@ and the attestation check.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -303,23 +304,65 @@ class TestMergifyAttestationWorkflow:
 
     def test_candidate_resolver_is_limited_to_trusted_same_repo_mergify_prs(self):
         job = self._job()
+        setup = next(
+            step
+            for step in job["steps"]
+            if step.get("name") == "Install Mergify CLI for trusted queue metadata"
+        )
+        queue_info = next(
+            step for step in job["steps"] if step.get("id") == "queue-info"
+        )
         resolver = next(
             step for step in job["steps"] if step.get("id") == "mergify-attestation"
         )
 
-        condition = resolver["if"]
+        condition = setup["if"]
         assert "github.event.pull_request.user.login == 'mergify[bot]'" in condition
         assert (
             "github.event.pull_request.head.repo.full_name == github.repository"
             in condition
         )
         assert "startsWith(github.head_ref, 'mergify/merge-queue/')" in condition
+        assert setup["uses"].startswith("Mergifyio/setup-cli@")
+        assert len(setup["uses"].split("@", 1)[1]) == 40
+        assert setup["with"]["mergify_cli_version"] == "2026.8.28.1"
+        assert queue_info["if"] == condition
+        assert queue_info["run"] == "mergify ci queue-info"
+        assert resolver["if"] == "steps.queue-info.outcome == 'success'"
+        assert (
+            resolver["env"]["QUEUE_METADATA"]
+            == "${{ steps.queue-info.outputs.queue_metadata }}"
+        )
         assert resolver["uses"].startswith("actions/github-script@")
         assert job["permissions"] == {
             "checks": "read",
             "contents": "read",
-            "pull-requests": "read",
         }
+
+    def test_real_queue_info_payload_drives_exact_source_lineage(self):
+        metadata = json.loads(
+            (_REPO_ROOT / "tests/fixtures/mergify-queue-info-batch.json").read_text()
+        )
+        assert metadata["checking_base_sha"] == (
+            "68817d9a40db187b53a1a0d76888c0283d03e116"
+        )
+        assert [source["number"] for source in metadata["pull_requests"]] == [
+            2812,
+            2810,
+            2821,
+            2826,
+        ]
+
+        resolver = next(
+            step
+            for step in self._job()["steps"]
+            if step.get("id") == "mergify-attestation"
+        )
+        script = resolver["with"]["script"]
+        assert "JSON.parse(process.env.QUEUE_METADATA" in script
+        assert "metadata.pull_requests" in script
+        assert "metadata.checking_base_sha" in script
+        assert "context.payload.pull_request.body" not in script
 
     def test_candidate_resolver_binds_each_source_head_and_guard_result(self):
         job = self._job()
@@ -328,8 +371,8 @@ class TestMergifyAttestationWorkflow:
         )
         script = resolver["with"]["script"]
 
-        assert "pull_requests:" in script
-        assert "checking_base_sha:" in script
+        assert "metadata.pull_requests" in script
+        assert "metadata.checking_base_sha" in script
         assert '"--first-parent", "--format=%H%x09%s"' in script
         assert "^Merge of #(\\d+)$" in script
         assert '"show", "-s", "--format=%P", mergeSha' in script
