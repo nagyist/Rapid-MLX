@@ -195,13 +195,18 @@ struct MemoryExtractor {
         else { return [] }
 
         return array.compactMap { item in
-            guard let action = item["action"] as? String,
-                  let opContent = item["content"] as? String,
+            let action = item["action"] as? String
+            let opContent = (item["content"] as? String)
+                ?? (item["fact"] as? String)
+                ?? (item["memory"] as? String)
+            guard let opContent,
                   !opContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { return nil }
 
             switch action {
-            case "add":
+            case "add", nil:
+                // Some models omit "action" and just emit {"fact": "..."}.
+                // Treat a bare fact as an implicit add.
                 return .add(opContent)
             case "remove":
                 return .remove(opContent)

@@ -195,3 +195,21 @@ struct MemoryExtractorTests {
         #expect(prompt.contains("Do NOT save one-off"))
     }
 }
+
+extension MemoryExtractorTests {
+    @Test("parseOperations treats bare fact as implicit add")
+    func parseBareFact() {
+        let content = "[{\"fact\": \"User switched from pnpm to bun.\"}]"
+        let operations = MemoryExtractor.parseOperations(from: content)
+        #expect(operations.count == 1)
+        #expect(operations[0] == .add("User switched from pnpm to bun."))
+    }
+
+    @Test("parseOperations treats bare memory as implicit add")
+    func parseBareMemory() {
+        let content = "[{\"memory\": \"Uses Neovim.\"}]"
+        let operations = MemoryExtractor.parseOperations(from: content)
+        #expect(operations.count == 1)
+        #expect(operations[0] == .add("Uses Neovim."))
+    }
+}

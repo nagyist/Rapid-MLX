@@ -1164,6 +1164,7 @@ final class ChatViewModel {
             .filter { $0.role == .user || $0.role == .assistant }
             .map { (role: $0.role.rawValue, content: $0.content) }
         let baseURL = client.baseURL
+        let bearer = server?.activeBearer
 
         Task { [weak self] in
             // The network call hops off MainActor via URLSession's async
@@ -1172,7 +1173,7 @@ final class ChatViewModel {
             guard !Task.isCancelled else { return }
             let extractor = MemoryExtractor(
                 baseURL: baseURL,
-                bearerToken: nil
+                bearerToken: bearer
             )
             do {
                 let operations = try await extractor.extract(
