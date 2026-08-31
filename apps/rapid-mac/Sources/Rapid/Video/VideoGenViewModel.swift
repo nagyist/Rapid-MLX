@@ -101,6 +101,7 @@ final class VideoGenViewModel {
 
     var sizePresets: [String] { capabilities?.sizePresets ?? [] }
     var durationPresets: [Int] { capabilities?.durationPresets(for: size) ?? [] }
+    var referenceMaximumBytes: Int { capabilities?.referenceMaximumBytes ?? 0 }
 
     var isSelectedModelEligible: Bool {
         selectedModel.map(isModelEligible) ?? false

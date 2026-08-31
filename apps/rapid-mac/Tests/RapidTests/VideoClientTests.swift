@@ -24,9 +24,30 @@ struct VideoClientTests {
         ])
         #expect(value.durationPresets(for: "512x512") == [1, 2, 4])
         #expect(value.durationPresets(for: "1280x720") == [1])
+        #expect(value.referenceMaximumBytes == 20 * 1024 * 1024)
         let request = try #require(VideoStubProtocol.requests.first)
         #expect(request.url?.path == "/v1/videos/capabilities")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+    }
+
+    @Test("Duration presets include the shortest server-supported duration")
+    func durationPresetsIncludeServerMinimum() throws {
+        let json = Self.capabilitiesJSON.replacingOccurrences(
+            of: #""minimum":1,"maximum":20,"default":4"#,
+            with: #""minimum":3,"maximum":20,"default":4"#
+        )
+        let value = try JSONDecoder().decode(VideoCapabilities.self, from: Data(json.utf8))
+
+        #expect(value.durationPresets(for: "512x512") == [3, 4])
+    }
+
+    @Test("Reference MIME type is detected from bytes, not the filename")
+    func referenceMIMETypeUsesBytes() throws {
+        let png = try #require(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+
+        #expect(VideoReferenceLoader.mimeType(for: png) == "image/png")
     }
 
     @Test("Create uses the documented multipart fields and reference name")

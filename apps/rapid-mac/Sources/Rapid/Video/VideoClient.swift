@@ -91,11 +91,44 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
             }
         }
 
+        struct InputReferenceLimit: Decodable, Sendable, Hashable {
+            let accepted: Bool
+            let maximumBytes: Int
+            let formats: [String]
+
+            enum CodingKeys: String, CodingKey {
+                case accepted, formats
+                case maximumBytes = "maximum_bytes"
+            }
+        }
+
         let size: SizeLimit
         let seconds: SecondsLimit
         let fps: FPSLimit
         let frames: FramesLimit
         let workload: WorkloadLimit
+        let inputReference: InputReferenceLimit?
+
+        init(
+            size: SizeLimit,
+            seconds: SecondsLimit,
+            fps: FPSLimit,
+            frames: FramesLimit,
+            workload: WorkloadLimit,
+            inputReference: InputReferenceLimit? = nil
+        ) {
+            self.size = size
+            self.seconds = seconds
+            self.fps = fps
+            self.frames = frames
+            self.workload = workload
+            self.inputReference = inputReference
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case size, seconds, fps, frames, workload
+            case inputReference = "input_reference"
+        }
     }
 
     let model: String
@@ -142,14 +175,22 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
     }
 
     func durationPresets(for size: String) -> [Int] {
-        let candidates = [1, 2, 4]
+        let candidates = Set([limits.seconds.minimum, 1, 2, 4]).sorted()
         let values = candidates.filter {
             (limits.seconds.minimum...limits.seconds.maximum).contains($0)
                 && workloadAllows(seconds: $0, size: size)
         }
         if !values.isEmpty { return values }
-        return workloadAllows(seconds: limits.seconds.default, size: size)
+        return (limits.seconds.minimum...limits.seconds.maximum).contains(limits.seconds.default)
+            && workloadAllows(seconds: limits.seconds.default, size: size)
             ? [limits.seconds.default] : []
+    }
+
+    var referenceMaximumBytes: Int {
+        guard let inputReference = limits.inputReference,
+              inputReference.accepted,
+              inputReference.maximumBytes > 0 else { return 0 }
+        return min(inputReference.maximumBytes, VideoClient.maxReferenceBytes)
     }
 
     private func workloadAllows(seconds: Int, size: String) -> Bool {

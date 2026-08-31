@@ -1,5 +1,6 @@
 import AppKit
 import AVKit
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -36,6 +37,17 @@ enum VideoReferenceLoader {
             throw VideoReferenceLoaderError.tooLarge
         }
         return data
+    }
+
+    static func mimeType(for data: Data) -> String? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, options),
+              let identifier = CGImageSourceGetType(source) as String?,
+              let type = UTType(identifier) else { return nil }
+        if type.conforms(to: .jpeg) { return "image/jpeg" }
+        if type.conforms(to: .png) { return "image/png" }
+        if type.conforms(to: .webP) { return "image/webp" }
+        return nil
     }
 }
 
@@ -490,7 +502,7 @@ struct VideoView: View {
         }
         .labelsHidden()
         .frame(maxWidth: 220)
-        .disabled(viewModel.hasActiveJobs || viewModel.isSubmitting || viewModel.isPreparing)
+        .disabled(viewModel.hasLiveActiveJobs || viewModel.isSubmitting || viewModel.isPreparing)
         .accessibilityLabel("Video model")
         .accessibilityIdentifier("Video.ModelMenu")
     }
@@ -516,7 +528,7 @@ struct VideoView: View {
                 }
                 .buttonStyle(.rapidSecondary)
                 .accessibilityIdentifier("Video.Reference.Add")
-                Text("JPEG, PNG, or WebP · up to 20 MB")
+                Text("JPEG, PNG, or WebP · up to \(referenceLimitText)")
                     .font(RapidFont.caption)
                     .foregroundStyle(RapidTheme.textTertiary)
             }
@@ -535,23 +547,28 @@ struct VideoView: View {
         Binding(get: { viewModel.size }, set: { viewModel.selectSize($0) })
     }
 
+    private var referenceLimitText: String {
+        ByteCountFormatter.string(
+            fromByteCount: Int64(viewModel.referenceMaximumBytes),
+            countStyle: .file
+        )
+    }
+
     private func importReference(_ result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let data = try VideoReferenceLoader.load(from: url)
-            guard NSImage(data: data) != nil else {
+            let maximumBytes = viewModel.referenceMaximumBytes
+            let data = try VideoReferenceLoader.load(from: url, maximumBytes: maximumBytes)
+            guard let mime = VideoReferenceLoader.mimeType(for: data) else {
                 viewModel.errorMessage = "Choose a valid JPEG, PNG, or WebP image."
                 return
             }
-            let ext = url.pathExtension.lowercased()
-            let mime = ext == "jpg" || ext == "jpeg" ? "image/jpeg"
-                : ext == "webp" ? "image/webp" : "image/png"
             viewModel.setReference(.init(data: data, fileName: url.lastPathComponent, mimeType: mime))
             viewModel.errorMessage = nil
         } catch VideoReferenceLoaderError.tooLarge {
-            viewModel.errorMessage = "Reference images must be 20 MB or smaller."
+            viewModel.errorMessage = "That reference image exceeds this model's size limit."
         } catch {
             viewModel.errorMessage = "Rapid couldn't open that reference image."
         }
