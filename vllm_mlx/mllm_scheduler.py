@@ -2136,11 +2136,27 @@ class MLLMScheduler:
             return None
         return self.batch_generator.get_prefix_cache_stats()
 
-    def clear_prefix_cache(self, *, reset_stats: bool = True) -> bool:
-        """Clear reusable language-prefix state without unloading weights."""
+    def _clear_prefix_cache_on_worker(self, *, reset_stats: bool = True) -> bool:
+        """Clear reusable language-prefix state on the MLX owner thread."""
         if self.batch_generator is None:
             return False
         return self.batch_generator.clear_prefix_cache(reset_stats=reset_stats)
+
+    def clear_prefix_cache(self, *, reset_stats: bool = True) -> bool:
+        """Clear reusable language-prefix state in inference order.
+
+        Prefix lookup/store runs on the single ``mllm-step`` executor. Queueing
+        the administrative clear on that same executor prevents an in-flight
+        prefill from restoring an entry after the endpoint reports success.
+        Direct construction paths without an executor remain synchronous.
+        """
+        executor = self._step_executor or self._injected_step_executor
+        if executor is None:
+            return self._clear_prefix_cache_on_worker(reset_stats=reset_stats)
+        future = executor.submit(
+            self._clear_prefix_cache_on_worker, reset_stats=reset_stats
+        )
+        return bool(future.result())
 
     def reset(self) -> None:
         """Reset the scheduler state."""
