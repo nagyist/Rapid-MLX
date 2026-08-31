@@ -39,7 +39,6 @@ import asyncio
 import gc
 import logging
 import os
-import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -1641,21 +1640,6 @@ def load_embedding_model(
     cfg.embedding_model_locked = _embedding_model_locked
 
 
-def _prefetch_routing_config(model_name: str) -> None:
-    """Download only checkpoint configuration needed for lane selection.
-
-    This deliberately excludes weight files. Runtime compatibility must be
-    decided before a first-time Desktop/direct launch downloads gigabytes of
-    tensors (#2860).
-    """
-    from huggingface_hub import snapshot_download
-
-    snapshot_download(
-        model_name,
-        allow_patterns=["config.json", "*/config.json"],
-    )
-
-
 def _ensure_routing_config(model_name: str) -> None:
     """Materialize the checkpoint config on disk before the offline routing
     probes run, and FAIL FAST if it cannot be materialized.
@@ -1670,13 +1654,14 @@ def _ensure_routing_config(model_name: str) -> None:
     - Already materialized (cached repo, a prior prefetch, or a local dir that
       ships a config) -> nothing to do; the probe is reliable. Fully offline
       and cheap, so warm starts and the unit suite never trigger a download.
-    - Otherwise fetch only ``config.json`` metadata, then VERIFY it actually
-      landed. If it did not, raise an
+    - Otherwise prefetch via the same canonical mirror/HF fetch the CLI uses,
+      then VERIFY the config actually landed. If it did not, raise an
       actionable error instead of letting the caller route on a guess — a
       silent miss here misroutes a hybrid VLM into the crashing MLLM lane.
 
-    The metadata prefetch is module-level so tests can substitute it to
-    simulate "config appears only after download" without touching weights.
+    A hard disk-space gate (``SystemExit``) from the prefetch is an intentional
+    fail-fast and propagates unchanged. Module-level so tests can substitute
+    the prefetch to simulate "config appears only after download".
     """
     from .model_metadata import read_model_metadata
 
@@ -1693,7 +1678,9 @@ def _ensure_routing_config(model_name: str) -> None:
 
     _prefetch_exc: Exception | None = None
     try:
-        _prefetch_routing_config(model_name)
+        from .cli import _ensure_model_downloaded
+
+        _ensure_model_downloaded(model_name)
     except SystemExit:
         # ``_ensure_model_downloaded`` may exit(1) on a hard disk-space gate —
         # that is an intentional fail-fast; let it propagate.
@@ -1701,13 +1688,6 @@ def _ensure_routing_config(model_name: str) -> None:
     except Exception as _e:  # noqa: BLE001 — preserved below, not swallowed
         _prefetch_exc = _e
         logger.debug("routing-config prefetch raised (will re-verify): %r", _e)
-        # This is the only user-visible event when offline mode prevents even
-        # the config-only fetch. Preserve the Hub's concrete cause instead of
-        # replacing it solely with the generic lane-selection error below.
-        print(
-            f"Routing metadata prefetch failed for {model_name!r}: {_e}",
-            file=sys.stderr,
-        )
 
     # VERIFY the prefetch actually put the config on disk. If it did not, the
     # routing probes would fall back to a guess and could misroute a hybrid VLM
@@ -1734,7 +1714,7 @@ def _ensure_routing_config(model_name: str) -> None:
         logger.warning(
             "routing-config prefetch for %r reported an error even though its "
             "config materialized; the model may be partially downloaded and "
-            "fail during later weight loading. Original error: %r",
+            "fail to load its weights later. Original error: %r",
             model_name,
             _prefetch_exc,
         )
