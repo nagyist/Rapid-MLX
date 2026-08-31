@@ -1763,11 +1763,26 @@ def _prefetch_routing_metadata(model_name: str) -> str:
     explicit_subfolder = catalog_subfolder if model_name != repo_id else None
     subfolder = explicit_subfolder or pulled_variant(repo_id) or catalog_subfolder
     prefix = f"{_escape_variant_glob_literal(subfolder)}/" if subfolder else ""
-    info = call_with_deadline(
-        model_info,
-        _HF_RESOLVE_TIMEOUT_SECONDS,
-        repo_id,
-    )
+    try:
+        info = call_with_deadline(
+            model_info,
+            _HF_RESOLVE_TIMEOUT_SECONDS,
+            repo_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - canonical mirror path owns recovery
+        # A configured R2/custom mirror can be healthy while Hugging Face is
+        # blocked.  Do not let this optional lightweight probe preempt the
+        # canonical downloader's mirror-first recovery path.
+        if os.environ.get(
+            "RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com"
+        ).strip():
+            logger.warning(
+                "Could not prefetch routing metadata from Hugging Face (%s); "
+                "continuing through the configured model mirror.",
+                exc,
+            )
+            return model_name
+        raise
     revision = getattr(info, "sha", None)
     if not revision:
         raise RuntimeError("HuggingFace metadata did not include a revision")

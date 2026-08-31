@@ -426,6 +426,18 @@ def test_routing_metadata_prefetch_preserves_external_local_model(
     assert server._prefetch_routing_metadata("publisher/model") == str(external)
 
 
+def test_routing_metadata_prefetch_defers_to_configured_mirror(monkeypatch):
+    from vllm_mlx import server
+
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.example.test")
+    monkeypatch.setattr(
+        "huggingface_hub.model_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("HF blocked")),
+    )
+
+    assert server._prefetch_routing_metadata("publisher/model") == "publisher/model"
+
+
 def test_routing_metadata_prefetch_reuses_complete_warm_cache(monkeypatch):
     from types import SimpleNamespace
 
