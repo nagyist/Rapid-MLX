@@ -391,6 +391,7 @@ dev = [
     # "install dev, run pytest" workflow contributors have used since
     # day one).
     "pytest>=7.0.0",
+    "referencing>=0.28.4",
     "pytest-asyncio>=0.21.0",
     "prometheus_client>=0.16.0",
     'tomli>=2.0.1; python_version < "3.11"',
