@@ -7,12 +7,40 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm_mlx.spec_decode.mtp.continuous_engine import SelfMTPCachePair
 from vllm_mlx.spec_decode.mtp.ragged_cache import (
     RaggedCacheUnsupportedError,
+    RapidRaggedCacheAdapter,
     install_ragged_cache_rollback,
     preflight_ragged_cache,
     trim_ragged_cache,
 )
+
+
+class MergeableLayerCache:
+    def __init__(self, label, rows=None):
+        self.label = label
+        self.rows = list([label] if rows is None else rows)
+        self.events = []
+
+    @classmethod
+    def merge(cls, caches):
+        merged = cls("merged", [])
+        for cache in caches:
+            merged.rows.extend(cache.rows)
+        return merged
+
+    def extend(self, other):
+        self.events.append(("extend", tuple(other.rows)))
+        self.rows.extend(other.rows)
+
+    def extract(self, index):
+        self.events.append(("extract", index))
+        return type(self)(f"{self.label}:{index}", [self.rows[index]])
+
+    def filter(self, indices):
+        self.events.append(("filter", tuple(indices)))
+        self.rows = [self.rows[index] for index in indices]
 
 
 class Rows:
@@ -379,3 +407,53 @@ def test_supported_cache_tree_applies_after_successful_preflight():
     tree = SimpleNamespace(caches=(first, second))
     assert trim_ragged_cache(tree, [1, 1], verify_size=2) == [1, 1]
     assert first._idx == second._idx == 7
+
+
+def test_transaction_adapter_merge_rollback_extract_and_extend():
+    events = []
+    adapter = RapidRaggedCacheAdapter(
+        preflight=lambda group, drops, **kwargs: events.append(
+            ("preflight", tuple(drops), kwargs)
+        ),
+        trim=lambda group, drops, **kwargs: events.append(
+            ("trim", tuple(drops), kwargs)
+        ),
+    )
+    one = SelfMTPCachePair([MergeableLayerCache("t1")], [MergeableLayerCache("d1")])
+    two = SelfMTPCachePair([MergeableLayerCache("t2")], [MergeableLayerCache("d2")])
+    merged = adapter.attach(None, [one, two])
+    assert merged.target[0].rows == ["t1", "t2"]
+    assert merged.draft[0].rows == ["d1", "d2"]
+
+    adapter.rollback(
+        merged,
+        target_drops=[1, 0],
+        draft_drops=[2, 2],
+        verify_width=3,
+    )
+    assert [event[0] for event in events] == [
+        "preflight",
+        "preflight",
+        "trim",
+        "trim",
+    ]
+    remaining, detached = adapter.detach(merged, [1], [0])
+    assert remaining.target[0].rows == ["t1"]
+    assert detached[0].target[0].rows == ["t2"]
+
+    third = SelfMTPCachePair([MergeableLayerCache("t3")], [MergeableLayerCache("d3")])
+    adapter.attach(remaining, [third])
+    assert remaining.target[0].rows == ["t1", "t3"]
+
+
+@pytest.mark.parametrize("name", ["QuantizedKVCache", "SinkWindowKVCache"])
+def test_transaction_adapter_rejects_unsupported_cache_classes(name):
+    unsupported = type(name, (MergeableLayerCache,), {})
+    pair = SelfMTPCachePair([unsupported("target")], [MergeableLayerCache("draft")])
+    adapter = RapidRaggedCacheAdapter(
+        preflight=lambda *args, **kwargs: None,
+        trim=lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(RaggedCacheUnsupportedError, match="no supported"):
+        adapter.attach(None, [pair])

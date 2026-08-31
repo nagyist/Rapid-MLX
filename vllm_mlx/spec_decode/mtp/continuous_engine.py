@@ -253,6 +253,23 @@ class SelfMTPComputeBackend(Protocol):
         terminal: tuple[bool, ...],
     ) -> None: ...
 
+    def abort(
+        self,
+        lanes: Sequence[SelfMTPLane],
+        caches: SelfMTPCachePair,
+        computation: CycleComputation | None,
+        cause: BaseException | None,
+    ) -> None:
+        """Restore lane and cache state to the pre-proposal boundary.
+
+        This method is the backend half of the transaction contract.  It must
+        be safe after a partially executed ``propose`` and after a failed
+        ``commit``.  Returning certifies that both cache groups and every lane
+        again match the boundary before the proposal began; raising poisons the
+        batch so no retry, detach, or fallback can reuse inconsistent state.
+        """
+        ...
+
     def detach_lane(self, lane: SelfMTPLane, caches: SelfMTPCachePair) -> None: ...
 
 
@@ -298,6 +315,8 @@ class BatchedSelfMTPState:
     membership_epoch: int
     _runtime: ContinuousSelfMTPRuntime = field(repr=False, compare=False)
     proposal_open: bool = False
+    poisoned: bool = False
+    poison_reason: str | None = None
     _open_proposal: SelfMTPCycleResult | None = field(
         default=None, repr=False, compare=False
     )
@@ -311,6 +330,32 @@ def _require_fixed_core(runtime: ContinuousSelfMTPRuntime) -> None:
         raise ContinuousSelfMTPUnsupportedError(
             "missing fixed-membership capability: " + ", ".join(missing)
         )
+
+
+def _require_healthy(batch: BatchedSelfMTPState) -> None:
+    if batch.poisoned:
+        reason = batch.poison_reason or "unknown rollback failure"
+        raise ContinuousSelfMTPError(f"self-MTP batch is poisoned: {reason}")
+
+
+def _abort_backend_transaction(
+    batch: BatchedSelfMTPState,
+    computation: CycleComputation | None,
+    cause: BaseException | None,
+) -> None:
+    """Ask the backend to restore the exact pre-proposal boundary."""
+
+    abort = getattr(batch._runtime.compute, "abort", None)
+    if not callable(abort):
+        batch.poisoned = True
+        batch.poison_reason = "compute backend has no abort surface"
+        raise ContinuousSelfMTPError(batch.poison_reason) from cause
+    try:
+        abort(batch.lanes, batch.caches, computation, cause)
+    except BaseException as abort_error:  # noqa: BLE001 - poison on any failure
+        batch.poisoned = True
+        batch.poison_reason = f"backend abort failed: {abort_error}"
+        raise ContinuousSelfMTPError(batch.poison_reason) from abort_error
 
 
 def supports_dynamic_membership(runtime: ContinuousSelfMTPRuntime) -> bool:
@@ -419,6 +464,8 @@ def attach_self_mtp_lanes(
     joining = list(joining)
     if batch is not None and batch.proposal_open:
         raise ContinuousSelfMTPError("cannot attach while a proposal is open")
+    if batch is not None:
+        _require_healthy(batch)
     if batch is None:
         if not joining:
             raise ValueError("cannot create an empty self-MTP batch")
@@ -513,23 +560,30 @@ def _validate_computation(
 def propose_batched_self_mtp(batch: BatchedSelfMTPState) -> SelfMTPCycleResult:
     """Open one fixed-membership batched draft/verify transaction."""
     _require_fixed_core(batch._runtime)
+    _require_healthy(batch)
     if batch.proposal_open:
         raise ContinuousSelfMTPError("a self-MTP proposal is already open")
     if not batch.lanes:
         raise ValueError("cannot propose on an empty self-MTP batch")
-    computation = batch._runtime.compute.propose(
-        batch.lanes, batch.caches, batch._runtime.forwards
-    )
-    if not isinstance(computation, CycleComputation):
-        raise TypeError("compute.propose must return CycleComputation")
-    _validate_computation(batch, computation)
-    verify_width = max(depth + 1 for depth in computation.draft_depths)
-    batch._runtime.caches.rollback(
-        batch.caches,
-        target_drops=computation.target_drops,
-        draft_drops=computation.draft_drops,
-        verify_width=verify_width,
-    )
+    computation: CycleComputation | None = None
+    try:
+        computation = batch._runtime.compute.propose(
+            batch.lanes, batch.caches, batch._runtime.forwards
+        )
+        if not isinstance(computation, CycleComputation):
+            raise TypeError("compute.propose must return CycleComputation")
+        _validate_computation(batch, computation)
+        verify_width = max(depth + 1 for depth in computation.draft_depths)
+        batch._runtime.caches.rollback(
+            batch.caches,
+            target_drops=computation.target_drops,
+            draft_drops=computation.draft_drops,
+            verify_width=verify_width,
+        )
+    except BaseException as error:  # noqa: BLE001 - transaction includes cancellation
+        _abort_backend_transaction(batch, computation, error)
+        raise
+    assert computation is not None
     proposal = SelfMTPCycleResult(
         membership_epoch=batch.membership_epoch,
         lane_uids=computation.lane_uids,
@@ -553,6 +607,7 @@ def commit_batched_self_mtp(
     terminal: Sequence[bool],
 ) -> None:
     """Commit exactly the delivered prefix of the open proposal."""
+    _require_healthy(batch)
     if not batch.proposal_open or batch._open_proposal is not proposal:
         raise ContinuousSelfMTPError("commit requires the currently open proposal")
     if proposal.membership_epoch != batch.membership_epoch:
@@ -585,21 +640,41 @@ def commit_batched_self_mtp(
             accepted - count + 1 if is_terminal and count <= accepted else 0
         )
 
-    if any(delivery_drops):
-        batch._runtime.caches.rollback(
-            batch.caches,
-            target_drops=delivery_drops,
-            draft_drops=[0] * n,
-            verify_width=max(depth + 1 for depth in proposal.draft_depths),
+    try:
+        if any(delivery_drops):
+            batch._runtime.caches.rollback(
+                batch.caches,
+                target_drops=delivery_drops,
+                draft_drops=[0] * n,
+                verify_width=max(depth + 1 for depth in proposal.draft_depths),
+            )
+        batch._runtime.compute.commit(
+            batch.lanes,
+            proposal._computation,
+            emitted_counts=emitted,
+            terminal=terminal_flags,
         )
-    batch._runtime.compute.commit(
-        batch.lanes,
-        proposal._computation,
-        emitted_counts=emitted,
-        terminal=terminal_flags,
-    )
+    except BaseException as error:  # noqa: BLE001 - transaction includes cancellation
+        _abort_backend_transaction(batch, proposal._computation, error)
+        batch.proposal_open = False
+        batch._open_proposal = None
+        raise
     for lane, count in zip(batch.lanes, emitted):
         lane.ntoks += count
+    batch.proposal_open = False
+    batch._open_proposal = None
+
+
+def abort_batched_self_mtp(
+    batch: BatchedSelfMTPState,
+    proposal: SelfMTPCycleResult,
+) -> None:
+    """Abort the open proposal and restore its pre-proposal boundary."""
+
+    _require_healthy(batch)
+    if not batch.proposal_open or batch._open_proposal is not proposal:
+        raise ContinuousSelfMTPError("abort requires the currently open proposal")
+    _abort_backend_transaction(batch, proposal._computation, None)
     batch.proposal_open = False
     batch._open_proposal = None
 
@@ -609,6 +684,7 @@ def detach_self_mtp_lanes(
     indices: Sequence[int],
 ) -> tuple[BatchedSelfMTPState, list[DetachedSelfMTPLane]]:
     """Detach all lanes at teardown; partial detach requires dynamic support."""
+    _require_healthy(batch)
     if batch.proposal_open:
         raise ContinuousSelfMTPError("cannot detach while a proposal is open")
     requested = [int(index) for index in indices]
@@ -661,6 +737,7 @@ __all__ = [
     "SelfMTPLaneSpec",
     "SelfMTPSampling",
     "attach_self_mtp_lanes",
+    "abort_batched_self_mtp",
     "commit_batched_self_mtp",
     "detach_self_mtp_lanes",
     "prepare_self_mtp_lane",

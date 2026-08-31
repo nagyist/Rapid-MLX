@@ -72,6 +72,9 @@ class _Compute:
             if count:
                 lane.cur = outputs[count - 1].token
 
+    def abort(self, lanes, caches, computation, cause):
+        del lanes, caches, computation, cause
+
     def detach_lane(self, lane, caches):
         self.calls.append(("detach", lane.uid, caches.target, caches.draft))
 
