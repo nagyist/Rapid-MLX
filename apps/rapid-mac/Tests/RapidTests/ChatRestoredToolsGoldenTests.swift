@@ -88,22 +88,27 @@ struct ChatRestoredToolsGoldenTests {
         )
         defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
 
-        // Session 1: research a fresh question through the native tool path.
-        var mounted: (GoldenChatSurface, FixtureSearchRunner)? = Self.makeSurface(over: storeURL)
-        let (first, firstRunner) = try #require(mounted)
-        try await first.sendPrompt("What's a major news story from the last week?")
-        try await first.stage.waitForText("Tool call web_search")
-        try await first.stage.waitForText("Golden technology story")
-        try await first.waitForSendIdle()
-        #expect(firstRunner.executions() == 1)
-        #expect(
-            Self.synthesisRequestsCarryingWebEvidence(in: first.fake) == 1,
-            "the fresh synthesis request did not carry web evidence and tools"
-        )
+        // Session 1: research a fresh question through the native tool
+        // path. Scoped in a nested function so every strong reference to
+        // the first surface dies before the "relaunch" below — a surface
+        // retained past this point would leave two live owners of the same
+        // conversation store and make the restore assertion dishonest.
+        func runFirstSession() async throws {
+            let (first, firstRunner) = Self.makeSurface(over: storeURL)
+            try await first.sendPrompt("What's a major news story from the last week?")
+            try await first.stage.waitForText("Tool call web_search")
+            try await first.stage.waitForText("Golden technology story")
+            try await first.waitForSendIdle()
+            #expect(firstRunner.executions() == 1)
+            #expect(
+                Self.synthesisRequestsCarryingWebEvidence(in: first.fake) == 1,
+                "the fresh synthesis request did not carry web evidence and tools"
+            )
+        }
+        try await runFirstSession()
 
         // "Relaunch": a fresh surface, fake, and registry over the same
         // conversation store.
-        mounted = nil
         let (restored, restoredRunner) = Self.makeSurface(over: storeURL)
         let stage = restored.stage
 

@@ -292,12 +292,21 @@ final class GoldenChatFake: @unchecked Sendable {
     // MARK: - The URLProtocol
 
     final class SSEProtocol: URLProtocol, @unchecked Sendable {
+        /// Registry entries hold the fake weakly: registration happens once
+        /// per `session()` and is never explicitly undone, so a strong entry
+        /// would keep every fake alive for the life of the test process.
+        private final class WeakFake {
+            weak var fake: GoldenChatFake?
+            init(_ fake: GoldenChatFake) { self.fake = fake }
+        }
+
         private static let registryLock = NSLock()
-        nonisolated(unsafe) private static var registry: [Int: GoldenChatFake] = [:]
+        nonisolated(unsafe) private static var registry: [Int: WeakFake] = [:]
 
         static func register(_ fake: GoldenChatFake, port: Int) {
             registryLock.lock()
-            registry[port] = fake
+            registry = registry.filter { $0.value.fake != nil }
+            registry[port] = WeakFake(fake)
             registryLock.unlock()
         }
 
@@ -305,7 +314,7 @@ final class GoldenChatFake: @unchecked Sendable {
             registryLock.lock()
             defer { registryLock.unlock() }
             guard let port else { return nil }
-            return registry[port]
+            return registry[port]?.fake
         }
 
         /// Guards `stopped` AND every client callback: `stopLoading` flips
@@ -395,6 +404,10 @@ final class GoldenChatFake: @unchecked Sendable {
                 if hasTools {
                     let callID = "golden_loop_\(toolResults + 1)"
                     deliver {
+                        // Recorded before `[DONE]` becomes observable so a
+                        // consumer that stops reading at `[DONE]` never
+                        // races the event log.
+                        fake.record(event: .toolLoopCall(id: callID))
                         $0.urlProtocol(
                             self,
                             didLoad: GoldenChatFake.sse(GoldenChatFake.toolCallDelta(id: callID))
@@ -402,9 +415,9 @@ final class GoldenChatFake: @unchecked Sendable {
                         $0.urlProtocol(self, didLoad: Data("data: [DONE]\n\n".utf8))
                         $0.urlProtocolDidFinishLoading(self)
                     }
-                    fake.record(event: .toolLoopCall(id: callID))
                 } else {
                     deliver {
+                        fake.record(event: .toolLoopSynthesis(toolResults: toolResults))
                         $0.urlProtocol(
                             self,
                             didLoad: GoldenChatFake.sse(
@@ -417,7 +430,6 @@ final class GoldenChatFake: @unchecked Sendable {
                         $0.urlProtocol(self, didLoad: Data("data: [DONE]\n\n".utf8))
                         $0.urlProtocolDidFinishLoading(self)
                     }
-                    fake.record(event: .toolLoopSynthesis(toolResults: toolResults))
                 }
                 return
             }
@@ -440,6 +452,7 @@ final class GoldenChatFake: @unchecked Sendable {
                     if !hasResultForTurn {
                         let callID = "golden_search_\(lastUserIndex)"
                         deliver {
+                            fake.record(event: .nativeWebSearchCall(id: callID))
                             $0.urlProtocol(
                                 self,
                                 didLoad: GoldenChatFake.sse(
@@ -449,7 +462,6 @@ final class GoldenChatFake: @unchecked Sendable {
                             $0.urlProtocol(self, didLoad: Data("data: [DONE]\n\n".utf8))
                             $0.urlProtocolDidFinishLoading(self)
                         }
-                        fake.record(event: .nativeWebSearchCall(id: callID))
                         return
                     }
                 }
@@ -482,6 +494,9 @@ final class GoldenChatFake: @unchecked Sendable {
                 if delay > 0 { Thread.sleep(forTimeInterval: delay) }
             }
             guard deliver({
+                // Recorded before `[DONE]` becomes observable so a consumer
+                // that stops reading at `[DONE]` never races the event log.
+                fake.record(event: .chatFinished(chunks: contentEmitted))
                 $0.urlProtocol(
                     self,
                     didLoad: GoldenChatFake.sse(GoldenChatFake.delta(finish: "stop"))
@@ -492,7 +507,6 @@ final class GoldenChatFake: @unchecked Sendable {
                 fake.record(event: .chatCancelled(chunks: contentEmitted))
                 return
             }
-            fake.record(event: .chatFinished(chunks: contentEmitted))
         }
     }
 }
