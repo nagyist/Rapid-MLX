@@ -1438,16 +1438,23 @@ press() {
 # state as its independent proof.  Keep the action generic because Quickstart
 # presents its warning inside onboarding with a different AX identifier.
 confirm_memory_warning_from_tree() {
-    local tree="$1" evidence="$2" identifier="${3:-MemoryWarning.Confirm}"
-    if jq -e --arg id "$identifier" \
-           '.data.ui_elements[]?
-            | select(.identifier == $id and .enabled == true)' \
-           "$tree" >/dev/null; then
-        "$AX_DRIVER" click-center "$APP_PID" "$identifier" > "$evidence" \
-            || die "$identifier was visible but could not be confirmed"
-        log "  confirmed hosted-runner memory warning through $identifier"
-        return 0
+    local tree="$1" evidence="$2"
+    shift 2
+    local identifiers=("$@") identifier
+    if [[ "${#identifiers[@]}" == 0 ]]; then
+        identifiers=(MemoryWarning.Confirm)
     fi
+    for identifier in "${identifiers[@]}"; do
+        if jq -e --arg id "$identifier" \
+               '.data.ui_elements[]?
+                | select(.identifier == $id and .enabled == true)' \
+               "$tree" >/dev/null; then
+            "$AX_DRIVER" click-center "$APP_PID" "$identifier" > "$evidence" \
+                || die "$identifier was visible but could not be confirmed"
+            log "  confirmed hosted-runner memory warning through $identifier"
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -1719,7 +1726,7 @@ baseline() {
 # consecutive dumps. The dump walks the readiness banner before the send
 # button, so a single dump can be a hybrid of two states.
 wait_send_idle() {
-    local destination="$1" attempts="${2:-160}" stable=0 memory_confirmed=0
+    local destination="$1" attempts="${2:-160}" stable=0
     local confirmation_evidence="${destination%.json}-memory-confirm.json"
     for ((i=0; i<attempts; i++)); do
         see_main "$destination"
@@ -1728,10 +1735,8 @@ wait_send_idle() {
         # hosted runner.  Waiting for an idle composer means this journey has
         # already requested the model, so follow the explicit confirmation
         # branch before continuing to wait for independent UI readiness.
-        if [[ "$memory_confirmed" == 0 ]] \
-            && confirm_memory_warning_from_tree \
-                "$destination" "$confirmation_evidence"; then
-            memory_confirmed=1
+        if confirm_memory_warning_from_tree \
+            "$destination" "$confirmation_evidence"; then
             stable=0
             sleep 0.25
             continue
@@ -2012,6 +2017,7 @@ flow_cached_quickstart() {
         ".event == \"server_started\" and .alias == \"$FAKE_ALIAS\"" \
         "cached Quickstart did not start the selected model" \
         cached-quickstart \
+        Quickstart.Memory.Load \
         Quickstart.Memory.LoadAnyway
     jq -e -s 'any(.[]; .event == "server_started" and .alias == "fake-alias"
               and .port >= 49152 and .port <= 65535)' \
@@ -2070,34 +2076,13 @@ flow_cached_curated_tradeup() {
     # The 16 GB fixture owns recommendation policy, not the host's live
     # pressure. A busy hosted runner can therefore (correctly) ask for the
     # existing explicit memory confirmation before it starts this zero-weight
-    # fake. Handle that real branch exactly as start_model does: confirm only
-    # when the enabled warning is present, then still require the independent
-    # sidecar event. Without this, ambient runner pressure made the flow wait
-    # for a start the app was intentionally holding for user consent.
-    local memory_confirmed=0 starter_started=0
-    for _ in {1..240}; do
-        if [[ -s "$OUT/fake-events.jsonl" ]] \
-           && jq -e -s 'any(.[]; .event == "server_started"
-                                   and .alias == "qwen3.5-4b-4bit")' \
-                "$OUT/fake-events.jsonl" >/dev/null 2>&1; then
-            starter_started=1
-            break
-        fi
-        if [[ "$memory_confirmed" == 0 ]]; then
-            see_main "$OUT/starter-after-start.json"
-            if jq -e '.data.ui_elements[]?
-                      | select(.identifier == "Quickstart.Memory.LoadAnyway"
-                               and .enabled == true)' \
-                "$OUT/starter-after-start.json" >/dev/null; then
-                "$AX_DRIVER" click-center "$APP_PID" Quickstart.Memory.LoadAnyway \
-                    > "$OUT/starter-memory-confirm.json"
-                memory_confirmed=1
-                log "  confirmed hosted-runner memory warning for cached starter"
-            fi
-        fi
-        sleep 0.25
-    done
-    [[ "$starter_started" == 1 ]] || die "cached 16 GB starter did not start"
+    # fake. Success still requires the exact independent sidecar event.
+    wait_fake_event_after_start \
+        '.event == "server_started" and .alias == "qwen3.5-4b-4bit"' \
+        "cached 16 GB starter did not start" \
+        starter \
+        Quickstart.Memory.Load \
+        Quickstart.Memory.LoadAnyway
     wait_fake_sidecar_health "qwen3.5-4b-4bit" "cached 16 GB starter"
     # ``server_started`` is emitted before the fake binds HTTP, and a
     # constrained hosted runner can spend more than the default 20-second AX
@@ -4219,23 +4204,19 @@ wait_fake_event() {
 # present, and success still requires the caller's independent event predicate.
 wait_fake_event_after_start() {
     local predicate="$1" what="$2" prefix="$3"
-    local confirmation_identifier="${4:-MemoryWarning.Confirm}"
-    local memory_confirmed=0 i
+    shift 3
+    local confirmation_identifiers=("$@") i
     for ((i=0; i<240; i++)); do
         if [[ -s "$OUT/fake-events.jsonl" ]] \
            && jq -e -s "any(.[]; $predicate)" \
                 "$OUT/fake-events.jsonl" >/dev/null 2>&1; then
             return 0
         fi
-        if [[ "$memory_confirmed" == 0 ]]; then
-            see_main "$OUT/${prefix}-after-start.json"
-            if confirm_memory_warning_from_tree \
-                "$OUT/${prefix}-after-start.json" \
-                "$OUT/${prefix}-memory-confirm.json" \
-                "$confirmation_identifier"; then
-                memory_confirmed=1
-            fi
-        fi
+        see_main "$OUT/${prefix}-after-start.json"
+        confirm_memory_warning_from_tree \
+            "$OUT/${prefix}-after-start.json" \
+            "$OUT/${prefix}-memory-confirm.json" \
+            "${confirmation_identifiers[@]}" || true
         sleep 0.25
     done
     die "$what"

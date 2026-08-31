@@ -207,9 +207,9 @@ def test_cached_curated_tradeup_confirms_the_quickstart_memory_sheet():
     source = HARNESS.read_text()
     flow = source.split("flow_cached_curated_tradeup() {", 1)[1].split("\n}", 1)[0]
 
-    assert 'identifier == "Quickstart.Memory.LoadAnyway"' in flow
-    assert '"$AX_DRIVER" click-center "$APP_PID" Quickstart.Memory.LoadAnyway' in flow
-    assert 'identifier == "MemoryWarning.Confirm"' not in flow
+    assert "wait_fake_event_after_start" in flow
+    assert "Quickstart.Memory.Load" in flow
+    assert "Quickstart.Memory.LoadAnyway" in flow
 
 
 def test_cached_curated_tradeup_waits_for_health_and_bounded_ui_readiness():
@@ -574,7 +574,7 @@ def test_start_model_waits_for_an_interactive_readiness_action():
         'press "$OUT/readiness-start.json" Readiness.Action'
     )
     assert "wait_fake_event_after_start" in helper
-    assert r'and .alias == \"$FAKE_ALIAS\"' in helper
+    assert r"and .alias == \"$FAKE_ALIAS\"" in helper
 
     driver = DRIVER.read_text()
     click = driver.split('case "click-center":', 1)[1].split(
@@ -590,26 +590,26 @@ def test_direct_model_starts_follow_enabled_memory_confirmation_branches():
     confirm = source.split("confirm_memory_warning_from_tree() {", 1)[1].split(
         "\n}", 1
     )[0]
-    assert '.identifier == $id and .enabled == true' in confirm
+    assert ".identifier == $id and .enabled == true" in confirm
     assert 'click-center "$APP_PID" "$identifier"' in confirm
+    assert 'for identifier in "${identifiers[@]}"' in confirm
 
     wait = source.split("wait_fake_event_after_start() {", 1)[1].split("\n}", 1)[0]
     assert 'jq -e -s "any(.[]; $predicate)"' in wait
     assert "confirm_memory_warning_from_tree" in wait
-    assert "memory_confirmed=1" in wait
+    assert "memory_confirmed" not in wait
     assert wait.index("confirm_memory_warning_from_tree") < wait.index('die "$what"')
 
     cached = source.split("flow_cached_quickstart() {", 1)[1].split("\n}", 1)[0]
     assert "wait_fake_event_after_start" in cached
+    assert "Quickstart.Memory.Load" in cached
     assert "Quickstart.Memory.LoadAnyway" in cached
 
     image = source.split("flow_image_generation() {", 1)[1].split("\n}", 1)[0]
     assert "wait_fake_event_after_start" in image
-    assert r'and .alias == \"$FAKE_IMAGE_ALIAS\"' in image
+    assert r"and .alias == \"$FAKE_IMAGE_ALIAS\"" in image
 
-    resident = source.split("flow_resident_load_rejected() {", 1)[1].split(
-        "\n}", 1
-    )[0]
+    resident = source.split("flow_resident_load_rejected() {", 1)[1].split("\n}", 1)[0]
     assert resident.count("wait_fake_event_after_start") == 2
     assert "resident-chat" in resident
     assert "resident-image" in resident
@@ -617,6 +617,86 @@ def test_direct_model_starts_follow_enabled_memory_confirmation_branches():
     audio = source.split("flow_audio_readiness() {", 1)[1].split("\n}", 1)[0]
     assert "wait_fake_event_after_start" in audio
     assert 'and .alias == "fake-qwen3-tts"' in audio
+
+
+def test_memory_confirmation_helper_handles_quickstart_revalidation(tmp_path):
+    """A tight confirmation may return as unsafe after live-memory revalidation."""
+    source = HARNESS.read_text()
+    helper = (
+        "confirm_memory_warning_from_tree() {"
+        + source.split("confirm_memory_warning_from_tree() {", 1)[1].split("\n}", 1)[0]
+        + "\n}"
+    )
+
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$3" >> "$CLICKS"\n'
+        "printf '{\"success\":true}\\n'\n"
+    )
+    driver.chmod(0o755)
+    tight = tmp_path / "tight.json"
+    unsafe = tmp_path / "unsafe.json"
+    tight.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "ui_elements": [
+                        {"identifier": "Quickstart.Memory.Load", "enabled": True}
+                    ]
+                }
+            }
+        )
+    )
+    unsafe.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "ui_elements": [
+                        {
+                            "identifier": "Quickstart.Memory.LoadAnyway",
+                            "enabled": True,
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    evidence = tmp_path / "evidence.json"
+    clicks = tmp_path / "clicks.txt"
+    script = f"""
+set -euo pipefail
+AX_DRIVER="$1"
+APP_PID=42
+export CLICKS="$5"
+log() {{ :; }}
+die() {{ printf '%s\\n' "$*" >&2; exit 1; }}
+{helper}
+confirm_memory_warning_from_tree "$2" "$4" \\
+    Quickstart.Memory.Load Quickstart.Memory.LoadAnyway
+confirm_memory_warning_from_tree "$3" "$4" \\
+    Quickstart.Memory.Load Quickstart.Memory.LoadAnyway
+"""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "confirmation-contract",
+            str(driver),
+            str(tight),
+            str(unsafe),
+            str(evidence),
+            str(clicks),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert clicks.read_text().splitlines() == [
+        "Quickstart.Memory.Load",
+        "Quickstart.Memory.LoadAnyway",
+    ]
 
 
 def test_ready_wait_confirms_memory_warning_after_session_restore():
