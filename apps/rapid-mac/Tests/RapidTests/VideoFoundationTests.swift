@@ -67,4 +67,34 @@ struct VideoFoundationTests {
         #expect(directory.path == "/tmp/rapid-video-test/Library/Application Support/Rapid/VideoArtifacts")
         #expect(ApplicationSupportLocator.videoArtifactsFolderName == "VideoArtifacts")
     }
+
+    @Test("Video memory floor uses physical capacity, not current usage")
+    func videoMemoryFloorUsesPhysicalCapacity() {
+        let gib = UInt64(1) << 30
+        let busy32GBMac = MemoryProbe.Snapshot(
+            totalBytes: 32 * gib,
+            usedBytes: 31 * gib
+        )
+        let idle16GBMac = MemoryProbe.Snapshot(
+            totalBytes: 16 * gib,
+            usedBytes: gib
+        )
+
+        #expect(ServerManager.videoMemoryFloorSatisfied(
+            minimumMemoryGB: 32,
+            snapshot: busy32GBMac
+        ))
+        #expect(!ServerManager.videoMemoryFloorSatisfied(
+            minimumMemoryGB: 32,
+            snapshot: idle16GBMac
+        ))
+        #expect(ServerManager.videoMemoryFloorSatisfied(
+            minimumMemoryGB: nil,
+            snapshot: nil
+        ))
+        #expect(!ServerManager.videoMemoryFloorSatisfied(
+            minimumMemoryGB: 32,
+            snapshot: nil
+        ))
+    }
 }

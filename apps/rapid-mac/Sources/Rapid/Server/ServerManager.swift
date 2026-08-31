@@ -422,6 +422,30 @@ final class ServerManager {
         hfPath: String?,
         minimumMemoryGB: Double?
     ) async -> Bool {
+        let memorySnapshot = memorySnapshotProvider()
+        guard Self.videoMemoryFloorSatisfied(
+            minimumMemoryGB: minimumMemoryGB,
+            snapshot: memorySnapshot
+        ) else {
+            if let minimumMemoryGB,
+               minimumMemoryGB.isFinite,
+               minimumMemoryGB > 0,
+               let memorySnapshot {
+                let totalMemoryGB = Double(memorySnapshot.totalBytes) / Double(1 << 30)
+                appendLogLines([
+                    String(
+                        format: "This video model needs at least %.0f GB of unified memory; this Mac has %.0f GB.",
+                        minimumMemoryGB,
+                        totalMemoryGB
+                    )
+                ])
+            } else {
+                appendLogLines([
+                    "Rapid couldn't verify this video model's minimum memory requirement. Try again."
+                ])
+            }
+            return false
+        }
         let outputDirectory = ApplicationSupportLocator.videoArtifactsDirectory()
         do {
             try FileManager.default.createDirectory(
@@ -437,10 +461,26 @@ final class ServerManager {
         return await ensureServing(
             alias: alias,
             hfPath: hfPath,
-            estimatedMemoryGB: minimumMemoryGB,
+            estimatedMemoryGB: nil,
             residencyEligible: false,
             videoOutputDirectory: outputDirectory.path
         )
+    }
+
+    /// Video catalog metadata describes a whole-machine capacity floor, not
+    /// the model's incremental footprint. Compare it with physical memory in
+    /// isolation so normal app/OS use cannot be charged against the floor;
+    /// ``ensureServing`` retains its separate live-pressure admission check.
+    nonisolated static func videoMemoryFloorSatisfied(
+        minimumMemoryGB: Double?,
+        snapshot: MemoryProbe.Snapshot?
+    ) -> Bool {
+        guard let minimumMemoryGB else { return true }
+        guard minimumMemoryGB.isFinite,
+              minimumMemoryGB > 0,
+              let snapshot else { return false }
+        let totalMemoryGB = Double(snapshot.totalBytes) / Double(1 << 30)
+        return totalMemoryGB >= minimumMemoryGB
     }
 
     func isModelResident(_ alias: String) -> Bool {
