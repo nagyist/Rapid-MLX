@@ -160,12 +160,22 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
 
 
 def test_xcui_runner_can_reserve_its_loopback_listener():
+    project_source = yaml.safe_load(
+        (MAC / "Tests/RapidUITests/project.yml").read_text()
+    )
     project = (
         MAC / "Tests/RapidUITests/RapidUITests.xcodeproj/project.pbxproj"
     ).read_text()
     entitlements_path = MAC / "Tests/RapidUITests/RapidUITests.entitlements"
     entitlements = plistlib.loads(entitlements_path.read_bytes())
 
+    assert "RapidUITests.entitlements" in project_source["fileGroups"]
+    assert (
+        project_source["targets"]["RapidUITests"]["settings"]["base"][
+            "CODE_SIGN_ENTITLEMENTS"
+        ]
+        == "RapidUITests.entitlements"
+    )
     assert project.count("CODE_SIGN_ENTITLEMENTS = RapidUITests.entitlements;") == 2
     assert entitlements == {"com.apple.security.network.server": True}
 

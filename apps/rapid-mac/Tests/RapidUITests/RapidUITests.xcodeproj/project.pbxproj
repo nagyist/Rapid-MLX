@@ -28,6 +28,7 @@
 		132399B0849D8BAAFA1DCC11 /* RapidUITestHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RapidUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3D3511FF388A5B23AA16F8D1 /* ChatAttachmentJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatAttachmentJourneyTests.swift; sourceTree = "<group>"; };
 		7425B296704FF8766ABDBEC3 /* RapidUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RapidUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		956DE8BFE793F597BFBB4385 /* RapidUITests.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RapidUITests.entitlements; sourceTree = "<group>"; };
 		981AB696C88019DDE1FC4C44 /* RapidUITestHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RapidUITestHarness.swift; sourceTree = "<group>"; };
 		C125516144CFDFB692F0EA16 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		CB04F3C22EF0AAABD315027F /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -55,6 +56,7 @@
 		E6A84D31EDC64D755BA80792 = {
 			isa = PBXGroup;
 			children = (
+				956DE8BFE793F597BFBB4385 /* RapidUITests.entitlements */,
 				1B5A8BB0E7AD6E27D95CB510 /* Host */,
 				F27E5155342C1F7C1AFFB341 /* Tests */,
 				0227B5A18E76E11410CE7982 /* Products */,
