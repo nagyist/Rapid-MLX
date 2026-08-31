@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/raullenchai/Rapid-MLX/proto/community-benchmark/v1/machine-observation.schema.json",
+  "$id": "https://github.com/raullenchai/Rapid-MLX/proto/model-runtime/v1/machine-observation.schema.json",
   "title": "Rapid-MLX MachineObservation v1",
   "description": "Privacy-safe hardware profile and volatile before/after conditions for a benchmark. It identifies a shared machine configuration, never a unique physical Mac.",
   "type": "object",

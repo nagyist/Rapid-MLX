@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "rapid-public-prompts",
+  "version": 1,
+  "digest": "sha256:526bd7c56bd256cadeb57a6f5560dd160b30038a7eedea1be052296da2ba697b",
+  "license": "CC0-1.0",
+  "cases": [
+    {"case_id": "t2i-1024-square", "prompt_id": "still-life-composition-v1"},
+    {"case_id": "t2v-480p-81f", "prompt_id": "coastal-camera-motion-v1"}
+  ]
+}
