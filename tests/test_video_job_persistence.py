@@ -233,6 +233,84 @@ def test_restore_rejects_unowned_shapes_and_symlinks(tmp_path: Path) -> None:
     assert video._load_completed_job(linked_dir) is None
 
 
+def test_restore_reads_validated_metadata_descriptor_during_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video.configure_video_jobs(tmp_path / "videos")
+    job = _completed_job("video_" + "4" * 32)
+    _write_completed_job(job)
+    job_dir = video._jobs_root / job.id
+    metadata = job_dir / "job.json"
+    metadata_inode = metadata.stat().st_ino
+    replacement = tmp_path / "oversized.json"
+    replacement.write_bytes(b"{" + b" " * video._MAX_VIDEO_JOB_METADATA_BYTES + b"}")
+    original_fstat = video.os.fstat
+    swapped = False
+
+    def swap_path_after_validation(fd: int):
+        nonlocal swapped
+        opened = original_fstat(fd)
+        if opened.st_ino == metadata_inode and not swapped:
+            swapped = True
+            metadata.unlink()
+            metadata.symlink_to(replacement)
+        return opened
+
+    monkeypatch.setattr(video.os, "fstat", swap_path_after_validation)
+
+    restored = video._load_completed_job(job_dir)
+
+    assert swapped is True
+    assert restored is not None
+    assert restored.prompt == job.prompt
+
+
+def test_restore_rejects_nonregular_metadata(tmp_path: Path) -> None:
+    video.configure_video_jobs(tmp_path / "videos")
+    job_id = "video_" + "3" * 32
+    job_dir = video._jobs_root / job_id
+    job_dir.mkdir()
+    (job_dir / "output.mp4").write_bytes(b"mp4")
+    (job_dir / "job.json").mkdir()
+
+    assert video._load_completed_job(job_dir) is None
+
+
+def test_restore_bounds_metadata_that_grows_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video.configure_video_jobs(tmp_path / "videos")
+    job = _completed_job("video_" + "2" * 32)
+    _write_completed_job(job)
+    job_dir = video._jobs_root / job.id
+    metadata = job_dir / "job.json"
+    metadata_inode = metadata.stat().st_ino
+    original_fstat = video.os.fstat
+    expanded = False
+
+    def expand_after_validation(fd: int):
+        nonlocal expanded
+        opened = original_fstat(fd)
+        if opened.st_ino == metadata_inode and not expanded:
+            expanded = True
+            with metadata.open("ab") as destination:
+                destination.write(b" " * (video._MAX_VIDEO_JOB_METADATA_BYTES + 1))
+        return opened
+
+    monkeypatch.setattr(video.os, "fstat", expand_after_validation)
+
+    assert video._load_completed_job(job_dir) is None
+    assert expanded is True
+
+
+@pytest.mark.asyncio
+async def test_retrieve_missing_video_returns_not_found() -> None:
+    with pytest.raises(video.HTTPException) as exc:
+        await video.retrieve_video("video_" + "1" * 32)
+
+    assert exc.value.status_code == 404
+
+
 def test_restore_scan_failure_is_nonfatal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

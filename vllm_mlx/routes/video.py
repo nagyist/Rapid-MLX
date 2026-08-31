@@ -356,30 +356,45 @@ def _persist_completed_job(job: _VideoJob) -> None:
 
 
 def _load_completed_job(job_dir: Path) -> _VideoJob | None:
-    if (
-        job_dir.is_symlink()
-        or not job_dir.is_dir()
-        or not _VIDEO_ID_RE.fullmatch(job_dir.name)
-    ):
+    if not _VIDEO_ID_RE.fullmatch(job_dir.name):
         return None
-    metadata_path = job_dir / _VIDEO_JOB_METADATA
     output_path = job_dir / "output.mp4"
+    root_fd = job_fd = metadata_fd = output_fd = None
     try:
-        if metadata_path.is_symlink() or output_path.is_symlink():
-            return None
-        metadata_stat = metadata_path.stat()
-        output_stat = output_path.stat()
+        root_fd, job_fd = _open_video_job_directory(job_dir.name)
+        metadata_fd = os.open(
+            _VIDEO_JOB_METADATA,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=job_fd,
+        )
+        metadata_stat = os.fstat(metadata_fd)
         if (
-            not metadata_path.is_file()
+            not stat.S_ISREG(metadata_stat.st_mode)
             or metadata_stat.st_size > _MAX_VIDEO_JOB_METADATA_BYTES
-            or not output_path.is_file()
-            or output_stat.st_size <= 0
         ):
             return None
-        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+        with os.fdopen(metadata_fd, "rb") as metadata_source:
+            metadata_fd = None
+            raw_metadata = metadata_source.read(_MAX_VIDEO_JOB_METADATA_BYTES + 1)
+        if len(raw_metadata) > _MAX_VIDEO_JOB_METADATA_BYTES:
+            return None
+        value = json.loads(raw_metadata.decode("utf-8"))
+        output_fd = _open_video_output(job_fd)
     except (OSError, UnicodeError, json.JSONDecodeError):
         logger.warning("Ignoring unreadable video job record: %s", job_dir.name)
         return None
+    finally:
+        if output_fd is not None:
+            os.close(output_fd)
+        if metadata_fd is not None:
+            os.close(metadata_fd)
+        if job_fd is not None:
+            os.close(job_fd)
+        if root_fd is not None:
+            os.close(root_fd)
 
     if not isinstance(value, dict):
         return None
