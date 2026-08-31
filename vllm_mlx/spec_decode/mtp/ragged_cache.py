@@ -593,13 +593,15 @@ class RapidRaggedCacheAdapter:
         incoming_target, incoming_draft = _cache_pair(incoming)
         if len(target) != len(incoming_target) or len(draft) != len(incoming_draft):
             raise ValueError("cache layer widths differ during extend")
-        operations = list(zip(target, incoming_target)) + list(
-            zip(draft, incoming_draft)
+        # Build complete replacement groups before publishing either pointer.
+        # ``merge`` returns new cache objects; the live pair is untouched if a
+        # later target/draft layer allocation or shape check raises.
+        replacement = SelfMTPCachePair(
+            target=self._merge([target, incoming_target], "target"),
+            draft=self._merge([draft, incoming_draft], "draft"),
         )
-        if any(not callable(getattr(cache, "extend", None)) for cache, _ in operations):
-            raise ContinuousSelfMTPUnsupportedError("cache has no extend surface")
-        for cache, other in operations:
-            cache.extend(other)
+        current.target = replacement.target
+        current.draft = replacement.draft
         return current
 
     def rollback(
@@ -634,10 +636,7 @@ class RapidRaggedCacheAdapter:
         all_caches = target + draft
         if any(not callable(getattr(cache, "extract", None)) for cache in all_caches):
             raise ContinuousSelfMTPUnsupportedError("cache has no extract surface")
-        if keep_indices and any(
-            not callable(getattr(cache, "filter", None)) for cache in all_caches
-        ):
-            raise ContinuousSelfMTPUnsupportedError("cache has no filter surface")
+
         detached = [
             SelfMTPCachePair(
                 target=[cache.extract(index) for cache in target],
@@ -645,9 +644,32 @@ class RapidRaggedCacheAdapter:
             )
             for index in indices
         ]
+
         if keep_indices:
-            for cache in all_caches:
-                cache.filter(keep_indices)
+
+            def select(group: list[Any], name: str) -> list[Any]:
+                selected: list[Any] = []
+                for cache in group:
+                    rows = [cache.extract(index) for index in keep_indices]
+                    if len(rows) == 1:
+                        selected.append(rows[0])
+                        continue
+                    merge = getattr(type(cache), "merge", None)
+                    if not callable(merge):
+                        raise ContinuousSelfMTPUnsupportedError(
+                            f"{name} cache {type(cache).__name__} has no merge surface"
+                        )
+                    selected.append(merge(rows))
+                return selected
+
+            # As with attach, publish the replacement only after every layer
+            # in both cache groups was constructed successfully.
+            replacement = SelfMTPCachePair(
+                target=select(target, "target"),
+                draft=select(draft, "draft"),
+            )
+            caches.target = replacement.target
+            caches.draft = replacement.draft
             remaining = caches
         else:
             remaining = SelfMTPCachePair(target=[], draft=[])

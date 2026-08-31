@@ -457,3 +457,84 @@ def test_transaction_adapter_rejects_unsupported_cache_classes(name):
 
     with pytest.raises(RaggedCacheUnsupportedError, match="no supported"):
         adapter.attach(None, [pair])
+
+
+def test_transaction_adapter_attach_failure_leaves_live_pair_unchanged():
+    class FailingReplacementMerge(MergeableLayerCache):
+        @classmethod
+        def merge(cls, caches):
+            if len(caches) > 1:
+                raise MemoryError("replacement allocation failed")
+            return super().merge(caches)
+
+    adapter = RapidRaggedCacheAdapter(
+        preflight=lambda *args, **kwargs: None,
+        trim=lambda *args, **kwargs: None,
+    )
+    current = SelfMTPCachePair(
+        target=[
+            MergeableLayerCache("t-live"),
+            FailingReplacementMerge("t-fail"),
+        ],
+        draft=[
+            MergeableLayerCache("d-live"),
+            FailingReplacementMerge("d-fail"),
+        ],
+    )
+    joining = SelfMTPCachePair(
+        target=[
+            MergeableLayerCache("t-new"),
+            FailingReplacementMerge("t-new-fail"),
+        ],
+        draft=[
+            MergeableLayerCache("d-new"),
+            FailingReplacementMerge("d-new-fail"),
+        ],
+    )
+    original_target = current.target
+    original_draft = current.draft
+
+    with pytest.raises(MemoryError, match="replacement allocation failed"):
+        adapter.attach(current, [joining])
+
+    assert current.target is original_target
+    assert current.draft is original_draft
+    assert [cache.rows for cache in current.target] == [["t-live"], ["t-fail"]]
+    assert [cache.rows for cache in current.draft] == [["d-live"], ["d-fail"]]
+
+
+def test_transaction_adapter_detach_failure_leaves_live_pair_unchanged():
+    class FailingExtract(MergeableLayerCache):
+        def extract(self, index):
+            raise MemoryError(f"extract {index} failed")
+
+    adapter = RapidRaggedCacheAdapter(
+        preflight=lambda *args, **kwargs: None,
+        trim=lambda *args, **kwargs: None,
+    )
+    current = SelfMTPCachePair(
+        target=[
+            MergeableLayerCache("target", ["t0", "t1"]),
+            FailingExtract("target-fail", ["tf0", "tf1"]),
+        ],
+        draft=[
+            MergeableLayerCache("draft", ["d0", "d1"]),
+            MergeableLayerCache("draft-2", ["d20", "d21"]),
+        ],
+    )
+    original_target = current.target
+    original_draft = current.draft
+
+    with pytest.raises(MemoryError, match="extract 1 failed"):
+        adapter.detach(current, [1], [0])
+
+    assert current.target is original_target
+    assert current.draft is original_draft
+    assert [cache.rows for cache in current.target] == [
+        ["t0", "t1"],
+        ["tf0", "tf1"],
+    ]
+    assert [cache.rows for cache in current.draft] == [
+        ["d0", "d1"],
+        ["d20", "d21"],
+    ]
