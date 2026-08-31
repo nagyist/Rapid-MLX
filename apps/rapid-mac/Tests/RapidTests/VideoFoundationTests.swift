@@ -88,7 +88,7 @@ struct VideoFoundationTests {
             minimumMemoryGB: 32,
             snapshot: idle16GBMac
         ))
-        #expect(ServerManager.videoMemoryFloorSatisfied(
+        #expect(!ServerManager.videoMemoryFloorSatisfied(
             minimumMemoryGB: nil,
             snapshot: nil
         ))

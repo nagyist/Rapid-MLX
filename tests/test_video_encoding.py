@@ -32,10 +32,11 @@ def test_encode_streams_frames_and_atomically_replaces_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     created = {}
+    stdin_closed = threading.Event()
 
     class CaptureBytesIO(io.BytesIO):
         def close(self) -> None:
-            pass
+            stdin_closed.set()
 
     class FakeProcess:
         def __init__(self, command, **_kwargs):
@@ -46,6 +47,7 @@ def test_encode_streams_frames_and_atomically_replaces_output(
 
         def wait(self, timeout=None):
             created["timeout"] = timeout
+            assert stdin_closed.wait(timeout=1), "encoder input was not closed"
             created["bytes"] = self._stdin.getvalue()
             Path(created["command"][-1]).write_bytes(b"mp4")
             self.returncode = 0

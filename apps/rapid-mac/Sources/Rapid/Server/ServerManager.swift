@@ -475,8 +475,8 @@ final class ServerManager {
         minimumMemoryGB: Double?,
         snapshot: MemoryProbe.Snapshot?
     ) -> Bool {
-        guard let minimumMemoryGB else { return true }
-        guard minimumMemoryGB.isFinite,
+        guard let minimumMemoryGB,
+              minimumMemoryGB.isFinite,
               minimumMemoryGB > 0,
               let snapshot else { return false }
         let totalMemoryGB = Double(snapshot.totalBytes) / Double(1 << 30)
