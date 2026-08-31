@@ -1786,14 +1786,26 @@ def _prefetch_routing_metadata(model_name: str) -> str:
     revision = getattr(info, "sha", None)
     if not revision:
         raise RuntimeError("HuggingFace metadata did not include a revision")
-    snapshot = snapshot_download(
-        repo_id,
-        revision=revision,
-        allow_patterns=[
-            f"{prefix}config.json",
-            f"{prefix}model.safetensors.index.json",
-        ],
-    )
+    try:
+        snapshot = snapshot_download(
+            repo_id,
+            revision=revision,
+            allow_patterns=[
+                f"{prefix}config.json",
+                f"{prefix}model.safetensors.index.json",
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 - mirror owns recovery, as above
+        if os.environ.get(
+            "RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com"
+        ).strip():
+            logger.warning(
+                "Could not download routing metadata from Hugging Face (%s); "
+                "continuing through the configured model mirror.",
+                exc,
+            )
+            return model_name
+        raise
     return str(Path(snapshot) / subfolder) if subfolder else str(snapshot)
 
 

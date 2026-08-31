@@ -438,6 +438,23 @@ def test_routing_metadata_prefetch_defers_to_configured_mirror(monkeypatch):
     assert server._prefetch_routing_metadata("publisher/model") == "publisher/model"
 
 
+def test_routing_metadata_download_defers_to_configured_mirror(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx import server
+
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.example.test")
+    monkeypatch.setattr(
+        "huggingface_hub.model_info", lambda _repo: SimpleNamespace(sha="abc123")
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("CDN blocked")),
+    )
+
+    assert server._prefetch_routing_metadata("publisher/model") == "publisher/model"
+
+
 def test_routing_metadata_prefetch_reuses_complete_warm_cache(monkeypatch):
     from types import SimpleNamespace
 
