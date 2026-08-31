@@ -468,8 +468,12 @@ def start_video_jobs() -> None:
     restored = _restore_completed_jobs() if _jobs_are_persistent else []
     with _jobs_lock:
         _accepting_jobs = True
-        for job in restored:
-            _jobs.setdefault(job.id, job)
+        if _jobs_are_persistent:
+            # A lifespan restart must reflect the validated disk snapshot, not
+            # merge it with stale failed/partial entries or artifacts removed
+            # while the server was stopped.
+            _jobs.clear()
+            _jobs.update((job.id, job) for job in restored)
 
 
 async def shutdown_video_jobs(timeout: float = 30.0) -> None:

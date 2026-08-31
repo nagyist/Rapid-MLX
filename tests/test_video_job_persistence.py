@@ -311,6 +311,45 @@ async def test_retrieve_missing_video_returns_not_found() -> None:
     assert exc.value.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_download_rejects_noncompleted_video() -> None:
+    job = video._VideoJob(
+        id="video_" + "0" * 32,
+        model="ltx-2.3-mlx-q4",
+        prompt="Not finished",
+        seconds="1",
+        size="512x512",
+        status="in_progress",
+        created_at=1,
+    )
+    video._jobs[job.id] = job
+
+    with pytest.raises(video.HTTPException) as exc:
+        await video.retrieve_video_content(job.id)
+
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_download_closes_output_descriptor_when_wrapping_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video.configure_video_jobs(tmp_path / "videos")
+    job = _completed_job("video_" + "d" * 32)
+    _write_completed_job(job)
+    video.start_video_jobs()
+
+    def fail_fdopen(fd: int, mode: str):
+        raise OSError("cannot wrap descriptor")
+
+    monkeypatch.setattr(video.os, "fdopen", fail_fdopen)
+
+    with pytest.raises(video.HTTPException) as exc:
+        await video.retrieve_video_content(job.id)
+
+    assert exc.value.status_code == 410
+
+
 def test_restore_scan_failure_is_nonfatal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -336,6 +375,36 @@ def test_restore_enforces_existing_hundred_job_retention(tmp_path: Path) -> None
     assert len(video._jobs) == video._MAX_JOBS
     assert oldest_id not in video._jobs
     assert not (store / oldest_id).exists()
+
+
+def test_same_process_restart_rebuilds_registry_from_disk(tmp_path: Path) -> None:
+    store = tmp_path / "videos"
+    video.configure_video_jobs(store)
+    retained = _completed_job("video_" + "a" * 32, created_at=2)
+    removed = _completed_job("video_" + "b" * 32, created_at=1)
+    _write_completed_job(retained)
+    _write_completed_job(removed)
+    video.start_video_jobs()
+    assert set(video._jobs) == {retained.id, removed.id}
+
+    # Model a stopped server whose operator removed one artifact, while stale
+    # failed state remains in this process from the previous lifespan.
+    (store / removed.id / "job.json").unlink()
+    failed = video._VideoJob(
+        id="video_" + "c" * 32,
+        model="ltx-2.3-mlx-q4",
+        prompt="Stale failed job",
+        seconds="1",
+        size="512x512",
+        status="failed",
+        created_at=3,
+        generation_finished=True,
+    )
+    video._jobs[failed.id] = failed
+
+    video.start_video_jobs()
+
+    assert set(video._jobs) == {retained.id}
 
 
 def test_failed_metadata_replace_leaves_no_partial_manifest(
