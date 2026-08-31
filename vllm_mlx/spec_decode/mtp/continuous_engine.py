@@ -54,6 +54,7 @@ class ContinuousSelfMTPCapabilities:
     confirmed_target_forward: bool = False
     ragged_rollback: bool = False
     atomic_cache_commit: bool = False
+    per_lane_rng: bool = False
     transformed_sampling: bool = False
     logits_processors_exact: bool = False
     dynamic_membership: bool = False
@@ -358,10 +359,15 @@ def _require_sampling(
         raise ContinuousSelfMTPUnsupportedError(
             "XTC is not supported by the exact continuous self-MTP verifier"
         )
-    if sampling.temperature > 0 and capabilities.transformed_sampling is not True:
-        raise ContinuousSelfMTPUnsupportedError(
-            "transformed sampling lacks exact-verification attestation"
-        )
+    if sampling.temperature > 0:
+        if capabilities.per_lane_rng is not True:
+            raise ContinuousSelfMTPUnsupportedError(
+                "transformed sampling lacks per-lane RNG attestation"
+            )
+        if capabilities.transformed_sampling is not True:
+            raise ContinuousSelfMTPUnsupportedError(
+                "transformed sampling lacks exact-verification attestation"
+            )
     if (
         sampling.has_logits_processors
         and capabilities.logits_processors_exact is not True

@@ -460,6 +460,10 @@ class ContinuousMTPGenerationBatch:
         for uid in pending:
             state = self._states[uid]
             token = state.pending_initial
+            if token is None:
+                raise ContinuousMTPGenerationBatchError(
+                    f"lane {uid} has no pending initial token"
+                )
             state.pending_initial = None
             state.tokens.append(token)
             if token.token in state.stop_tokens:

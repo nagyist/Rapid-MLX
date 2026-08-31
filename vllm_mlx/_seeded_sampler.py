@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from typing import Any
 
 import mlx.core as mx
 
@@ -171,8 +172,9 @@ def make_seeded_sampler(
         def greedy(logprobs: mx.array) -> mx.array:
             return mx.argmax(logprobs, axis=-1)
 
-        greedy.lane_rng = None
-        greedy.request_seeded = True
+        greedy_with_state: Any = greedy
+        greedy_with_state.lane_rng = None
+        greedy_with_state.request_seeded = True
         return greedy
 
     # ``temperature == 0`` is already handled by the greedy short-circuit
@@ -384,7 +386,8 @@ def make_seeded_sampler(
     # scheduler-owned generation thread. Expose the carried key object so a
     # B=1 self-MTP request continues after the priming draw rather than
     # re-deriving the public seed and replaying draw zero.
-    sampler.lane_rng = lane_rng
-    sampler.request_seeded = True
+    sampler_with_state: Any = sampler
+    sampler_with_state.lane_rng = lane_rng
+    sampler_with_state.request_seeded = True
 
     return sampler

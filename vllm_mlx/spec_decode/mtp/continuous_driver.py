@@ -292,8 +292,10 @@ class ContinuousMTPDriver:
             item = queue.popleft()
             final_for_lane = not queue
             package = self._held_detaches.get(uid) if final_for_lane else None
-            finishing = package is not None and package.terminal
-            if item.finish_reason is not None and not finishing:
+            finishing_package = (
+                package if package is not None and package.terminal else None
+            )
+            if item.finish_reason is not None and finishing_package is None:
                 raise ContinuousMTPDriverError(
                     f"terminal lane {uid} has no retained detach package"
                 )
@@ -302,13 +304,28 @@ class ContinuousMTPDriver:
                     uid=uid,
                     token=item.token,
                     logprobs=item.logprobs,
-                    finish_reason=item.finish_reason if finishing else None,
-                    prompt_cache=package.target_cache if finishing else None,
-                    all_tokens=list(package.token_ids) if finishing else None,
+                    finish_reason=(
+                        item.finish_reason if finishing_package is not None else None
+                    ),
+                    prompt_cache=(
+                        finishing_package.target_cache
+                        if finishing_package is not None
+                        else None
+                    ),
+                    all_tokens=(
+                        list(finishing_package.token_ids)
+                        if finishing_package is not None
+                        else None
+                    ),
                     from_draft=item.from_draft,
-                    mtp_state=(package.draft_cache, package.lane.seed_hidden)
-                    if finishing
-                    else None,
+                    mtp_state=(
+                        (
+                            finishing_package.draft_cache,
+                            finishing_package.lane.seed_hidden,
+                        )
+                        if finishing_package is not None
+                        else None
+                    ),
                 )
             )
             if final_for_lane:

@@ -25,7 +25,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, TypeGuard
 
 PREPARED_STATE_SCHEMA_VERSION = 1
 DEFAULT_MIN_USEFUL_PREFIX_TOKENS = 64
@@ -75,11 +75,13 @@ class PreparedStateIdentity:
         for name, value in required.items():
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
-        for name, value in (
+        for name, optional_value in (
             ("adapter_id", self.adapter_id),
             ("tokenizer_fingerprint", self.tokenizer_fingerprint),
         ):
-            if value is not None and (not isinstance(value, str) or not value.strip()):
+            if optional_value is not None and (
+                not isinstance(optional_value, str) or not optional_value.strip()
+            ):
                 raise ValueError(f"{name} must be None or a non-empty string")
 
     @classmethod
@@ -325,7 +327,7 @@ def _validated_count(value: int, name: str) -> int:
     return value
 
 
-def _metadata_is_well_formed(metadata: Any) -> bool:
+def _metadata_is_well_formed(metadata: Any) -> TypeGuard[PreparedStateMetadata]:
     if not isinstance(metadata, PreparedStateMetadata):
         return False
     if metadata.schema_version != PREPARED_STATE_SCHEMA_VERSION:

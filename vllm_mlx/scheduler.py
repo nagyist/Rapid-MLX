@@ -7091,7 +7091,8 @@ class Scheduler:
             # Preserve request-local mutable sampler state across mlx-lm's
             # PromptProcessingBatch -> GenerationBatch seam. Vendored B=1
             # self-MTP reads this exact object after the priming draw.
-            request._request_sampler = request_sampler
+            request_with_sampler: Any = request
+            request_with_sampler._request_sampler = request_sampler
 
             # Issue #427: split the insert at prefix_boundary so the
             # per-message cache snapshot can fire after the prefix
