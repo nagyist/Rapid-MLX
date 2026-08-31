@@ -22,6 +22,10 @@
   },
   "allOf": [
     {"if": {"properties": {"outcome": {"properties": {"status": {"const": "completed"}}, "required": ["status"]}}}, "then": {"required": ["measurements"]}},
+    {"if": {"properties": {"model": {"properties": {"pipeline_kind": {"const": "text_generation"}}, "required": ["pipeline_kind"]}}}, "then": {"properties": {"execution": {"properties": {"task_type": {"const": "text_generation"}}}, "workload": {"properties": {"task_type": {"const": "text_generation"}}}}}},
+    {"if": {"properties": {"model": {"properties": {"pipeline_kind": {"const": "vision_language"}}, "required": ["pipeline_kind"]}}}, "then": {"properties": {"execution": {"properties": {"task_type": {"const": "vision_language"}}}, "workload": {"properties": {"task_type": {"const": "vision_language"}}}}}},
+    {"if": {"properties": {"model": {"properties": {"pipeline_kind": {"const": "image_generation"}}, "required": ["pipeline_kind"]}}}, "then": {"properties": {"execution": {"properties": {"task_type": {"const": "image_generation"}}}, "workload": {"properties": {"task_type": {"const": "image_generation"}}}}}},
+    {"if": {"properties": {"model": {"properties": {"pipeline_kind": {"const": "video_generation"}}, "required": ["pipeline_kind"]}}}, "then": {"properties": {"execution": {"properties": {"task_type": {"const": "video_generation"}}}, "workload": {"properties": {"task_type": {"const": "video_generation"}}}}}},
     {"if": {"properties": {"workload": {"properties": {"task_type": {"const": "text_generation"}}}}}, "then": {"properties": {"measurements": {"items": {"$ref": "#/$defs/textMeasurement"}}}}},
     {"if": {"properties": {"workload": {"properties": {"task_type": {"const": "vision_language"}}}}}, "then": {"properties": {"measurements": {"items": {"$ref": "#/$defs/vlmMeasurement"}}}}},
     {"if": {"properties": {"workload": {"properties": {"task_type": {"const": "image_generation"}}}}}, "then": {"properties": {"measurements": {"items": {"$ref": "#/$defs/imageMeasurement"}}}}},
