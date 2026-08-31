@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -191,7 +192,7 @@ def _vision_install_hint() -> str:
             "Reinstall Rapid-MLX Desktop.app to restore its validated vision "
             "runtime. Do not pip-install into the code-signed bundled sidecar."
         )
-    python = sys.executable
+    python = shlex.quote(sys.executable)
     return (
         "Install the validated vision stack into this runtime with:\n"
         f"    {python} -m pip install --upgrade --force-reinstall "
@@ -357,7 +358,7 @@ def _vlm_broken_install_hint(detail: str | None) -> str:
             return hint
         return (
             hint + "\nAlternatively, repair just the missing dependency in this "
-            f"runtime:\n    {sys.executable} -m pip install {pip_name}"
+            f"runtime:\n    {shlex.quote(sys.executable)} -m pip install {pip_name}"
         )
     suffix = f" ({detail})" if detail else ""
     return (

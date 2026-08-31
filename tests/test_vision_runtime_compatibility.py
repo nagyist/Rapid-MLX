@@ -98,3 +98,16 @@ def test_managed_runtime_missing_dependency_never_recommends_pip(monkeypatch):
 
     assert "Reinstall Rapid-MLX Desktop.app" in hint
     assert "pip install" not in hint
+
+
+def test_standalone_repair_commands_shell_quote_python_path(monkeypatch):
+    monkeypatch.setattr(
+        mllm.sys, "executable", "/Users/alice/My Runtime/bin/python's preview"
+    )
+
+    install_hint = mllm._vision_install_hint()
+    dependency_hint = mllm._vlm_broken_install_hint("PIL")
+
+    quoted = "'/Users/alice/My Runtime/bin/python'\"'\"'s preview'"
+    assert f"{quoted} -m pip" in install_hint
+    assert f"{quoted} -m pip" in dependency_hint
