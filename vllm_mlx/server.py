@@ -1782,6 +1782,57 @@ def _prefetch_routing_metadata(model_name: str) -> str:
     return str(Path(snapshot) / subfolder) if subfolder else str(snapshot)
 
 
+def _preflight_vision_runtime(
+    model_name: str,
+    *,
+    force_mllm: bool = False,
+    force_text: bool = False,
+    requested_spec_decode: str = "none",
+) -> None:
+    """Reject a proven vision lane before materializing model weights."""
+    if force_text or requested_spec_decode not in (None, "none"):
+        return
+
+    from .model_aliases import resolve_model, resolve_profile
+
+    model_path = resolve_model(model_name)
+    profile = resolve_profile(model_name) or resolve_profile(model_path)
+    if force_mllm:
+        preflight_path = model_path
+        has_vision_weights = True
+    else:
+        preflight_path = _prefetch_routing_metadata(model_name)
+        from .model_metadata import (
+            checkpoint_has_multimodal_weights,
+            read_model_metadata,
+        )
+
+        metadata = read_model_metadata(preflight_path)
+        snapshot_dir = getattr(metadata, "snapshot_dir", None)
+        has_vision_weights = bool(
+            metadata is not None
+            and checkpoint_has_multimodal_weights(
+                Path(snapshot_dir) if snapshot_dir is not None else None,
+                getattr(metadata, "config", None),
+            )
+            is True
+        )
+    if not has_vision_weights:
+        return
+    decision = resolve_serving_lane_decision(
+        preflight_path,
+        force_mllm=force_mllm,
+        vision_min_memory_gb=(
+            profile.vision_min_memory_gb if profile is not None else None
+        ),
+        requested_spec_decode=requested_spec_decode,
+    )
+    if getattr(decision, "is_mllm", False):
+        from .models.mllm import _require_mlx_vlm
+
+        _require_mlx_vlm(preflight_path)
+
+
 def _resolve_serving_checkpoint(
     model_name: str,
     *,
@@ -1800,55 +1851,17 @@ def _resolve_serving_checkpoint(
     from .utils.tokenizer import _resolve_subfolder_checkpoint
 
     model_path = resolve_model(model_name)
-    profile = resolve_profile(model_name) or resolve_profile(model_path)
     # Desktop/direct callers have no CLI boot guard. Fetch only lightweight
     # routing evidence, decide the provisional lane, and reject an unusable
     # vision runtime before the subfolder resolver or normal prefetch can pull
     # model tensors. The final decision below is repeated after the complete
     # checkpoint materializes so single-file weight evidence remains exact.
-    if not force_text and requested_spec_decode in (None, "none"):
-        if force_mllm:
-            preflight_path = model_path
-            preflight_has_vision_weights = True
-        else:
-            preflight_path = _prefetch_routing_metadata(model_name)
-            # Config-only evidence is not enough to reject startup: a VLM-style
-            # config can wrap a text-only single-file fork.  Only a readable
-            # tensor index/header that positively proves multimodal weights is
-            # safe to act on before the complete checkpoint is materialized.
-            from .model_metadata import (
-                checkpoint_has_multimodal_weights,
-                read_model_metadata,
-            )
-
-            preflight_metadata = read_model_metadata(preflight_path)
-            preflight_has_vision_weights = bool(
-                preflight_metadata is not None
-                and checkpoint_has_multimodal_weights(
-                    (
-                        Path(preflight_metadata.snapshot_dir)
-                        if preflight_metadata.snapshot_dir is not None
-                        else None
-                    ),
-                    getattr(preflight_metadata, "config", None),
-                )
-                is True
-            )
-        if preflight_has_vision_weights:
-            preflight_decision = resolve_serving_lane_decision(
-                preflight_path,
-                force_mllm=force_mllm,
-                vision_min_memory_gb=(
-                    profile.vision_min_memory_gb if profile is not None else None
-                ),
-                requested_spec_decode=requested_spec_decode,
-            )
-        if preflight_has_vision_weights and getattr(
-            preflight_decision, "is_mllm", False
-        ):
-            from .models.mllm import _require_mlx_vlm
-
-            _require_mlx_vlm(preflight_path)
+    _preflight_vision_runtime(
+        model_name,
+        force_mllm=force_mllm,
+        force_text=force_text,
+        requested_spec_decode=requested_spec_decode,
+    )
     # Resolve a multi-variant repository before reading metadata or choosing a
     # serving lane. This is the one checkpoint-identity choke point shared by
     # startup and residency: an explicit alias keeps its declared subfolder,
@@ -1869,6 +1882,7 @@ def _resolve_serving_checkpoint(
         if metadata is not None and metadata.snapshot_dir is not None
         else checkpoint_path
     )
+    profile = resolve_profile(model_name) or resolve_profile(model_path)
     decision = resolve_serving_lane_decision(
         load_path,
         force_mllm=force_mllm,
@@ -3611,13 +3625,17 @@ Examples:
     )
     _srv_force_mllm = getattr(args, "mllm", False)
     _srv_force_text = getattr(args, "no_mllm", False)
-    if not _srv_force_mllm and not _srv_force_text and not _srv_generative_media:
-        _ensure_routing_config(args.model)
     _srv_requested_spec_decode = getattr(args, "spec_decode", "none") or "none"
     if _srv_requested_spec_decode == "none" and getattr(
         args, "force_spec_decode", False
     ):
         _srv_requested_spec_decode = "auto"
+    if not _srv_force_mllm and not _srv_force_text and not _srv_generative_media:
+        _preflight_vision_runtime(
+            args.model,
+            requested_spec_decode=_srv_requested_spec_decode,
+        )
+        _ensure_routing_config(args.model)
     _srv_is_mllm, _ = resolve_serving_lane(
         args.model,
         force_mllm=_srv_force_mllm,
