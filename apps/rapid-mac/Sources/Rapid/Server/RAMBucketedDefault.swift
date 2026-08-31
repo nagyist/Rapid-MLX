@@ -248,6 +248,7 @@ enum RAMBucketedDefault {
         guard
               let rawObject = try? JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
+              hasOnlyRecommendationPolicyKeys(rawObject),
               let declaredDigest = rawObject["policy_digest"] as? String,
               ModelCatalog.atomicObjectDigest(
                 rawObject.filter { $0.key != "policy_digest" }
@@ -284,6 +285,35 @@ enum RAMBucketedDefault {
             tiers.append(Tier(floorGB: floorGB, primary: primary, alt: alt))
         }
         return tiers
+    }
+
+    /// JSONDecoder intentionally ignores unknown keys. Check the schema's
+    /// additionalProperties=false boundary before decoding so Desktop and the
+    /// Python contract validator accept exactly the same addressed shape.
+    private static func hasOnlyRecommendationPolicyKeys(
+        _ object: [String: Any]
+    ) -> Bool {
+        let policyKeys: Set<String> = [
+            "schema_version", "policy_id", "policy_digest", "task_type",
+            "machine_dimension", "tiers",
+        ]
+        let tierKeys: Set<String> = ["minimum_memory_mib", "picks"]
+        let pickKeys: Set<String> = [
+            "role", "alias", "execution_preset_id", "evidence_status",
+            "evidence_id", "footprint_mib", "capability_score_x100",
+            "decode_tokens_per_second_x100", "reason_ids", "limitation_ids",
+        ]
+        guard Set(object.keys).isSubset(of: policyKeys),
+              let rawTiers = object["tiers"] as? [[String: Any]] else {
+            return false
+        }
+        return rawTiers.allSatisfy { tier in
+            guard Set(tier.keys).isSubset(of: tierKeys),
+                  let picks = tier["picks"] as? [[String: Any]] else {
+                return false
+            }
+            return picks.allSatisfy { Set($0.keys).isSubset(of: pickKeys) }
+        }
     }
 
     private static func loadTiers() -> [Tier] {

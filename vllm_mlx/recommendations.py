@@ -57,6 +57,10 @@ def load_recommendation_tiers() -> tuple[RecommendationTier, ...]:
                 raise ValueError(
                     f"unknown recommendation limitation IDs: {sorted(unknown)}"
                 )
+            if len(limitations) > 1:
+                raise ValueError(
+                    "recommendation display supports at most one limitation ID"
+                )
             score = int(raw["capability_score_x100"])
             if score % 100:
                 raise ValueError(

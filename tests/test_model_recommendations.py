@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from argparse import Namespace
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,28 @@ from vllm_mlx.recommendations import (
     recommendation_footprint_gb,
     recommendation_tier,
 )
+
+
+def test_atomic_policy_rejects_multiple_unrepresentable_limitations(
+    monkeypatch,
+) -> None:
+    from vllm_mlx import recommendations
+    from vllm_mlx.catalog import load_product_recommendation_policy
+
+    policy = deepcopy(load_product_recommendation_policy())
+    policy["tiers"][0]["picks"][0]["limitation_ids"] = [
+        "not_for_coding",
+        "basic_chat",
+    ]
+    monkeypatch.setattr(
+        recommendations, "load_product_recommendation_policy", lambda: policy
+    )
+    recommendations.load_recommendation_tiers.cache_clear()
+
+    with pytest.raises(ValueError, match="at most one limitation"):
+        recommendations.load_recommendation_tiers()
+
+    recommendations.load_recommendation_tiers.cache_clear()
 
 
 def test_every_tier_has_exactly_smart_and_fast() -> None:
