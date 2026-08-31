@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Rapid
 
@@ -149,5 +150,25 @@ struct ModelSelectionPurposeTests {
             knownNonChatAliases: [chat.alias],
             fallbackAlias: nil
         ) == chat.alias)
+    }
+
+    @Test("Dictation publishes catalog truth, not its persisted selection")
+    func dictationKnownAudioAliases() async {
+        let staleSelection = "org/custom-text-model"
+        let catalogEntry = transcription
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true")
+        )
+        let dictation = DictationController(
+            server: server,
+            testingEnabled: false,
+            testingModelAlias: staleSelection,
+            audioCatalogLoader: { _ in [catalogEntry] }
+        )
+
+        #expect(!dictation.knownAudioAliases.contains(staleSelection))
+        await dictation.refreshModelCacheState()
+        #expect(dictation.knownAudioAliases == [catalogEntry.alias])
     }
 }

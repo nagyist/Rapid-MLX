@@ -1135,20 +1135,17 @@ struct ContentView: View {
 
     /// The chat catalog intentionally omits every media row, so aliases from
     /// independently loaded media catalogs close that negative-information
-    /// gap. Dictation's persisted selection is included directly: it can
+    /// gap. Dictation publishes its own catalog-proven aliases because it can
     /// start before ``AudioView`` ever mounts, which is the timing that used
-    /// to let `qwen3-asr` masquerade as an unknown custom chat model.
+    /// to let `qwen3-asr` masquerade as an unknown custom chat model. Raw
+    /// persisted selections are not included: stale preferences are not
+    /// authoritative capability evidence.
     private var knownNonChatAliases: Set<String> {
         Set(
             audio.audioModels.map(\.alias)
                 + imageGen.imageModels.map(\.alias)
-                + [
-                    audio.selectedTranscriptionAlias,
-                    audio.selectedSpeechAlias,
-                    imageGen.selectedAlias,
-                    dictation.modelAlias,
-                ]
-        ).filter { !$0.isEmpty }
+                + Array(dictation.knownAudioAliases)
+        )
     }
 
     /// True when the Quickstart sheet is up AND owns the pending
