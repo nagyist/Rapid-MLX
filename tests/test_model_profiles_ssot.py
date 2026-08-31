@@ -343,6 +343,22 @@ def test_invalid_value_raises_with_alias_name(tmp_path) -> None:
             {
                 "hf_path": "org/video",
                 "modality": "video-gen",
+                "video_modes": [],
+            },
+            "must be a non-empty list",
+        ),
+        (
+            {
+                "hf_path": "org/video",
+                "modality": "video-gen",
+                "video_modes": "text-to-video",
+            },
+            "must be a non-empty list",
+        ),
+        (
+            {
+                "hf_path": "org/video",
+                "modality": "video-gen",
                 "video_modes": ["video-to-video"],
             },
             "entries must be one of",
