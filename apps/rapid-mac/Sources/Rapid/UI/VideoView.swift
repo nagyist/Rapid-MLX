@@ -385,10 +385,18 @@ struct VideoView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: RapidTheme.Space.md) {
             if let error = viewModel.errorMessage {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(RapidFont.caption)
-                    .foregroundStyle(RapidTheme.statusError)
-                    .accessibilityIdentifier("Video.Error")
+                HStack(spacing: RapidTheme.Space.sm) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(RapidFont.caption)
+                        .foregroundStyle(RapidTheme.statusError)
+                        .accessibilityIdentifier("Video.Error")
+                    if viewModel.needsServerRefresh {
+                        Button("Retry") { Task { await viewModel.refreshServerData() } }
+                            .buttonStyle(.rapidSecondary)
+                            .disabled(viewModel.isRefreshing)
+                            .accessibilityIdentifier("Video.RetryServerData")
+                    }
+                }
             }
             if viewModel.supportedModes.count > 1 {
                 Picker("Source", selection: modeBinding) {
@@ -503,7 +511,7 @@ struct VideoView: View {
         }
         .labelsHidden()
         .frame(maxWidth: 220)
-        .disabled(viewModel.hasLiveActiveJobs || viewModel.isSubmitting || viewModel.isPreparing)
+        .disabled(!viewModel.canSwitchModels)
         .accessibilityLabel("Video model")
         .accessibilityIdentifier("Video.ModelMenu")
     }

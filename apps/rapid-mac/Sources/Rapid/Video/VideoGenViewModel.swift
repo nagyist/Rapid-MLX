@@ -49,6 +49,7 @@ final class VideoGenViewModel {
     var isSubmitting = false
     var isRefreshing = false
     var isLoadingPreview = false
+    var jobsAreReconciled = false
     var errorMessage: String?
 
     private let server: ServerManager
@@ -85,9 +86,7 @@ final class VideoGenViewModel {
     }
 
     var selectedJob: VideoJob? {
-        if let selectedJobID, let job = jobs.first(where: { $0.id == selectedJobID }) {
-            return job
-        }
+        if let selectedJobID { return jobs.first { $0.id == selectedJobID } }
         return jobs.first
     }
 
@@ -145,6 +144,17 @@ final class VideoGenViewModel {
         currentServerContext != nil && hasActiveJobs
     }
 
+    var canSwitchModels: Bool {
+        !isSubmitting
+            && !isPreparing
+            && !hasLiveActiveJobs
+            && (!isServerReady || jobsAreReconciled)
+    }
+
+    var needsServerRefresh: Bool {
+        isServerReady && (capabilities == nil || !jobsAreReconciled)
+    }
+
     func isModelEligible(_ model: ModelEntry) -> Bool {
         guard let minimum = model.minimumMemoryGB,
               minimum.isFinite, minimum > 0, physicalRAMGB > 0 else { return false }
@@ -163,8 +173,15 @@ final class VideoGenViewModel {
         }
         let loaded = await catalogLoader(binary)
         guard !Task.isCancelled, generation == catalogRefreshGeneration else { return }
-        let filtered = loaded.filter {
+        let previousModel = selectedModel
+        var filtered = loaded.filter {
             $0.kind == .video && !$0.videoCapabilities.isEmpty
+        }
+        if let previousModel,
+           !canSwitchModels,
+           !filtered.contains(where: { $0.alias == previousModel.alias }) {
+            // A cache/catalog refresh must not orphan live or unreconciled work.
+            filtered.append(previousModel)
         }
         let previousAlias = selectedAlias
         videoModels = filtered
@@ -183,7 +200,9 @@ final class VideoGenViewModel {
     }
 
     func selectModel(_ alias: String) {
-        guard selectedAlias != alias else { return }
+        guard selectedAlias != alias,
+              canSwitchModels,
+              videoModels.contains(where: { $0.alias == alias }) else { return }
         selectedAlias = alias
         selectedModelDidChange()
     }
@@ -244,6 +263,7 @@ final class VideoGenViewModel {
         serverRefreshGeneration &+= 1
         let refreshGeneration = serverRefreshGeneration
         let contextGeneration = serverContextGeneration
+        jobsAreReconciled = false
         isRefreshing = true
         defer {
             if refreshGeneration == serverRefreshGeneration { isRefreshing = false }
@@ -271,6 +291,7 @@ final class VideoGenViewModel {
                     refreshGeneration: refreshGeneration
                 ) else { return }
                 jobs = newJobs
+                jobsAreReconciled = true
                 reconcileSelection()
                 reconcileJobPolling()
             } catch {
@@ -280,6 +301,7 @@ final class VideoGenViewModel {
                     refreshGeneration: refreshGeneration
                 ) else { return }
                 // Controls remain usable when history alone is unavailable.
+                jobsAreReconciled = false
                 errorMessage = "Video controls are ready, but recent videos couldn't be loaded."
             }
         } catch {
@@ -288,6 +310,7 @@ final class VideoGenViewModel {
                 contextGeneration: contextGeneration,
                 refreshGeneration: refreshGeneration
             ) else { return }
+            jobsAreReconciled = false
             errorMessage = error.localizedDescription
         }
     }
@@ -304,6 +327,7 @@ final class VideoGenViewModel {
                 context, contextGeneration: contextGeneration
             ) else { return }
             jobs = newJobs
+            jobsAreReconciled = true
             reconcileSelection()
             if selectedJob?.status == .completed, previous != .completed {
                 await loadSelectedPreview()
@@ -315,6 +339,7 @@ final class VideoGenViewModel {
         } catch {
             // Poll failures are transient during a model stop/restart. The
             // explicit refresh/start actions surface actionable errors.
+            jobsAreReconciled = false
         }
     }
 
@@ -360,6 +385,7 @@ final class VideoGenViewModel {
     }
 
     func selectJob(_ id: String) async {
+        guard jobs.contains(where: { $0.id == id }) else { return }
         selectedJobID = id
         previewURL = nil
         await loadSelectedPreview()
@@ -383,13 +409,16 @@ final class VideoGenViewModel {
             guard generation == previewGeneration,
                   requestIsCurrent(
                     context, contextGeneration: contextGeneration
-                  ) else { return }
+                  ),
+                  selectedJobID == job.id,
+                  jobs.contains(where: { $0.id == job.id }) else { return }
             previewURL = url
         } catch {
             guard generation == previewGeneration,
                   requestIsCurrent(
                     context, contextGeneration: contextGeneration
-                  ) else { return }
+                  ),
+                  selectedJobID == job.id else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -423,6 +452,7 @@ final class VideoGenViewModel {
         invalidateServerContext()
         capabilities = nil
         jobs = []
+        jobsAreReconciled = false
         reconcileJobPolling()
         selectedJobID = nil
         previewURL = nil
@@ -447,12 +477,15 @@ final class VideoGenViewModel {
 
     private func reconcileSelection() {
         guard !jobs.isEmpty else {
+            previewGeneration &+= 1
             selectedJobID = nil
             previewURL = nil
             return
         }
         if selectedJobID == nil || !jobs.contains(where: { $0.id == selectedJobID }) {
+            previewGeneration &+= 1
             selectedJobID = jobs.first?.id
+            previewURL = nil
         }
     }
 
@@ -472,6 +505,7 @@ final class VideoGenViewModel {
         serverRefreshGeneration &+= 1
         previewGeneration &+= 1
         loadedServerContext = nil
+        jobsAreReconciled = false
         isRefreshing = false
         isLoadingPreview = false
         reconcileJobPolling()

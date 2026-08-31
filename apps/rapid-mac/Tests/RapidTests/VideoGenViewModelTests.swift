@@ -115,13 +115,72 @@ struct VideoGenViewModelTests {
 
         let refresh = Task { await viewModel.refreshServerData() }
         await client.waitUntilCapabilitiesRequested()
-        viewModel.selectModel(second.alias)
+        server._testSetState(.ready(alias: second.alias))
+        await viewModel.serverStateDidChange()
         await client.resumeCapabilities()
         await refresh.value
 
-        #expect(viewModel.selectedAlias == second.alias)
+        #expect(viewModel.selectedAlias == first.alias)
         #expect(viewModel.capabilities == nil)
         #expect(viewModel.jobs.isEmpty)
+    }
+
+    @Test("Unreconciled history blocks model switching until retry succeeds")
+    func historyFailureBlocksModelSwitch() async {
+        let first = ModelEntry(
+            alias: "ltx-2.3-mlx-q4", hfRepo: "org/ltx", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 24
+        )
+        let second = ModelEntry(
+            alias: "video-b", hfRepo: "org/b", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 24
+        )
+        let client = VideoFakeClient(listFailures: 1)
+        let server = ServerManager(
+            testingState: .ready(alias: first.alias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            activeBearer: "test-bearer"
+        )
+        let viewModel = VideoGenViewModel(
+            server: server,
+            client: client,
+            physicalRAMGB: 32,
+            catalogLoader: { _ in [first, second] }
+        )
+        await viewModel.refreshCatalog()
+        await viewModel.refreshServerData()
+
+        #expect(viewModel.needsServerRefresh)
+        #expect(!viewModel.canSwitchModels)
+        viewModel.selectModel(second.alias)
+        #expect(viewModel.selectedAlias == first.alias)
+
+        await viewModel.refreshServerData()
+        #expect(viewModel.jobsAreReconciled)
+        #expect(viewModel.canSwitchModels)
+        viewModel.selectModel(second.alias)
+        #expect(viewModel.selectedAlias == second.alias)
+    }
+
+    @Test("A stale history selection cannot display a different job")
+    func staleHistorySelectionIsIgnored() async {
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true")
+        )
+        let viewModel = VideoGenViewModel(server: server, client: VideoFakeClient())
+        let job = VideoJob(
+            id: "video_0123456789abcdef0123456789abcdef",
+            model: "ltx", prompt: "first", seconds: "1", size: "512x512",
+            status: .completed, progress: 100, createdAt: 1, completedAt: 2, error: nil
+        )
+        viewModel.jobs = [job]
+        viewModel.selectedJobID = job.id
+
+        await viewModel.selectJob("video_stale")
+
+        #expect(viewModel.selectedJobID == job.id)
+        #expect(viewModel.selectedJob == job)
     }
 
     @Test("Active jobs keep polling without a mounted Video view")
@@ -238,6 +297,11 @@ private actor VideoPollingClient: VideoClientProtocol {
 
 private actor VideoFakeClient: VideoClientProtocol {
     private var requests: [VideoCreateRequest] = []
+    private var listFailures: Int
+
+    init(listFailures: Int = 0) {
+        self.listFailures = listFailures
+    }
 
     func capabilities(port: Int, bearer: String?) async throws -> VideoCapabilities {
         try JSONDecoder().decode(VideoCapabilities.self, from: Data(Self.capabilitiesJSON.utf8))
@@ -263,7 +327,13 @@ private actor VideoFakeClient: VideoClientProtocol {
         )
     }
 
-    func list(port: Int, bearer: String?, limit: Int) async throws -> [VideoJob] { [] }
+    func list(port: Int, bearer: String?, limit: Int) async throws -> [VideoJob] {
+        if listFailures > 0 {
+            listFailures -= 1
+            throw VideoClientError.transport("history unavailable")
+        }
+        return []
+    }
     func delete(id: String, port: Int, bearer: String?) async throws {}
     func content(id: String, port: Int, bearer: String?) async throws -> URL {
         URL(fileURLWithPath: "/tmp/\(id).mp4")
