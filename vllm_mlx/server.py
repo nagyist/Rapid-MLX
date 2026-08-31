@@ -1787,7 +1787,9 @@ def _prefetch_routing_metadata(model_name: str) -> str:
     if not revision:
         raise RuntimeError("HuggingFace metadata did not include a revision")
     try:
-        snapshot = snapshot_download(
+        snapshot = call_with_deadline(
+            snapshot_download,
+            _HF_RESOLVE_TIMEOUT_SECONDS,
             repo_id,
             revision=revision,
             allow_patterns=[
