@@ -899,18 +899,44 @@ settle_transcript_at_bottom() {
         return
     fi
 
+    local before_value
+    before_value="$(jq -r '[.data.ui_elements[]?
+        | select(.role == "AXScrollBar" and (.value | type) == "number")
+        | .value] | max // empty' "$destination")"
+    [[ -n "$before_value" ]] \
+        || die "transcript exposes no measurable scroll position before Jump to latest"
     press "$destination" Transcript.JumpToBottom "$press_result" \
         || die "transcript was not at its tail and Jump to latest was not pressable"
+    local previous_value="" stable_samples=0
     for _ in {1..60}; do
         see_main "$destination"
-        if ! jq -e '.data.ui_elements[]?
-                    | select(.identifier == "Transcript.JumpToBottom")' \
-            "$destination" >/dev/null; then
-            return
+        local current_value
+        current_value="$(jq -r '[.data.ui_elements[]?
+            | select(.role == "AXScrollBar" and (.value | type) == "number")
+            | .value] | max // empty' "$destination")"
+        if [[ -n "$current_value" ]] \
+            && ! jq -e '.data.ui_elements[]?
+                        | select(.identifier == "Transcript.JumpToBottom")' \
+                "$destination" >/dev/null \
+            && awk -v before="$before_value" -v current="$current_value" \
+                'BEGIN { exit !(current >= 0.99 || current > before + 0.02) }'; then
+            if [[ -n "$previous_value" ]] \
+                && awk -v previous="$previous_value" -v current="$current_value" \
+                    'BEGIN { delta = current - previous; if (delta < 0) delta = -delta; exit !(delta <= 0.001) }'; then
+                stable_samples=$((stable_samples + 1))
+            else
+                stable_samples=1
+            fi
+            if (( stable_samples >= 2 )); then
+                return
+            fi
+        else
+            stable_samples=0
         fi
+        previous_value="$current_value"
         sleep 0.1
     done
-    die "Jump to latest did not settle the transcript at its tail"
+    die "Jump to latest did not physically settle the transcript at its tail"
 }
 
 wait_identifier_enabled() {

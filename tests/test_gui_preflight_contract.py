@@ -22,6 +22,7 @@ import json
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -181,18 +182,71 @@ def test_fresh_install_proves_the_telemetry_boundary_with_a_loopback_sink():
 def test_fresh_install_settles_transcript_before_structural_baseline():
     """A transient scroll affordance must not become golden structure."""
     source = HARNESS.read_text()
-    helper = source.split("settle_transcript_at_bottom() {", 1)[1].split("\n}", 1)[0]
+    helper_body = source.split("settle_transcript_at_bottom() {", 1)[1].split("\n}", 1)[
+        0
+    ]
+    helper = f"settle_transcript_at_bottom() {{{helper_body}\n}}"
     fresh_install = source.split("flow_fresh_install() {", 1)[1].split("\n}", 1)[0]
 
     assert 'select(.identifier == "Transcript.JumpToBottom")' in helper
     assert 'press "$destination" Transcript.JumpToBottom "$press_result"' in helper
-    assert "sleep 0.1" in helper
-    assert 'die "Jump to latest did not settle the transcript at its tail"' in helper
+    assert 'select(.role == "AXScrollBar"' in helper
+    assert 'die "Jump to latest did not physically settle' in helper
 
     banner = fresh_install.index("wait_identifier TelemetryConsent.PostValueBanner")
     settle = fresh_install.index("settle_transcript_at_bottom")
     baseline = fresh_install.index("baseline fresh-install.post-value-consent")
     assert banner < settle < baseline
+
+
+def test_transcript_settler_waits_for_physical_scroll_stability(tmp_path):
+    """A hidden button alone is insufficient while the scroll view is moving."""
+    source = HARNESS.read_text()
+    helper_body = source.split("settle_transcript_at_bottom() {", 1)[1].split("\n}", 1)[
+        0
+    ]
+    helper = f"settle_transcript_at_bottom() {{{helper_body}\n}}"
+
+    fixtures = [
+        (0.25, True),
+        (0.45, False),
+        (0.80, False),
+        (1.00, False),
+        (1.00, False),
+    ]
+    for index, (value, has_button) in enumerate(fixtures):
+        elements = [{"role": "AXScrollBar", "value": value}]
+        if has_button:
+            elements.append({"identifier": "Transcript.JumpToBottom"})
+        (tmp_path / f"fixture-{index}.json").write_text(
+            json.dumps({"data": {"ui_elements": elements}})
+        )
+
+    script = textwrap.dedent(
+        f"""
+        set -u
+        fixture_dir={str(tmp_path)!r}
+        calls=0
+        see_main() {{
+            local destination="$1" index="$calls"
+            (( index > 4 )) && index=4
+            cp "$fixture_dir/fixture-$index.json" "$destination"
+            calls=$((calls + 1))
+        }}
+        press() {{ :; }}
+        die() {{ printf '%s\\n' "$*" >&2; return 97; }}
+        sleep() {{ :; }}
+        {helper}
+        settle_transcript_at_bottom "$fixture_dir/current.json" "$fixture_dir/press.json"
+        printf '%s\\n' "$calls"
+        """
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, check=False, text=True
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "5"
 
 
 def test_each_fault_fails_with_its_own_message():
