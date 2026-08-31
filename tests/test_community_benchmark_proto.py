@@ -158,6 +158,9 @@ def test_launch_modality_benchmark_examples_validate(schemas, registry, kind) ->
     assert example["model"]["pipeline_kind"] == f"{kind}_generation"
     assert example["execution"]["task_type"] == f"{kind}_generation"
     assert example["workload"]["task_type"] == f"{kind}_generation"
+    identity = _load(RUNTIME_ROOT / "examples" / f"model-identity.{kind}.example.json")
+    assert example["model"]["components"] == identity["components"]
+    assert example["model"]["identity_digest"] == identity["identity_digest"]
 
 
 def test_benchmark_run_rejects_cross_object_task_mismatch(schemas, registry) -> None:
@@ -390,6 +393,21 @@ def test_public_media_dataset_contains_reproducible_inputs() -> None:
         "t2v-480p-81f",
     }
     assert all(case["prompt"].strip() for case in dataset["cases"])
+
+
+def test_synthetic_token_dataset_has_cross_language_golden_vector() -> None:
+    dataset = _load(BENCH_ROOT / "datasets" / "rapid-synthetic-token-dataset-v1.json")
+    generator = dataset["generator"]
+    assert generator["input_representation"] == "token_ids"
+    state = generator["seed"]
+    upper_exclusive = min(dataset["golden_vector"]["tokenizer_vocab_size"], 100000)
+    actual = []
+    for _ in dataset["golden_vector"]["first_token_ids"]:
+        state = (state ^ ((state << 13) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        state = (state ^ (state >> 17)) & 0xFFFFFFFF
+        state = (state ^ ((state << 5) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        actual.append(256 + state % (upper_exclusive - 256))
+    assert actual == dataset["golden_vector"]["first_token_ids"]
 
 
 def test_registered_launch_examples_exactly_match_protocol_registry() -> None:
