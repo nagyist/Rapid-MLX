@@ -134,9 +134,39 @@ HF_HUB_OFFLINE=1 rapid-mlx serve \
   glm5.3-flash-4bit --host 127.0.0.1 --port 8465 --no-thinking
 ```
 
-Send one discarded warmup followed by three identical OpenAI chat-completion
-requests with `temperature=0` and `max_tokens=512`, reading the per-request
-generation rate and Metal memory fields from the server status surface. Do not
+In another shell, send one discarded warmup followed by three identical
+requests. This is the exact payload shape; set `run=warmup` for the discarded
+request and then repeat it with `run=1`, `run=2`, and `run=3` so the output can
+be archived separately:
+
+```bash
+PROMPT='You are a senior software engineer writing a blog post. Explain the difference between threads and processes in operating systems, covering address space, scheduling, context switch cost, IPC, and a worked example of when each is appropriate. Be concrete and specific.'
+run=warmup
+
+jq -nc --arg prompt "$PROMPT" '{
+  model: "glm5.3-flash-4bit",
+  messages: [{role: "user", content: $prompt}],
+  temperature: 0,
+  max_tokens: 512,
+  enable_thinking: false,
+  stream: true,
+  stream_options: {include_usage: true}
+}' | curl --no-buffer --silent --show-error \
+  http://127.0.0.1:8465/v1/chat/completions \
+  -H 'Content-Type: application/json' --data-binary @- \
+  | tee "glm53-${run}.sse"
+
+curl --silent http://127.0.0.1:8465/v1/status | jq '{
+  generation_tps,
+  prompt_tps,
+  active_memory_gb: .metal.active_memory_gb,
+  peak_memory_gb: .metal.peak_memory_gb
+}'
+```
+
+The streamed final usage event supplies the prompt and completion token
+counts. `/v1/status` supplies `generation_tps`, `prompt_tps`, and the
+`metal.active_memory_gb` / `metal.peak_memory_gb` allocator readings. Do not
 run another model server concurrently.
 
 The checkpoint contains a native MTP head, but the qualification experiment
