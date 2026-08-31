@@ -250,8 +250,9 @@ jobs:
       # the normal label/trailer attestation is unavailable even though every
       # source head already passed this exact guard before entering the queue.
       # Reuse that result only for a same-repository candidate created by the
-      # Mergify GitHub App, and bind it to source heads that are ancestors of the
-      # checked candidate. Any missing/moved/failed source head fails closed.
+      # Mergify GitHub App. Bind proof to the second parent of each immutable
+      # `Merge of #N` integration commit, never to the PR's movable current head.
+      # Any malformed lineage or failed exact-head proof fails closed.
       - name: Verify Mergify source-head attestations
         id: mergify-attestation
         if: >-
@@ -275,43 +276,65 @@ jobs:
             }
 
             const candidateSha = context.payload.pull_request.head.sha;
-            for (const pull_number of sourceNumbers) {
-              const {data: source} = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number,
-              });
-              if (source.head.repo?.full_name !== context.repo.owner + "/" + context.repo.repo) {
-                core.setFailed(`Source PR #${pull_number} is not from this repository`);
+            const baseSha = metadata
+              .match(/^checking_base_sha:\s*([0-9a-f]{40})\s*$/m)?.[1];
+            if (!baseSha) {
+              core.setFailed("Trusted Mergify candidate has no checking_base_sha");
+              return;
+            }
+
+            const lineageResult = await exec.getExecOutput(
+              "git",
+              ["log", "--first-parent", "--format=%H%x09%s", `${baseSha}..${candidateSha}`],
+              {ignoreReturnCode: true, silent: true},
+            );
+            if (lineageResult.exitCode !== 0) {
+              core.setFailed("Cannot inspect the Mergify candidate first-parent lineage");
+              return;
+            }
+            const integrations = new Map();
+            for (const line of lineageResult.stdout.trim().split("\n")) {
+              if (!line) continue;
+              const [sha, ...subjectParts] = line.split("\t");
+              const match = subjectParts.join("\t").match(/^Merge of #(\d+)$/);
+              if (!match) continue;
+              const number = Number(match[1]);
+              if (integrations.has(number)) {
+                core.setFailed(`Candidate contains duplicate integrations for PR #${number}`);
                 return;
               }
+              integrations.set(number, sha);
+            }
+            if (integrations.size !== sourceNumbers.length ||
+                sourceNumbers.some((number) => !integrations.has(number))) {
+              core.setFailed("Mergify metadata does not match candidate integration commits");
+              return;
+            }
 
-              const ancestry = await exec.exec(
+            for (const pull_number of sourceNumbers) {
+              const mergeSha = integrations.get(pull_number);
+              const parentsResult = await exec.getExecOutput(
                 "git",
-                ["merge-base", "--is-ancestor", source.head.sha, candidateSha],
+                ["show", "-s", "--format=%P", mergeSha],
+                {ignoreReturnCode: true, silent: true},
+              );
+              const parents = parentsResult.stdout.trim().split(/\s+/);
+              if (parentsResult.exitCode !== 0 || parents.length !== 2) {
+                core.setFailed(`Integration commit for PR #${pull_number} is not a two-parent merge`);
+                return;
+              }
+              const [previousCandidateSha, exactSourceSha] = parents;
+
+              const pyprojectDiff = await exec.exec(
+                "git",
+                ["diff", "--quiet", previousCandidateSha, mergeSha, "--", "pyproject.toml"],
                 {ignoreReturnCode: true},
               );
-              if (ancestry !== 0) {
-                core.setFailed(
-                  `Source PR #${pull_number} head ${source.head.sha} is not in candidate ${candidateSha}`,
-                );
+              if (pyprojectDiff > 1) {
+                core.setFailed(`Cannot inspect pyproject.toml integration for PR #${pull_number}`);
                 return;
               }
-
-              if (source.changed_files > 3000) {
-                core.setFailed(`Source PR #${pull_number} exceeds GitHub's file-list limit`);
-                return;
-              }
-              const files = await github.paginate(
-                github.rest.pulls.listFiles,
-                {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number,
-                  per_page: 100,
-                },
-              );
-              if (!files.some((file) => file.filename === "pyproject.toml")) {
+              if (pyprojectDiff === 0) {
                 continue;
               }
 
@@ -320,7 +343,7 @@ jobs:
                 {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  ref: source.head.sha,
+                  ref: exactSourceSha,
                   check_name: "mlx-bound-guard",
                   filter: "latest",
                   per_page: 100,
@@ -331,7 +354,7 @@ jobs:
                 .sort((left, right) => right.id - left.id)[0];
               if (!guard || guard.status !== "completed" || guard.conclusion !== "success") {
                 core.setFailed(
-                  `Source PR #${pull_number} exact head lacks a successful mlx-bound-guard`,
+                  `Integrated source ${exactSourceSha} for PR #${pull_number} lacks a successful mlx-bound-guard`,
                 );
                 return;
               }

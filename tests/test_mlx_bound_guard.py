@@ -329,10 +329,15 @@ class TestMergifyAttestationWorkflow:
         script = resolver["with"]["script"]
 
         assert "pull_requests:" in script
-        assert '"merge-base", "--is-ancestor", source.head.sha, candidateSha' in script
-        assert "source.changed_files > 3000" in script
-        assert "github.rest.pulls.listFiles" in script
-        assert 'file.filename === "pyproject.toml"' in script
+        assert "checking_base_sha:" in script
+        assert '"--first-parent", "--format=%H%x09%s"' in script
+        assert "^Merge of #(\\d+)$" in script
+        assert '"show", "-s", "--format=%P", mergeSha' in script
+        assert "parents.length !== 2" in script
+        assert "const [previousCandidateSha, exactSourceSha] = parents" in script
+        assert 'previousCandidateSha, mergeSha, "--", "pyproject.toml"' in script
+        assert "github.rest.pulls.get" not in script
+        assert "ref: exactSourceSha" in script
         assert 'check_name: "mlx-bound-guard"' in script
         assert 'check.app?.slug === "github-actions"' in script
         assert 'guard.conclusion !== "success"' in script
