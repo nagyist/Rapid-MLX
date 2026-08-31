@@ -197,11 +197,15 @@ def test_load_model_genuine_vlm_stays_on_mllm_lane(monkeypatch):
     so a working VLM is never downgraded."""
     from vllm_mlx import server
     from vllm_mlx.api import utils as api_utils
+    from vllm_mlx.models import mllm
 
     _stub_routing_globals(monkeypatch, server)
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
     monkeypatch.setattr(api_utils, "is_mllm_model", lambda name: True)
     monkeypatch.setattr(api_utils, "mllm_backbone_cache_mode", lambda name: None)
+    # This routing unit test runs in the Linux/no-MLX CI lane. Runtime health
+    # is covered separately; keep this assertion focused on lane selection.
+    monkeypatch.setattr(mllm, "_require_mlx_vlm", lambda model_name=None: None)
 
     server.load_model("some/genuine-vlm-4bit")
 

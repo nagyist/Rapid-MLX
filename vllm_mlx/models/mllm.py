@@ -1468,7 +1468,7 @@ class MLXMultimodalLM:
         if self._loaded:
             return
 
-        _require_mlx_vlm(self.model_name)
+        _require_mlx_vlm()
 
         try:
             # Stable Transformers does not yet register the processor used by

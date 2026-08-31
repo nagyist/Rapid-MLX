@@ -1784,7 +1784,7 @@ def _resolve_serving_checkpoint(
         load_path=load_path,
         auto_text_fallback=decision.auto_text_fallback,
         lane_reason=decision.reason,
-        is_mllm=decision.is_mllm,
+        is_mllm=getattr(decision, "is_mllm", False),
     )
 
 

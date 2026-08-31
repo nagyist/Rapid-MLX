@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+
 import pytest
 
 from vllm_mlx.models import mllm
 
 
 def test_vision_runtime_reports_incompatible_mlx_vlm_version(monkeypatch):
+    monkeypatch.setitem(sys.modules, "mlx_vlm", ModuleType("mlx_vlm"))
     monkeypatch.setattr(mllm, "version", lambda _distribution: "0.7.0")
 
     status, detail = mllm.vision_runtime_status()
@@ -55,6 +59,7 @@ def test_engine_guard_reports_missing_runtime_with_model_context(monkeypatch):
 
 
 def test_validated_runtime_version_is_accepted(monkeypatch):
+    monkeypatch.setitem(sys.modules, "mlx_vlm", ModuleType("mlx_vlm"))
     monkeypatch.setattr(
         mllm, "version", lambda _distribution: mllm.VALIDATED_MLX_VLM_VERSION
     )
