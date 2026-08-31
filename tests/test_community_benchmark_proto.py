@@ -9,10 +9,9 @@ import json
 import unicodedata
 from pathlib import Path
 
+import jsonschema
 import pytest
-
-jsonschema = pytest.importorskip("jsonschema")
-referencing = pytest.importorskip("referencing")
+import referencing
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROTO_ROOT = REPO_ROOT / "proto"
@@ -381,6 +380,16 @@ def test_registered_protocols_and_datasets_match_digests(schemas, registry) -> N
         entry = _load(path)
         projection = {k: v for k, v in entry.items() if k != "digest"}
         assert _digest(projection) == entry["digest"]
+
+
+def test_public_media_dataset_contains_reproducible_inputs() -> None:
+    dataset = _load(BENCH_ROOT / "datasets" / "rapid-public-prompts-v1.json")
+    assert dataset["license"] == "CC0-1.0"
+    assert {case["case_id"] for case in dataset["cases"]} == {
+        "t2i-1024-square",
+        "t2v-480p-81f",
+    }
+    assert all(case["prompt"].strip() for case in dataset["cases"])
 
 
 def test_registered_launch_examples_exactly_match_protocol_registry() -> None:
