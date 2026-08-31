@@ -1,0 +1,429 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/raullenchai/Rapid-MLX/proto/community-benchmark/v1/benchmark-run.schema.json",
+  "title": "Rapid-MLX BenchmarkRun v1",
+  "description": "Public, privacy-allowlisted client upload for one reproducible community benchmark run. Server trust, comparability, deduplication, and outlier verdicts are deliberately absent and are produced only after ingestion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "started_at",
+    "completed_at",
+    "collector",
+    "model",
+    "machine",
+    "execution",
+    "workload",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "experiment": {
+      "$ref": "#/$defs/experimentArm"
+    },
+    "install_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$",
+      "description": "Optional random, resettable installation pseudonym. Never derived from hardware."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "collector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "const": "rapid-mlx-community-bench"
+        },
+        "version": {
+          "$ref": "#/$defs/versionString"
+        }
+      }
+    },
+    "model": {
+      "$ref": "model-identity.schema.json"
+    },
+    "machine": {
+      "$ref": "machine-observation.schema.json"
+    },
+    "execution": {
+      "$ref": "execution-config.schema.json"
+    },
+    "workload": {
+      "$ref": "#/$defs/workloadProtocol"
+    },
+    "outcome": {
+      "$ref": "#/$defs/runOutcome"
+    },
+    "measurements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "description": "Measured rounds only; discarded warmups are declared by the workload but never uploaded as measurements.",
+      "items": {
+        "$ref": "#/$defs/measurement"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "status": {
+                "const": "completed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "required": [
+          "measurements"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "versionString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]*$"
+    },
+    "experimentArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group_id",
+        "arm_id",
+        "role",
+        "sequence_index",
+        "order_strategy",
+        "varied_fields"
+      ],
+      "properties": {
+        "group_id": {
+          "$ref": "#/$defs/uuid",
+          "description": "Random ID shared only by arms from one local experiment invocation."
+        },
+        "arm_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "baseline",
+            "candidate"
+          ]
+        },
+        "sequence_index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "order_strategy": {
+          "type": "string",
+          "enum": [
+            "randomized",
+            "counterbalanced",
+            "fixed"
+          ]
+        },
+        "assignment_seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "varied_fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^/execution/(load|generation|features)(/[a-z0-9_]+)+$"
+          },
+          "description": "JSON Pointers naming the only execution fields allowed to differ between arms. Ingestion verifies this claim against effective configs."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "order_strategy": {
+                "const": "randomized"
+              }
+            },
+            "required": [
+              "order_strategy"
+            ]
+          },
+          "then": {
+            "required": [
+              "assignment_seed"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "assignment_seed"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "runOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        "failure_code": {
+          "type": "string",
+          "enum": [
+            "model_load_oom",
+            "model_load_error",
+            "warmup_oom",
+            "warmup_error",
+            "measurement_oom",
+            "measurement_error",
+            "user_cancelled"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "failure_code"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "failure_code"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "workloadProtocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_id",
+        "protocol_version",
+        "protocol_digest",
+        "corpus",
+        "concurrency",
+        "prefix_cache_state",
+        "cases"
+      ],
+      "properties": {
+        "protocol_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "protocol_digest": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "corpus": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "digest"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z0-9][a-z0-9._-]*$"
+            },
+            "digest": {
+              "$ref": "#/$defs/sha256Digest"
+            }
+          }
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "prefix_cache_state": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "cold",
+            "warm",
+            "mixed"
+          ]
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "description": "case_id values MUST be unique; ingestion enforces this relational invariant.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "case_id",
+              "target_prompt_tokens",
+              "target_output_tokens",
+              "warmup_rounds",
+              "measured_rounds"
+            ],
+            "properties": {
+              "case_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9][a-z0-9._-]*$"
+              },
+              "target_prompt_tokens": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "target_output_tokens": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "warmup_rounds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "measured_rounds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              }
+            }
+          }
+        }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "round_index",
+        "prompt_tokens",
+        "output_tokens",
+        "ttft_ms",
+        "decode_duration_ms",
+        "total_duration_ms",
+        "completed"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "round_index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "prompt_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "ttft_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "decode_duration_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Elapsed monotonic time from first token to final token; server derives decode TPS as (output_tokens - 1) / duration for output_tokens > 1."
+        },
+        "total_duration_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "peak_active_memory_mib": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "completed": {
+          "const": true,
+          "description": "Only completed measured rounds belong in BenchmarkRun v1. Failed attempts use a future diagnostic-event contract rather than fabricating timings."
+        }
+      }
+    }
+  }
+}
