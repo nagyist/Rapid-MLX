@@ -154,13 +154,19 @@ def _all_missing_are_multimodal(missing_names: list[str]) -> bool:
 VALIDATED_MLX_VLM_VERSION = "0.6.17"
 
 
+def _managed_desktop_runtime_kind() -> str | None:
+    """Return the Desktop-managed runtime slot for this interpreter."""
+    executable = str(Path(sys.executable).resolve())
+    if "/Library/Application Support/Rapid/runtime-override/" in executable:
+        return "runtime-override"
+    if ".app/Contents/Resources/rapid-mlx/" in executable:
+        return "embedded"
+    return None
+
+
 def _managed_desktop_runtime() -> bool:
     """Whether this interpreter belongs to a Desktop-managed runtime tree."""
-    executable = str(Path(sys.executable).resolve())
-    return (
-        ".app/Contents/Resources/rapid-mlx/" in executable
-        or "/Library/Application Support/Rapid/runtime-override/" in executable
-    )
+    return _managed_desktop_runtime_kind() is not None
 
 
 def _vision_install_hint() -> str:
@@ -171,10 +177,19 @@ def _vision_install_hint() -> str:
     Standalone environments use the active interpreter explicitly so a
     two-venv installation cannot repair the wrong environment.
     """
-    if _managed_desktop_runtime():
+    managed_kind = _managed_desktop_runtime_kind()
+    if managed_kind == "runtime-override":
         return (
-            "Repair or reinstall Rapid-MLX Desktop to restore its validated "
-            "vision runtime. Do not pip-install into the managed sidecar."
+            "Install the current Rapid-MLX Desktop.app first (its DMG ships a "
+            "validated sidecar), then remove "
+            "~/Library/Application Support/Rapid/runtime-override/rapid-mlx "
+            "and relaunch so Desktop uses the bundled sidecar. Do not "
+            "pip-install into the managed runtime override."
+        )
+    if managed_kind == "embedded":
+        return (
+            "Reinstall Rapid-MLX Desktop.app to restore its validated vision "
+            "runtime. Do not pip-install into the code-signed bundled sidecar."
         )
     python = sys.executable
     return (
@@ -334,10 +349,14 @@ def _vlm_broken_install_hint(detail: str | None) -> str:
     """
     if detail in _MISSING_MODULE_PIP_NAME:
         pip_name = _pip_name_for_module(detail)
-        return (
+        hint = (
             f"`mlx-vlm` is installed but its dependency {detail!r} is not, so "
-            f"the vision runtime cannot load. {_vision_install_hint()}\n"
-            f"Alternatively, repair just the missing dependency in this "
+            f"the vision runtime cannot load. {_vision_install_hint()}"
+        )
+        if _managed_desktop_runtime():
+            return hint
+        return (
+            hint + "\nAlternatively, repair just the missing dependency in this "
             f"runtime:\n    {sys.executable} -m pip install {pip_name}"
         )
     suffix = f" ({detail})" if detail else ""

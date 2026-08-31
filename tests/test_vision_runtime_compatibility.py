@@ -68,3 +68,33 @@ def test_validated_runtime_version_is_accepted(monkeypatch):
 
     assert status is mllm.VisionRuntimeStatus.OK
     assert detail is None
+
+
+def test_runtime_override_repair_hint_requires_removal_after_app_install(monkeypatch):
+    monkeypatch.setattr(
+        mllm.sys,
+        "executable",
+        "/Users/alice/Library/Application Support/Rapid/runtime-override/"
+        "rapid-mlx/python/bin/python3.12",
+    )
+
+    hint = mllm._vision_install_hint()
+
+    assert "Install the current Rapid-MLX Desktop.app first" in hint
+    assert "then remove" in hint
+    assert "runtime-override/rapid-mlx" in hint
+    assert " -m pip install" not in hint
+
+
+def test_managed_runtime_missing_dependency_never_recommends_pip(monkeypatch):
+    monkeypatch.setattr(
+        mllm.sys,
+        "executable",
+        "/Applications/Rapid-MLX Desktop.app/Contents/Resources/rapid-mlx/"
+        "python/bin/python3.12",
+    )
+
+    hint = mllm._vlm_broken_install_hint("PIL")
+
+    assert "Reinstall Rapid-MLX Desktop.app" in hint
+    assert "pip install" not in hint
