@@ -2519,6 +2519,22 @@ def test_generator_sampled_verify_uses_request_local_rng():
     assert lane_rng.draws > 0
 
 
+def test_mtp_request_rng_and_greedy_sampler_publish_state_contract():
+    """Apple MTP lane covers the request-local state exposed to the scheduler."""
+    from vllm_mlx._seeded_sampler import RequestSeededRNG, make_seeded_sampler
+
+    carried = RequestSeededRNG(42)
+    initial = carried.key
+    subkey = carried.next_key()
+    assert carried.draws == 1
+    assert carried.key is not initial
+    assert subkey is not None
+
+    greedy = make_seeded_sampler(seed=42, temperature=0.0)
+    assert greedy.lane_rng is None
+    assert greedy.request_seeded is True
+
+
 def test_generator_accepted_draft_reports_target_logprobs(monkeypatch):
     """An accepted proposal exposes p_target, never the drafter's q row."""
     import mlx_lm.sample_utils as sample_utils

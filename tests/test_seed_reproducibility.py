@@ -44,7 +44,7 @@ pytestmark = pytest.mark.requires_mlx
 import mlx.core as mx
 from pydantic import ValidationError
 
-from vllm_mlx._seeded_sampler import RequestSeededRNG, make_seeded_sampler
+from vllm_mlx._seeded_sampler import make_seeded_sampler
 from vllm_mlx.api.models import ChatCompletionRequest, CompletionRequest
 from vllm_mlx.request import SamplingParams
 from vllm_mlx.service.helpers import build_extended_sampling_kwargs
@@ -401,15 +401,6 @@ def test_seeded_sampler_exposes_the_same_carried_rng_it_advances(logprobs_fixtur
     assert carried.draws == 1
 
 
-def test_request_seeded_rng_exposes_and_advances_its_carried_key():
-    carried = RequestSeededRNG(42)
-    initial = carried.key
-    subkey = carried.next_key()
-    assert carried.draws == 1
-    assert carried.key is not initial
-    assert subkey is not None
-
-
 def test_seeded_sampler_different_seed_different_sequence(logprobs_fixture):
     """Different seeds must produce different sequences; if they didn't,
     the seed parameter would be cosmetic."""
@@ -480,8 +471,6 @@ def test_seeded_sampler_greedy_short_circuit(logprobs_fixture):
     argmax = int(mx.argmax(logprobs_fixture, axis=-1)[0])
     assert out1 == argmax
     assert out2 == argmax
-    assert s.lane_rng is None
-    assert s.request_seeded is True
 
 
 def test_seeded_sampler_top_k_combined(logprobs_fixture):
