@@ -24,6 +24,12 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+try:
+    # Normal CLI execution (`python scripts/...`) exposes sibling modules here.
+    from check_mlx_bound_move import detect_bound_changes
+except ModuleNotFoundError:  # Imported by the repository's direct-load tests.
+    from scripts.check_mlx_bound_move import detect_bound_changes
+
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _MERGE_SUBJECT = re.compile(r"^Merge of #(\d+)$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -46,6 +52,7 @@ class Integration:
     previous_candidate_sha: str
     exact_source_sha: str
     changes_pyproject: bool
+    changes_mlx_bounds: bool
 
 
 def parse_queue_metadata(raw: str) -> QueueMetadata:
@@ -139,13 +146,27 @@ def _integrations_between(
             raise AttestationError(
                 f"cannot inspect pyproject.toml at integration {sha}"
             )
+        changes_pyproject = pyproject.returncode == 1
+        changes_mlx_bounds = False
+        if changes_pyproject:
+            old_pyproject = _git("show", f"{parents[0]}:pyproject.toml", cwd=cwd).stdout
+            new_pyproject = _git("show", f"{sha}:pyproject.toml", cwd=cwd).stdout
+            try:
+                changes_mlx_bounds = bool(
+                    detect_bound_changes(old_pyproject, new_pyproject)
+                )
+            except Exception as exc:
+                raise AttestationError(
+                    f"cannot classify mlx bounds at integration {sha}: {exc}"
+                ) from exc
         integrations.append(
             Integration(
                 number=int(match.group(1)),
                 merge_sha=sha,
                 previous_candidate_sha=parents[0],
                 exact_source_sha=parents[1],
-                changes_pyproject=pyproject.returncode == 1,
+                changes_pyproject=changes_pyproject,
+                changes_mlx_bounds=changes_mlx_bounds,
             )
         )
     return integrations
@@ -240,7 +261,7 @@ def main() -> int:
             real_base_sha=os.environ.get("REAL_BASE_SHA", ""),
             candidate_sha=os.environ.get("CANDIDATE_SHA", ""),
         )
-        guarded = [item for item in integrations if item.changes_pyproject]
+        guarded = [item for item in integrations if item.changes_mlx_bounds]
         for item in guarded:
             if not source_pr_attested(
                 os.environ.get("GITHUB_REPOSITORY", ""),
@@ -262,7 +283,7 @@ def main() -> int:
             f"#{item.number}@{item.exact_source_sha[:9]}" for item in guarded
         )
         print(
-            f"[mergify-mlx-attestation] verified: {proved or 'no pyproject integrations'}"
+            f"[mergify-mlx-attestation] verified: {proved or 'no mlx-bound integrations'}"
         )
         return 0
     except AttestationError as exc:

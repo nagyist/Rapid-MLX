@@ -94,9 +94,44 @@ def test_ahead_bound_change_is_verified_even_when_current_batch_is_docs(tmp_path
     by_number = {item.number: item for item in integrations}
     assert set(by_number) == {10, 20}
     assert by_number[10].changes_pyproject is True
+    assert by_number[10].changes_mlx_bounds is True
     assert by_number[10].exact_source_sha == graph["source_a"]
     assert by_number[20].changes_pyproject is False
+    assert by_number[20].changes_mlx_bounds is False
     assert by_number[20].exact_source_sha == graph["source_b"]
+
+
+def test_unrelated_pyproject_change_does_not_require_mlx_attestation(tmp_path):
+    graph = _candidate_graph(tmp_path)
+    repo = Path(graph["repo"])
+    _git(repo, "switch", "-c", "source-c")
+    (repo / "pyproject.toml").write_text(
+        '[project]\ndependencies=["mlx-vlm==2", "httpx==1"]\n'
+    )
+    source_c = _commit(repo, "change unrelated dependency")
+    _git(repo, "switch", "candidate")
+    _git(repo, "merge", "--no-ff", "source-c", "-m", "Merge of #30")
+    candidate = _git(repo, "rev-parse", "HEAD")
+    metadata = attestation.parse_queue_metadata(
+        json.dumps(
+            {
+                "checking_base_sha": graph["candidate"],
+                "pull_requests": [{"number": 30, "scopes": []}],
+            }
+        )
+    )
+
+    integrations = attestation.collect_integrations(
+        metadata,
+        real_base_sha=graph["base"],
+        candidate_sha=candidate,
+        cwd=repo,
+    )
+
+    by_number = {item.number: item for item in integrations}
+    assert by_number[30].exact_source_sha == source_c
+    assert by_number[30].changes_pyproject is True
+    assert by_number[30].changes_mlx_bounds is False
 
 
 def test_unexpected_first_parent_commit_fails_closed(tmp_path):
