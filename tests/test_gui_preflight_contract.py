@@ -573,8 +573,8 @@ def test_start_model_waits_for_an_interactive_readiness_action():
     assert helper.index("wait_identifier_enabled Readiness.Action") < helper.index(
         'press "$OUT/readiness-start.json" Readiness.Action'
     )
-    assert 'identifier == "MemoryWarning.Confirm" and .enabled == true' in helper
-    assert '"$AX_DRIVER" click-center "$APP_PID" MemoryWarning.Confirm' in helper
+    assert "wait_fake_event_after_start" in helper
+    assert r'and .alias == \"$FAKE_ALIAS\"' in helper
 
     driver = DRIVER.read_text()
     click = driver.split('case "click-center":', 1)[1].split(
@@ -582,6 +582,52 @@ def test_start_model_waits_for_an_interactive_readiness_action():
     )[0]
     assert "kAXPositionAttribute" in click and "kAXSizeAttribute" in click
     assert ".leftMouseDown" in click and ".leftMouseUp" in click
+
+
+def test_direct_model_starts_follow_enabled_memory_confirmation_branches():
+    """Every explicit fake-sidecar start must tolerate real host pressure."""
+    source = HARNESS.read_text()
+    confirm = source.split("confirm_memory_warning_from_tree() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert '.identifier == $id and .enabled == true' in confirm
+    assert 'click-center "$APP_PID" "$identifier"' in confirm
+
+    wait = source.split("wait_fake_event_after_start() {", 1)[1].split("\n}", 1)[0]
+    assert 'jq -e -s "any(.[]; $predicate)"' in wait
+    assert "confirm_memory_warning_from_tree" in wait
+    assert "memory_confirmed=1" in wait
+    assert wait.index("confirm_memory_warning_from_tree") < wait.index('die "$what"')
+
+    cached = source.split("flow_cached_quickstart() {", 1)[1].split("\n}", 1)[0]
+    assert "wait_fake_event_after_start" in cached
+    assert "Quickstart.Memory.LoadAnyway" in cached
+
+    image = source.split("flow_image_generation() {", 1)[1].split("\n}", 1)[0]
+    assert "wait_fake_event_after_start" in image
+    assert r'and .alias == \"$FAKE_IMAGE_ALIAS\"' in image
+
+    resident = source.split("flow_resident_load_rejected() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert resident.count("wait_fake_event_after_start") == 2
+    assert "resident-chat" in resident
+    assert "resident-image" in resident
+
+    audio = source.split("flow_audio_readiness() {", 1)[1].split("\n}", 1)[0]
+    assert "wait_fake_event_after_start" in audio
+    assert 'and .alias == "fake-qwen3-tts"' in audio
+
+
+def test_ready_wait_confirms_memory_warning_after_session_restore():
+    """Automatic restore can show the same sheet without calling start_model."""
+    source = HARNESS.read_text()
+    wait = source.split("wait_send_idle() {", 1)[1].split("\n}", 1)[0]
+    assert "confirm_memory_warning_from_tree" in wait
+    assert wait.index("confirm_memory_warning_from_tree") < wait.index(
+        'identifier == "ChatView.SendOrStopButton"'
+    )
+    assert "continue" in wait
 
 
 def test_image_inflight_baseline_uses_an_event_backed_warmup_phase():
