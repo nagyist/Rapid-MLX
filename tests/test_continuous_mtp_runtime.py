@@ -139,22 +139,6 @@ def test_assembler_resolves_inner_model_and_wires_forward_and_cache_seams(
     assert runtime.compute.draft_cache_factory() == ["draft-cache"]
     assert runtime.caches._preflight is preflight_ragged_cache
     assert runtime.caches._trim is trim_ragged_cache
-    # The opt-in speculation-rollback protocol defaults off.
-    assert runtime.compute.speculation_rollback is False
-
-
-def test_speculation_rollback_is_opt_in_and_reaches_the_backend(monkeypatch):
-    inner = _InjectedTextModel()
-    outer = _OuterModel(inner)
-    monkeypatch.setattr(
-        runtime_module, "_make_prompt_cache", lambda model: ["target-cache"]
-    )
-    default = runtime_module.assemble_continuous_self_mtp_runtime(outer)
-    assert default.compute.speculation_rollback is False
-    enabled = runtime_module.assemble_continuous_self_mtp_runtime(
-        outer, speculation_rollback=True
-    )
-    assert enabled.compute.speculation_rollback is True
 
 
 def test_dynamic_membership_requires_policy_and_dense_attestation():

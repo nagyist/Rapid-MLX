@@ -530,29 +530,16 @@ class SchedulerConfig:
     # model descriptor and runtime also attest it.
     mtp_allow_dynamic_membership: bool = False
 
-    # APPEND-ONLY: opt-in rollback protocol for continuous self-MTP.  Default
-    # off keeps the model's n_confirmed snapshot rollback (correct for pure
-    # full-attention caches).  On drives the engine's start_speculation/
-    # trim_ragged rollback (n_confirmed=0), which a GatedDeltaNet hybrid needs;
-    # opt-in because it changes the GDN verify-forward confirmed-boundary.
-    mtp_speculation_rollback: bool = False
-
     def __post_init__(self) -> None:
         if not isinstance(self.mtp_continuous_batching, bool):
             raise ValueError("mtp_continuous_batching must be a boolean")
         if not isinstance(self.mtp_allow_dynamic_membership, bool):
             raise ValueError("mtp_allow_dynamic_membership must be a boolean")
-        if not isinstance(self.mtp_speculation_rollback, bool):
-            raise ValueError("mtp_speculation_rollback must be a boolean")
         if self.mtp_continuous_batching and self.spec_decode != "mtp":
             raise ValueError("mtp_continuous_batching requires spec_decode='mtp'")
         if self.mtp_allow_dynamic_membership and not self.mtp_continuous_batching:
             raise ValueError(
                 "mtp_allow_dynamic_membership requires mtp_continuous_batching"
-            )
-        if self.mtp_speculation_rollback and not self.mtp_continuous_batching:
-            raise ValueError(
-                "mtp_speculation_rollback requires mtp_continuous_batching"
             )
         if (
             self.vision_prefill_token_budget is not None
@@ -863,9 +850,6 @@ def _install_continuous_mtp_router(
             model,
             allow_dynamic_membership=bool(
                 getattr(config, "mtp_allow_dynamic_membership", False)
-            ),
-            speculation_rollback=bool(
-                getattr(config, "mtp_speculation_rollback", False)
             ),
         )
     except Exception as exc:  # noqa: BLE001 - fail closed at optional install

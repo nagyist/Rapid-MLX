@@ -31,7 +31,6 @@ class SpeculativeConfig:
     disable_auto_k: bool | None = None
     continuous_batching: bool = False
     allow_dynamic_membership: bool = False
-    speculation_rollback: bool = False
     max_suffix_len: int | None = None
     min_confidence: float | None = None
     min_draft_len: int | None = None
@@ -55,7 +54,6 @@ _METHOD_KEYS = {
             "disable_auto_k",
             "continuous_batching",
             "allow_dynamic_membership",
-            "speculation_rollback",
         }
     ),
     "suffix": frozenset(
@@ -173,13 +171,6 @@ def parse_speculative_config(value: str | None) -> SpeculativeConfig | None:
             )
             or False
         ),
-        speculation_rollback=(
-            _optional_bool(
-                payload.get("speculation_rollback"),
-                "speculation_rollback",
-            )
-            or False
-        ),
         max_suffix_len=_positive_int(payload.get("max_suffix_len"), "max_suffix_len"),
         min_confidence=_confidence(payload.get("min_confidence"), "min_confidence"),
         min_draft_len=_positive_int(payload.get("min_draft_len"), "min_draft_len"),
@@ -188,10 +179,6 @@ def parse_speculative_config(value: str | None) -> SpeculativeConfig | None:
     if config.allow_dynamic_membership and not config.continuous_batching:
         raise SpeculativeConfigError(
             "allow_dynamic_membership requires continuous_batching=true"
-        )
-    if config.speculation_rollback and not config.continuous_batching:
-        raise SpeculativeConfigError(
-            "speculation_rollback requires continuous_batching=true"
         )
     return config
 
