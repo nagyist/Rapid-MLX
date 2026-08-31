@@ -110,7 +110,7 @@ Full Flash-Next methodology and correctness evidence:
 
 Artifact: `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` at
 `06d6c7530e8290e20fabdc37a825ce07bdfc490c`. Rapid-MLX implementation:
-`9e55e4b735b791127b2cc34e9384f84ebaf78aad`.
+`4acffa71df832eb7865e5c76e1ce8295bd6f074b`.
 
 The server ran with thinking and speculative decoding disabled and temperature
 zero. After warmup, three 512-token requests decoded at 26.11, 29.20, and
