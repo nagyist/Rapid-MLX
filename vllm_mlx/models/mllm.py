@@ -157,9 +157,25 @@ VALIDATED_MLX_VLM_VERSION = "0.6.17"
 
 def _managed_desktop_runtime_kind() -> str | None:
     """Return the Desktop-managed runtime slot for this interpreter."""
-    executable = str(Path(sys.executable).resolve())
+    executable_path = Path(sys.executable).resolve()
+    executable = str(executable_path)
     if "/Library/Application Support/Rapid/runtime-override/" in executable:
-        return "runtime-override"
+        try:
+            root = executable_path.parents[2]
+            expected = (
+                Path(os.environ["HOME"]).expanduser().resolve()
+                / "Library/Application Support/Rapid/runtime-override/rapid-mlx"
+            ).resolve()
+        except (KeyError, IndexError, OSError):
+            return None
+        if (
+            executable_path.parent.name == "bin"
+            and executable_path.parent.parent.name == "python"
+            and executable_path.name.startswith("python")
+            and root == expected
+        ):
+            return "runtime-override"
+        return None
     if ".app/Contents/Resources/rapid-mlx/" in executable:
         return "embedded"
     return None

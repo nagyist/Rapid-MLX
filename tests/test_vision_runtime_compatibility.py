@@ -71,6 +71,7 @@ def test_validated_runtime_version_is_accepted(monkeypatch):
 
 
 def test_runtime_override_repair_hint_requires_removal_after_app_install(monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/alice")
     monkeypatch.setattr(
         mllm.sys,
         "executable",
@@ -87,6 +88,7 @@ def test_runtime_override_repair_hint_requires_removal_after_app_install(monkeyp
 
 
 def test_runtime_override_repair_hint_uses_active_custom_home(monkeypatch):
+    monkeypatch.setenv("HOME", "/tmp/dogfood-home")
     monkeypatch.setattr(
         mllm.sys,
         "executable",
@@ -98,6 +100,17 @@ def test_runtime_override_repair_hint_uses_active_custom_home(monkeypatch):
 
     assert "/tmp/dogfood-home/Library/Application Support/Rapid/" in hint
     assert "~/Library/Application Support" not in hint
+
+
+def test_noncanonical_override_path_is_not_managed(monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/alice")
+    monkeypatch.setattr(
+        mllm.sys,
+        "executable",
+        "/Users/alice/Library/Application Support/Rapid/runtime-override/bin/python",
+    )
+
+    assert mllm._managed_desktop_runtime_kind() is None
 
 
 def test_managed_runtime_missing_dependency_never_recommends_pip(monkeypatch):

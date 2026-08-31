@@ -3487,6 +3487,26 @@ Examples:
     if args.mcp_config:
         os.environ["RAPID_MLX_MCP_CONFIG"] = args.mcp_config
 
+    # Parser/auto-config discovery below may resolve a subfolder checkpoint.
+    # Guard vision runtime compatibility before that can download its weights.
+    from .model_aliases import resolve_profile as _early_resolve_profile
+
+    _early_profile = _early_resolve_profile(args.model)
+    _early_generative_media = (
+        _early_profile is not None
+        and _early_profile.modality in ("image-gen", "video-gen")
+    )
+    _early_spec_decode = getattr(args, "spec_decode", "none") or "none"
+    if _early_spec_decode == "none" and getattr(args, "force_spec_decode", False):
+        _early_spec_decode = "auto"
+    if not _early_generative_media:
+        _preflight_vision_runtime(
+            args.model,
+            force_mllm=getattr(args, "mllm", False),
+            force_text=getattr(args, "no_mllm", False),
+            requested_spec_decode=_early_spec_decode,
+        )
+
     # Resolve checkpoint/profile metadata lazily and at most once for every
     # standalone-server default below. Cache admission is best-effort; parser,
     # PFlash, and TurboQuant retain their existing error policy when they are
@@ -3631,10 +3651,6 @@ Examples:
     ):
         _srv_requested_spec_decode = "auto"
     if not _srv_force_mllm and not _srv_force_text and not _srv_generative_media:
-        _preflight_vision_runtime(
-            args.model,
-            requested_spec_decode=_srv_requested_spec_decode,
-        )
         _ensure_routing_config(args.model)
     _srv_is_mllm, _ = resolve_serving_lane(
         args.model,
