@@ -85,7 +85,9 @@ def test_upload_rejects_fields_outside_privacy_allowlist(
         _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
     )
     assert errors
-    assert any("Additional properties are not allowed" in error.message for error in errors)
+    assert any(
+        "Additional properties are not allowed" in error.message for error in errors
+    )
 
 
 def test_client_cannot_upload_server_verdicts(schemas, registry) -> None:
@@ -108,12 +110,22 @@ def test_repository_identity_requires_immutable_revision(schemas, registry) -> N
     del example["source"]["resolved_revision"]
 
     errors = list(
-        _validator(schemas["model-identity.schema.json"], registry).iter_errors(
-            example
-        )
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
     )
     assert errors
     assert any("resolved_revision" in error.message for error in errors)
+
+
+def test_repository_revision_identity_requires_digest(schemas, registry) -> None:
+    example = _load(EXAMPLES_ROOT / "model-identity.example.json")
+    example["identity_strength"] = "repository_revision"
+    del example["identity_digest"]
+
+    errors = list(
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
+    )
+    assert errors
+    assert any("identity_digest" in error.message for error in errors)
 
 
 def test_local_identity_rejects_repository_coordinates(schemas, registry) -> None:
@@ -122,9 +134,7 @@ def test_local_identity_rejects_repository_coordinates(schemas, registry) -> Non
     example["source"]["kind"] = "local"
 
     errors = list(
-        _validator(schemas["model-identity.schema.json"], registry).iter_errors(
-            example
-        )
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
     )
     assert errors
 
@@ -135,20 +145,21 @@ def test_quantized_model_requires_method_and_weight_bits(schemas, registry) -> N
     del example["quantization"]["weight_bits"]
 
     errors = list(
-        _validator(schemas["model-identity.schema.json"], registry).iter_errors(
-            example
-        )
+        _validator(schemas["model-identity.schema.json"], registry).iter_errors(example)
     )
     assert {"method", "weight_bits"}.issubset(
-        {field for error in errors for field in ("method", "weight_bits") if field in error.message}
+        {
+            field
+            for error in errors
+            for field in ("method", "weight_bits")
+            if field in error.message
+        }
     )
 
 
 def test_mtp_requires_draft_depth(schemas, registry) -> None:
     example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
-    del example["execution"]["features"]["speculative_decoding"][
-        "max_draft_tokens"
-    ]
+    del example["execution"]["features"]["speculative_decoding"]["max_draft_tokens"]
 
     errors = list(
         _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
@@ -263,6 +274,21 @@ def test_experiment_can_vary_only_execution_fields(schemas, registry) -> None:
     assert any("does not match" in error.message for error in errors)
 
 
+def test_single_token_case_has_ttft_but_no_decode_tps_window(schemas, registry) -> None:
+    example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
+    example["workload"]["cases"][0]["target_output_tokens"] = 1
+    measurement = example["measurements"][0]
+    measurement["output_tokens"] = 1
+    measurement["decode_duration_ms"] = 0
+    _validator(schemas["benchmark-run.schema.json"], registry).validate(example)
+
+    measurement["decode_duration_ms"] = 0.1
+    errors = list(
+        _validator(schemas["benchmark-run.schema.json"], registry).iter_errors(example)
+    )
+    assert errors
+
+
 def test_machine_profile_digest_does_not_change_with_run_conditions() -> None:
     """The normative digest projection is profile-only, not a device ID."""
     example = _load(EXAMPLES_ROOT / "benchmark-run.example.json")
@@ -296,9 +322,9 @@ def test_cross_language_digest_golden_vectors() -> None:
     }
 
     assert _digest(model_projection) == model["identity_digest"]
-    assert _digest(example["machine"]["profile"]) == example["machine"][
-        "profile_digest"
-    ]
+    assert (
+        _digest(example["machine"]["profile"]) == example["machine"]["profile_digest"]
+    )
     assert _digest(execution_projection) == execution["config_digest"]
 
 
@@ -316,6 +342,10 @@ def test_example_measurements_match_declared_cases() -> None:
         seen.add(pair)
 
     for case_id, case in cases.items():
-        assert sum(measurement["case_id"] == case_id for measurement in example["measurements"]) == case[
-            "measured_rounds"
-        ]
+        assert (
+            sum(
+                measurement["case_id"] == case_id
+                for measurement in example["measurements"]
+            )
+            == case["measured_rounds"]
+        )

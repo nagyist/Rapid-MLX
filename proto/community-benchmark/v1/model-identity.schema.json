@@ -350,6 +350,9 @@
         ]
       },
       "then": {
+        "required": [
+          "identity_digest"
+        ],
         "properties": {
           "source": {
             "properties": {
