@@ -212,6 +212,23 @@ def test_vlm_workload_and_measurement_union_is_reachable(schemas, registry) -> N
     for name, value in (("workload", workload), ("measurement", measurement)):
         _validator({"$ref": f"{base_id}#/$defs/{name}"}, registry).validate(value)
 
+    workload["cases"][0]["frames"] = 1
+    assert list(
+        _validator({"$ref": f"{base_id}#/$defs/workload"}, registry).iter_errors(
+            workload
+        )
+    )
+    del workload["cases"][0]["frames"]
+    workload["cases"][0]["media_kind"] = "video"
+    errors = list(
+        _validator({"$ref": f"{base_id}#/$defs/workload"}, registry).iter_errors(
+            workload
+        )
+    )
+    assert errors
+    workload["cases"][0]["frames"] = 24
+    _validator({"$ref": f"{base_id}#/$defs/workload"}, registry).validate(workload)
+
 
 @pytest.mark.parametrize(
     ("section", "key", "value"),
@@ -329,6 +346,47 @@ def test_mtp_and_quantized_kv_require_reproducibility_fields(schemas, registry) 
     messages = " ".join(error.message for error in errors)
     assert "max_draft_tokens" in messages
     assert "bits_x2" in messages
+
+
+def test_kv_precision_fields_are_mutually_consistent(schemas, registry) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "execution.text.example.json")
+    cache = example["task"]["language"]["kv_cache"]
+    cache["mode"] = "full_precision"
+    cache["dtype"] = "float16"
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+
+    cache.pop("bits_x2")
+    cache.pop("group_size")
+    _validator(schemas["execution-config.schema.json"], registry).validate(example)
+    cache["mode"] = "quantized"
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+
+
+def test_temporal_chunking_requires_size_only_when_enabled(schemas, registry) -> None:
+    example = _load(RUNTIME_ROOT / "examples" / "execution.video.example.json")
+    chunking = example["task"]["temporal_chunking"]
+    del chunking["frames_per_chunk"]
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+    chunking.update({"enabled": False, "frames_per_chunk": 16})
+    assert list(
+        _validator(schemas["execution-config.schema.json"], registry).iter_errors(
+            example
+        )
+    )
+    del chunking["frames_per_chunk"]
+    _validator(schemas["execution-config.schema.json"], registry).validate(example)
 
 
 def test_scaled_config_values_reject_floats(schemas, registry) -> None:
