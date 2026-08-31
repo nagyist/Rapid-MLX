@@ -12,6 +12,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -287,6 +288,64 @@ class TestAttestation:
 
     def test_label_match_is_case_insensitive_and_trimmed(self):
         assert guard._attestation_ok("", "  MLX-Coherence-Swept  ", False)
+
+
+class TestMergifyAttestationWorkflow:
+    """The queue may reuse only exact-head guard results from trusted batches."""
+
+    @staticmethod
+    def _job() -> dict:
+        workflow = yaml.load(
+            (_REPO_ROOT / ".github/workflows/ci.yml").read_text(),
+            Loader=yaml.BaseLoader,
+        )
+        return workflow["jobs"]["mlx-bound-guard"]
+
+    def test_candidate_resolver_is_limited_to_trusted_same_repo_mergify_prs(self):
+        job = self._job()
+        resolver = next(
+            step for step in job["steps"] if step.get("id") == "mergify-attestation"
+        )
+
+        condition = resolver["if"]
+        assert "github.event.pull_request.user.login == 'mergify[bot]'" in condition
+        assert (
+            "github.event.pull_request.head.repo.full_name == github.repository"
+            in condition
+        )
+        assert "startsWith(github.head_ref, 'mergify/merge-queue/')" in condition
+        assert resolver["uses"].startswith("actions/github-script@")
+        assert job["permissions"] == {
+            "checks": "read",
+            "contents": "read",
+            "pull-requests": "read",
+        }
+
+    def test_candidate_resolver_binds_each_source_head_and_guard_result(self):
+        job = self._job()
+        resolver = next(
+            step for step in job["steps"] if step.get("id") == "mergify-attestation"
+        )
+        script = resolver["with"]["script"]
+
+        assert "pull_requests:" in script
+        assert '"merge-base", "--is-ancestor", source.head.sha, candidateSha' in script
+        assert "source.changed_files > 3000" in script
+        assert "github.rest.pulls.listFiles" in script
+        assert 'file.filename === "pyproject.toml"' in script
+        assert 'check_name: "mlx-bound-guard"' in script
+        assert 'check.app?.slug === "github-actions"' in script
+        assert 'guard.conclusion !== "success"' in script
+
+        guard_step = next(
+            step
+            for step in job["steps"]
+            if step.get("name") == "Guard mlx/mlx-lm/mlx-vlm version bounds"
+        )
+        assert (
+            guard_step["env"]["MLX_BOUND_ATTESTED"]
+            == "${{ steps.mergify-attestation.outputs.attested }}"
+        )
 
 
 class TestDesktopManifestSynced:
