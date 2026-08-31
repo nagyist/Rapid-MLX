@@ -4,6 +4,12 @@ import Observation
 @MainActor
 @Observable
 final class VideoGenViewModel {
+    private struct ServerRequestContext: Equatable {
+        let alias: String
+        let port: Int
+        let bearer: String
+    }
+
     enum Mode: String, CaseIterable, Identifiable {
         case text
         case image
@@ -50,6 +56,9 @@ final class VideoGenViewModel {
     @ObservationIgnored private let client: any VideoClientProtocol
     @ObservationIgnored private let catalogLoader: (URL) async -> [ModelEntry]
     @ObservationIgnored private var catalogRefreshGeneration: UInt = 0
+    @ObservationIgnored private var serverContextGeneration: UInt = 0
+    @ObservationIgnored private var serverRefreshGeneration: UInt = 0
+    @ObservationIgnored private var loadedServerContext: ServerRequestContext?
     @ObservationIgnored private var previewGeneration: UInt = 0
 
     init(
@@ -86,7 +95,7 @@ final class VideoGenViewModel {
     }
 
     var sizePresets: [String] { capabilities?.sizePresets ?? [] }
-    var durationPresets: [Int] { capabilities?.durationPresets ?? [] }
+    var durationPresets: [Int] { capabilities?.durationPresets(for: size) ?? [] }
 
     var isSelectedModelEligible: Bool {
         selectedModel.map(isModelEligible) ?? false
@@ -98,7 +107,7 @@ final class VideoGenViewModel {
     }
 
     var isServerReady: Bool {
-        server.servingAlias == selectedAlias && server.activeBearer != nil
+        currentServerContext != nil
     }
 
     var canSubmit: Bool {
@@ -107,7 +116,8 @@ final class VideoGenViewModel {
             && capabilities != nil
             && supportedModes.contains(mode)
             && !trimmed.isEmpty
-            && !size.isEmpty
+            && sizePresets.contains(size)
+            && durationPresets.contains(seconds)
             && !isSubmitting
             && (mode == .text || referenceImage != nil)
     }
@@ -129,6 +139,7 @@ final class VideoGenViewModel {
             catalogLoaded = true
             videoModels = []
             selectedAlias = ""
+            selectedModelDidChange()
             return
         }
         let loaded = await catalogLoader(binary)
@@ -168,6 +179,14 @@ final class VideoGenViewModel {
         referenceImage = reference
     }
 
+    func selectSize(_ value: String) {
+        guard size != value else { return }
+        size = value
+        if !durationPresets.contains(seconds) {
+            seconds = durationPresets.first ?? 0
+        }
+    }
+
     func prepareSelectedModel() async {
         guard !isPreparing, let model = selectedModel, isSelectedModelEligible else { return }
         isPreparing = true
@@ -178,6 +197,7 @@ final class VideoGenViewModel {
             hfPath: model.hfRepo,
             minimumMemoryGB: model.minimumMemoryGB
         )
+        guard selectedAlias == model.alias else { return }
         guard ready else {
             errorMessage = "Rapid couldn't start this video model. Check the memory notice or server log, then try again."
             return
@@ -186,45 +206,84 @@ final class VideoGenViewModel {
     }
 
     func serverStateDidChange() async {
-        if isServerReady {
-            if capabilities == nil { await refreshServerData() }
-        } else {
+        guard let context = currentServerContext else {
+            invalidateServerContext()
             capabilities = nil
+            return
+        }
+        if let loadedServerContext, loadedServerContext != context {
+            invalidateServerContext()
+            capabilities = nil
+        }
+        if capabilities == nil || loadedServerContext != context {
+            await refreshServerData()
         }
     }
 
     func refreshServerData() async {
-        guard isServerReady else { return }
+        guard let context = currentServerContext else { return }
+        serverRefreshGeneration &+= 1
+        let refreshGeneration = serverRefreshGeneration
+        let contextGeneration = serverContextGeneration
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer {
+            if refreshGeneration == serverRefreshGeneration { isRefreshing = false }
+        }
         do {
             let newCapabilities = try await client.capabilities(
-                port: server.activePort, bearer: server.activeBearer
+                port: context.port, bearer: context.bearer
             )
+            guard requestIsCurrent(
+                context,
+                contextGeneration: contextGeneration,
+                refreshGeneration: refreshGeneration
+            ) else { return }
             capabilities = newCapabilities
+            loadedServerContext = context
             reconcileControls()
             errorMessage = nil
             do {
-                jobs = try await client.list(
-                    port: server.activePort, bearer: server.activeBearer, limit: 30
+                let newJobs = try await client.list(
+                    port: context.port, bearer: context.bearer, limit: 30
                 )
+                guard requestIsCurrent(
+                    context,
+                    contextGeneration: contextGeneration,
+                    refreshGeneration: refreshGeneration
+                ) else { return }
+                jobs = newJobs
                 reconcileSelection()
             } catch {
+                guard requestIsCurrent(
+                    context,
+                    contextGeneration: contextGeneration,
+                    refreshGeneration: refreshGeneration
+                ) else { return }
                 // Controls remain usable when history alone is unavailable.
                 errorMessage = "Video controls are ready, but recent videos couldn't be loaded."
             }
         } catch {
+            guard requestIsCurrent(
+                context,
+                contextGeneration: contextGeneration,
+                refreshGeneration: refreshGeneration
+            ) else { return }
             errorMessage = error.localizedDescription
         }
     }
 
     func pollJobs() async {
-        guard isServerReady, !isRefreshing else { return }
+        guard let context = currentServerContext, !isRefreshing else { return }
+        let contextGeneration = serverContextGeneration
         do {
             let previous = selectedJob?.status
-            jobs = try await client.list(
-                port: server.activePort, bearer: server.activeBearer, limit: 30
+            let newJobs = try await client.list(
+                port: context.port, bearer: context.bearer, limit: 30
             )
+            guard requestIsCurrent(
+                context, contextGeneration: contextGeneration
+            ) else { return }
+            jobs = newJobs
             reconcileSelection()
             if selectedJob?.status == .completed, previous != .completed {
                 await loadSelectedPreview()
@@ -236,7 +295,8 @@ final class VideoGenViewModel {
     }
 
     func submit() async {
-        guard canSubmit else { return }
+        guard canSubmit, let context = currentServerContext else { return }
+        let contextGeneration = serverContextGeneration
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let reference = mode == .image ? referenceImage : nil
         isSubmitting = true
@@ -254,9 +314,12 @@ final class VideoGenViewModel {
                     referenceFileName: reference?.fileName,
                     referenceMIMEType: reference?.mimeType
                 ),
-                port: server.activePort,
-                bearer: server.activeBearer
+                port: context.port,
+                bearer: context.bearer
             )
+            guard requestIsCurrent(
+                context, contextGeneration: contextGeneration
+            ) else { return }
             jobs.removeAll { $0.id == job.id }
             jobs.insert(job, at: 0)
             selectedJobID = job.id
@@ -264,6 +327,9 @@ final class VideoGenViewModel {
             prompt = ""
             seed = Int.random(in: 1...999_999)
         } catch {
+            guard requestIsCurrent(
+                context, contextGeneration: contextGeneration
+            ) else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -275,32 +341,44 @@ final class VideoGenViewModel {
     }
 
     func loadSelectedPreview() async {
-        guard let job = selectedJob, job.status == .completed, isServerReady else {
+        guard let job = selectedJob, job.status == .completed,
+              let context = currentServerContext else {
             previewURL = nil
             return
         }
+        let contextGeneration = serverContextGeneration
         previewGeneration &+= 1
         let generation = previewGeneration
         isLoadingPreview = true
         defer { if generation == previewGeneration { isLoadingPreview = false } }
         do {
             let url = try await client.content(
-                id: job.id, port: server.activePort, bearer: server.activeBearer
+                id: job.id, port: context.port, bearer: context.bearer
             )
-            guard generation == previewGeneration else { return }
+            guard generation == previewGeneration,
+                  requestIsCurrent(
+                    context, contextGeneration: contextGeneration
+                  ) else { return }
             previewURL = url
         } catch {
-            guard generation == previewGeneration else { return }
+            guard generation == previewGeneration,
+                  requestIsCurrent(
+                    context, contextGeneration: contextGeneration
+                  ) else { return }
             errorMessage = error.localizedDescription
         }
     }
 
     func delete(_ job: VideoJob) async {
-        guard isServerReady, job.status != .inProgress else { return }
+        guard let context = currentServerContext, job.status != .inProgress else { return }
+        let contextGeneration = serverContextGeneration
         do {
             try await client.delete(
-                id: job.id, port: server.activePort, bearer: server.activeBearer
+                id: job.id, port: context.port, bearer: context.bearer
             )
+            guard requestIsCurrent(
+                context, contextGeneration: contextGeneration
+            ) else { return }
             jobs.removeAll { $0.id == job.id }
             if selectedJobID == job.id {
                 selectedJobID = jobs.first?.id
@@ -308,11 +386,15 @@ final class VideoGenViewModel {
                 await loadSelectedPreview()
             }
         } catch {
+            guard requestIsCurrent(
+                context, contextGeneration: contextGeneration
+            ) else { return }
             errorMessage = error.localizedDescription
         }
     }
 
     private func selectedModelDidChange() {
+        invalidateServerContext()
         capabilities = nil
         jobs = []
         selectedJobID = nil
@@ -330,10 +412,10 @@ final class VideoGenViewModel {
             mode = modes.first ?? supportedModes.first ?? .text
             if mode == .text { referenceImage = nil }
         }
-        if !durationPresets.contains(seconds) {
-            seconds = durationPresets.first ?? capabilities?.limits.seconds.default ?? 1
-        }
         if !sizePresets.contains(size) { size = sizePresets.first ?? "" }
+        if !durationPresets.contains(seconds) {
+            seconds = durationPresets.first ?? 0
+        }
     }
 
     private func reconcileSelection() {
@@ -345,5 +427,35 @@ final class VideoGenViewModel {
         if selectedJobID == nil || !jobs.contains(where: { $0.id == selectedJobID }) {
             selectedJobID = jobs.first?.id
         }
+    }
+
+    private var currentServerContext: ServerRequestContext? {
+        guard !selectedAlias.isEmpty,
+              server.servingAlias == selectedAlias,
+              let bearer = server.activeBearer, !bearer.isEmpty else { return nil }
+        return ServerRequestContext(
+            alias: selectedAlias,
+            port: server.activePort,
+            bearer: bearer
+        )
+    }
+
+    private func invalidateServerContext() {
+        serverContextGeneration &+= 1
+        serverRefreshGeneration &+= 1
+        previewGeneration &+= 1
+        loadedServerContext = nil
+        isRefreshing = false
+        isLoadingPreview = false
+    }
+
+    private func requestIsCurrent(
+        _ context: ServerRequestContext,
+        contextGeneration: UInt,
+        refreshGeneration: UInt? = nil
+    ) -> Bool {
+        guard contextGeneration == serverContextGeneration,
+              currentServerContext == context else { return false }
+        return refreshGeneration.map { $0 == serverRefreshGeneration } ?? true
     }
 }

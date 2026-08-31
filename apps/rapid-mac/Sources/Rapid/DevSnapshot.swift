@@ -177,7 +177,14 @@ enum DevSnapshot {
                         maximumArea: nil,
                         alsoSupported: nil
                     ),
-                    seconds: .init(minimum: 1, maximum: 20, default: 4)
+                    seconds: .init(minimum: 1, maximum: 20, default: 4),
+                    fps: .init(minimum: 1, maximum: 60, default: 24, fixed: false),
+                    frames: .init(minimum: 9, maximum: 1201, step: 8, offset: 1),
+                    workload: .init(
+                        metric: "pixel_frames",
+                        maximum: 38_141_952,
+                        dimensionRounding: "multiple_of_64"
+                    )
                 )
             )
             readyViewModel.size = "512x512"

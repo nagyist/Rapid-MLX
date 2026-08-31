@@ -3,6 +3,31 @@ import AVKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum VideoPreviewSaver {
+    static func save(
+        source: URL,
+        destination: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        let directory = destination.deletingLastPathComponent()
+        let staging = directory.appendingPathComponent(
+            ".rapid-video-save-\(UUID().uuidString).mp4"
+        )
+        defer { try? fileManager.removeItem(at: staging) }
+        try fileManager.copyItem(at: source, to: staging)
+        if fileManager.fileExists(atPath: destination.path) {
+            _ = try fileManager.replaceItemAt(
+                destination,
+                withItemAt: staging,
+                backupItemName: nil,
+                options: []
+            )
+        } else {
+            try fileManager.moveItem(at: staging, to: destination)
+        }
+    }
+}
+
 private struct VideoCatalogRefreshKey: Hashable {
     let cacheGeneration: UInt
 }
@@ -380,7 +405,7 @@ struct VideoView: View {
     @ViewBuilder
     private var parameterPickers: some View {
         if !viewModel.sizePresets.isEmpty {
-            Picker("Size", selection: $viewModel.size) {
+            Picker("Size", selection: sizeBinding) {
                 ForEach(viewModel.sizePresets, id: \.self) {
                     Text($0.replacingOccurrences(of: "x", with: " × ")).tag($0)
                 }
@@ -476,6 +501,10 @@ struct VideoView: View {
         Binding(get: { viewModel.mode }, set: { viewModel.selectMode($0) })
     }
 
+    private var sizeBinding: Binding<String> {
+        Binding(get: { viewModel.size }, set: { viewModel.selectSize($0) })
+    }
+
     private func importReference(_ result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
@@ -507,10 +536,7 @@ struct VideoView: View {
         panel.nameFieldStringValue = "\(viewModel.selectedJob?.id ?? "rapid-video").mp4"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
-            }
-            try FileManager.default.copyItem(at: source, to: destination)
+            try VideoPreviewSaver.save(source: source, destination: destination)
         } catch {
             viewModel.errorMessage = "Rapid couldn't save the video to that location."
         }

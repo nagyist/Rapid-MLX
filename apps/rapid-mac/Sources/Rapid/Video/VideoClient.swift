@@ -65,8 +65,36 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
             let `default`: Int
         }
 
+        struct FPSLimit: Decodable, Sendable, Hashable {
+            let minimum: Int
+            let maximum: Int
+            let `default`: Int
+            let fixed: Bool
+        }
+
+        struct FramesLimit: Decodable, Sendable, Hashable {
+            let minimum: Int
+            let maximum: Int
+            let step: Int
+            let offset: Int
+        }
+
+        struct WorkloadLimit: Decodable, Sendable, Hashable {
+            let metric: String
+            let maximum: Int
+            let dimensionRounding: String
+
+            enum CodingKeys: String, CodingKey {
+                case metric, maximum
+                case dimensionRounding = "dimension_rounding"
+            }
+        }
+
         let size: SizeLimit
         let seconds: SecondsLimit
+        let fps: FPSLimit
+        let frames: FramesLimit
+        let workload: WorkloadLimit
     }
 
     let model: String
@@ -112,12 +140,46 @@ struct VideoCapabilities: Decodable, Sendable, Hashable {
         }.map { $0.value }
     }
 
-    var durationPresets: [Int] {
+    func durationPresets(for size: String) -> [Int] {
         let candidates = [1, 2, 4]
         let values = candidates.filter {
             (limits.seconds.minimum...limits.seconds.maximum).contains($0)
+                && workloadAllows(seconds: $0, size: size)
         }
-        return values.isEmpty ? [limits.seconds.default] : values
+        if !values.isEmpty { return values }
+        return workloadAllows(seconds: limits.seconds.default, size: size)
+            ? [limits.seconds.default] : []
+    }
+
+    private func workloadAllows(seconds: Int, size: String) -> Bool {
+        guard limits.workload.metric == "pixel_frames",
+              let dimensions = Self.parseSize(size),
+              seconds > 0,
+              limits.fps.default > 0 else { return false }
+        let widthMultiple = limits.size.width?.multipleOf ?? 1
+        let heightMultiple = limits.size.height?.multipleOf ?? 1
+        let width = Self.roundUp(dimensions.width, to: widthMultiple)
+        let height = Self.roundUp(dimensions.height, to: heightMultiple)
+        let frameStep = max(1, limits.frames.step)
+        let frameOffset = limits.frames.offset
+        guard frameOffset >= 0 else { return false }
+        let (requestedFrames, requestOverflow) = seconds.multipliedReportingOverflow(
+            by: limits.fps.default
+        )
+        guard !requestOverflow else { return false }
+        let frameDelta = requestedFrames > frameOffset
+            ? requestedFrames - frameOffset : 0
+        let (roundedDelta, roundingOverflow) = frameDelta.addingReportingOverflow(frameStep - 1)
+        guard !roundingOverflow else { return false }
+        let steps = roundedDelta / frameStep
+        let (steppedFrames, stepOverflow) = steps.multipliedReportingOverflow(by: frameStep)
+        let (normalizedFrames, offsetOverflow) = steppedFrames.addingReportingOverflow(frameOffset)
+        guard !stepOverflow, !offsetOverflow else { return false }
+        let frames = max(limits.frames.minimum, normalizedFrames)
+        guard frames <= limits.frames.maximum else { return false }
+        let (pixelCount, pixelOverflow) = width.multipliedReportingOverflow(by: height)
+        let (workload, workloadOverflow) = pixelCount.multipliedReportingOverflow(by: frames)
+        return !pixelOverflow && !workloadOverflow && workload <= limits.workload.maximum
     }
 
     private static func parseSize(_ value: String) -> (width: Int, height: Int)? {

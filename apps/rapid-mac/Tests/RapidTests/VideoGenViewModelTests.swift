@@ -61,6 +61,10 @@ struct VideoGenViewModelTests {
         await viewModel.refreshServerData()
         #expect(viewModel.size == "512x512")
         #expect(viewModel.seconds == 1)
+        viewModel.seconds = 4
+        viewModel.selectSize("1280x720")
+        #expect(viewModel.durationPresets == [1])
+        #expect(viewModel.seconds == 1)
 
         viewModel.selectMode(.image)
         viewModel.prompt = "Ocean waves moving around a black rock"
@@ -75,10 +79,49 @@ struct VideoGenViewModelTests {
         let requests = await client.recordedRequests()
         let request = try #require(requests.first)
         #expect(request.model == model.alias)
+        #expect(request.size == "1280x720")
+        #expect(request.seconds == 1)
         #expect(request.reference == Data("png".utf8))
         #expect(request.referenceFileName == "rock.png")
         #expect(viewModel.jobs.first?.status == .queued)
         #expect(viewModel.prompt.isEmpty)
+    }
+
+    @Test("A late response cannot repopulate a newly selected model")
+    func staleCapabilitiesAreDiscarded() async throws {
+        let first = ModelEntry(
+            alias: "video-a", hfRepo: "org/a", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 24
+        )
+        let second = ModelEntry(
+            alias: "video-b", hfRepo: "org/b", sizeOnDisk: "9 GB", cached: true,
+            kind: .video, videoCapabilities: [.textToVideo], minimumMemoryGB: 24
+        )
+        let client = VideoSuspendingClient(
+            capabilities: try VideoFakeClient.capabilitiesValue()
+        )
+        let server = ServerManager(
+            testingState: .ready(alias: first.alias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            activeBearer: "test-bearer"
+        )
+        let viewModel = VideoGenViewModel(
+            server: server,
+            client: client,
+            physicalRAMGB: 32,
+            catalogLoader: { _ in [first, second] }
+        )
+        await viewModel.refreshCatalog()
+
+        let refresh = Task { await viewModel.refreshServerData() }
+        await client.waitUntilCapabilitiesRequested()
+        viewModel.selectModel(second.alias)
+        await client.resumeCapabilities()
+        await refresh.value
+
+        #expect(viewModel.selectedAlias == second.alias)
+        #expect(viewModel.capabilities == nil)
+        #expect(viewModel.jobs.isEmpty)
     }
 }
 
@@ -117,14 +160,61 @@ private actor VideoFakeClient: VideoClientProtocol {
 
     func recordedRequests() -> [VideoCreateRequest] { requests }
 
+    nonisolated static func capabilitiesValue() throws -> VideoCapabilities {
+        try JSONDecoder().decode(VideoCapabilities.self, from: Data(capabilitiesJSON.utf8))
+    }
+
     private static let capabilitiesJSON = #"""
     {
       "model":"org/ltx","family":"ltx-2.3",
       "modes":["text-to-video","image-to-video"],
       "limits":{
-        "size":{"type":"range","width":{"minimum":256,"maximum":1920,"multiple_of":64},"height":{"minimum":256,"maximum":1920,"multiple_of":64}},
-        "seconds":{"minimum":1,"maximum":20,"default":4}
+        "size":{"type":"range","width":{"minimum":256,"maximum":1920,"multiple_of":64},"height":{"minimum":256,"maximum":1920,"multiple_of":64},"also_supported":["1280x720","720x1280"]},
+        "seconds":{"minimum":1,"maximum":20,"default":4},
+        "fps":{"minimum":1,"maximum":60,"default":24,"fixed":false},
+        "frames":{"minimum":9,"maximum":1201,"step":8,"offset":1},
+        "workload":{"metric":"pixel_frames","maximum":38141952,"dimension_rounding":"multiple_of_64"}
       }
     }
     """#
+}
+
+private actor VideoSuspendingClient: VideoClientProtocol {
+    private let value: VideoCapabilities
+    private var capabilitiesRequested = false
+    private var capabilitiesContinuation: CheckedContinuation<VideoCapabilities, Error>?
+
+    init(capabilities: VideoCapabilities) {
+        value = capabilities
+    }
+
+    func capabilities(port: Int, bearer: String?) async throws -> VideoCapabilities {
+        capabilitiesRequested = true
+        return try await withCheckedThrowingContinuation { continuation in
+            capabilitiesContinuation = continuation
+        }
+    }
+
+    func waitUntilCapabilitiesRequested() async {
+        while !capabilitiesRequested { await Task.yield() }
+    }
+
+    func resumeCapabilities() {
+        capabilitiesContinuation?.resume(returning: value)
+        capabilitiesContinuation = nil
+    }
+
+    func create(
+        _ request: VideoCreateRequest,
+        port: Int,
+        bearer: String?
+    ) async throws -> VideoJob {
+        throw VideoClientError.invalidResponse
+    }
+
+    func list(port: Int, bearer: String?, limit: Int) async throws -> [VideoJob] { [] }
+    func delete(id: String, port: Int, bearer: String?) async throws {}
+    func content(id: String, port: Int, bearer: String?) async throws -> URL {
+        throw VideoClientError.invalidResponse
+    }
 }

@@ -22,7 +22,8 @@ struct VideoClientTests {
         #expect(value.sizePresets == [
             "512x512", "768x512", "512x768", "1280x720", "720x1280",
         ])
-        #expect(value.durationPresets == [1, 2, 4])
+        #expect(value.durationPresets(for: "512x512") == [1, 2, 4])
+        #expect(value.durationPresets(for: "1280x720") == [1])
         let request = try #require(VideoStubProtocol.requests.first)
         #expect(request.url?.path == "/v1/videos/capabilities")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
@@ -73,6 +74,44 @@ struct VideoClientTests {
         } catch let error as VideoClientError {
             #expect(error.errorDescription == "start a video model")
         }
+    }
+
+    @Test("Failed save leaves an existing destination untouched")
+    func failedSavePreservesDestination() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "rapid-video-save-tests-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("kept.mp4")
+        try Data("original".utf8).write(to: destination)
+
+        do {
+            try VideoPreviewSaver.save(
+                source: directory.appendingPathComponent("missing.mp4"),
+                destination: destination
+            )
+            Issue.record("Expected a missing-source failure")
+        } catch {}
+
+        #expect(try Data(contentsOf: destination) == Data("original".utf8))
+    }
+
+    @Test("Successful save atomically replaces an existing destination")
+    func successfulSaveReplacesDestination() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "rapid-video-save-tests-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("preview.mp4")
+        let destination = directory.appendingPathComponent("saved.mp4")
+        try Data("new video".utf8).write(to: source)
+        try Data("old video".utf8).write(to: destination)
+
+        try VideoPreviewSaver.save(source: source, destination: destination)
+
+        #expect(try Data(contentsOf: destination) == Data("new video".utf8))
     }
 
     private static let capabilitiesJSON = #"""
