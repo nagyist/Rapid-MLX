@@ -2138,6 +2138,8 @@ class MLLMScheduler:
 
     def _clear_prefix_cache_on_worker(self, *, reset_stats: bool = True) -> bool:
         """Clear reusable language-prefix state on the MLX owner thread."""
+        if self.has_requests():
+            raise RuntimeError("cannot clear prefix cache while requests are active")
         if self.batch_generator is None:
             return False
         return self.batch_generator.clear_prefix_cache(reset_stats=reset_stats)

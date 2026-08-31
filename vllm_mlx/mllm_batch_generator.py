@@ -675,6 +675,7 @@ class MLLMBatchGenerator:
         self._prefix_cache_extra_hash = 0
         self._prefix_cache_hits = 0
         self._prefix_cache_misses = 0
+        self._prefix_cache_evictions_offset = 0
         self._prefix_cache_tokens_saved = 0
         if enable_prefix_cache:
             try:
@@ -944,7 +945,8 @@ class MLLMBatchGenerator:
         return {
             "hits": self._prefix_cache_hits,
             "misses": self._prefix_cache_misses,
-            "evictions": int(snapshot.get("evictions", 0)),
+            "evictions": getattr(self, "_prefix_cache_evictions_offset", 0)
+            + int(snapshot.get("evictions", 0)),
             "tokens_saved": self._prefix_cache_tokens_saved,
         }
 
@@ -953,6 +955,13 @@ class MLLMBatchGenerator:
         cache = getattr(self, "_prefix_cache", None)
         if cache is None:
             return False
+        if reset_stats:
+            self._prefix_cache_evictions_offset = 0
+        else:
+            snapshot = cache.stats_snapshot()
+            self._prefix_cache_evictions_offset = getattr(
+                self, "_prefix_cache_evictions_offset", 0
+            ) + int(snapshot.get("evictions", 0))
         cache.clear()
         if reset_stats:
             self._prefix_cache_hits = 0
@@ -1469,9 +1478,7 @@ class MLLMBatchGenerator:
             cache is not None
             and (
                 prompt_length > chunk
-                or 0
-                < request.prefix_boundary - request.cached_tokens
-                < prompt_length
+                or 0 < request.prefix_boundary - request.cached_tokens < prompt_length
             )
             and is_text_only
             and no_extra_kwargs

@@ -598,6 +598,8 @@ class TestMLLMSchedulerStepThread:
         scheduler = MLLMScheduler.__new__(MLLMScheduler)
         scheduler._step_executor = executor
         scheduler._injected_step_executor = executor
+        scheduler.waiting = []
+        scheduler.running = {}
 
         events: list[tuple[str, str]] = []
         step_started = threading.Event()
@@ -639,6 +641,24 @@ class TestMLLMSchedulerStepThread:
             )
         finally:
             executor.shutdown(wait=True)
+
+    def test_prefix_cache_clear_rejects_active_requests(self):
+        """Clearing cannot promise an empty cache while work may store again."""
+        from vllm_mlx.mllm_scheduler import MLLMScheduler
+
+        scheduler = MLLMScheduler.__new__(MLLMScheduler)
+        scheduler._step_executor = None
+        scheduler._injected_step_executor = None
+        scheduler.waiting = [object()]
+        scheduler.running = {}
+        scheduler.batch_generator = MagicMock()
+
+        with pytest.raises(
+            RuntimeError, match="cannot clear prefix cache while requests are active"
+        ):
+            scheduler.clear_prefix_cache(reset_stats=False)
+
+        scheduler.batch_generator.clear_prefix_cache.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_step_runs_on_mllm_step_thread_with_and_without_waiting(self):

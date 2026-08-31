@@ -1835,6 +1835,7 @@ class _ExactPrefixCache:
         self.stores = []
         self.store_state_at_call = []
         self.clears = 0
+        self.evictions = 3
 
     def lookup_exact_cache(self, token_ids, *, extra_hash):
         self.lookups.append((list(token_ids), extra_hash))
@@ -1851,10 +1852,11 @@ class _ExactPrefixCache:
         return True
 
     def stats_snapshot(self):
-        return {"evictions": 3}
+        return {"evictions": self.evictions}
 
     def clear(self):
         self.clears += 1
+        self.evictions = 0
 
 
 def _make_prefix_cache_generator(manager) -> MLLMBatchGenerator:
@@ -1864,6 +1866,7 @@ def _make_prefix_cache_generator(manager) -> MLLMBatchGenerator:
     gen._prefix_cache_extra_hash = 17
     gen._prefix_cache_hits = 0
     gen._prefix_cache_misses = 0
+    gen._prefix_cache_evictions_offset = 0
     gen._prefix_cache_tokens_saved = 0
     return gen
 
@@ -1914,6 +1917,7 @@ def test_text_prefill_captures_exact_cache_at_stable_template_boundary():
         "_prefix_cache_extra_hash",
         "_prefix_cache_hits",
         "_prefix_cache_misses",
+        "_prefix_cache_evictions_offset",
         "_prefix_cache_tokens_saved",
     ):
         setattr(gen, name, getattr(prefix_gen, name))
@@ -1956,14 +1960,19 @@ def test_exact_prefix_cache_clear_preserves_or_resets_local_counters():
 
     assert gen.clear_prefix_cache(reset_stats=False) is True
     assert manager.clears == 1
-    assert gen.get_prefix_cache_stats()["tokens_saved"] == 123
+    assert gen.get_prefix_cache_stats() == {
+        "hits": 2,
+        "misses": 4,
+        "evictions": 3,
+        "tokens_saved": 123,
+    }
 
     assert gen.clear_prefix_cache(reset_stats=True) is True
     assert manager.clears == 2
     assert gen.get_prefix_cache_stats() == {
         "hits": 0,
         "misses": 0,
-        "evictions": 3,
+        "evictions": 0,
         "tokens_saved": 0,
     }
 
