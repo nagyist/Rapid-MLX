@@ -98,6 +98,8 @@ class MLLMSchedulerConfig:
     # Correctness-first compatibility lane for hybrid language backbones.
     # This may only be enabled together with all three batch limits set to 1.
     allow_arrays_cache: bool = False
+    # Reuse language prefixes inside the MLLM lane via mlx-vlm APC.
+    enable_prefix_cache: bool = True
 
     def __post_init__(self) -> None:
         if self.vision_prefill_token_budget is None:
@@ -156,6 +158,8 @@ class MLLMRequest:
     # Token counts
     num_prompt_tokens: int = 0
     num_output_tokens: int = 0
+    cached_tokens: int = 0
+    prefix_boundary: int = 0
     lifecycle_admission_token: str | None = None
     logits_processors: list[Callable] = field(default_factory=list)
 
@@ -522,6 +526,7 @@ class MLLMScheduler:
                 vision_prefill_token_budget=vision_prefill_token_budget,
                 vision_min_pixels=self.config.vision_min_pixels,
                 vision_max_pixels=self.config.vision_max_pixels,
+                enable_prefix_cache=self.config.enable_prefix_cache,
             )
 
     # ========== Sync API (step-based) ==========
@@ -622,6 +627,7 @@ class MLLMScheduler:
             video_max_frames=video_max_frames,
             lifecycle_admission_token=kwargs.pop("lifecycle_admission_token", None),
             logits_processors=logits_processors,
+            prefix_boundary=int(kwargs.pop("prefix_boundary", 0) or 0),
         )
 
         # D-M01-2X (0.8.2 dogfood, codex r10 BLOCKING follow-up):
@@ -904,6 +910,7 @@ class MLLMScheduler:
                 presence_penalty=request.sampling_params.presence_penalty,
                 frequency_penalty=request.sampling_params.frequency_penalty,
                 logits_processors=request.logits_processors,
+                prefix_boundary=request.prefix_boundary,
                 video_fps=request.video_fps,
                 video_max_frames=request.video_max_frames,
             )
@@ -972,6 +979,14 @@ class MLLMScheduler:
                 resp_pt = getattr(response, "prompt_tokens", 0) or 0
                 if resp_pt > 0:
                     request.num_prompt_tokens = resp_pt
+            if request.cached_tokens == 0:
+                resp_cached = getattr(response, "cached_tokens", 0) or 0
+                if (
+                    isinstance(resp_cached, int)
+                    and not isinstance(resp_cached, bool)
+                    and resp_cached > 0
+                ):
+                    request.cached_tokens = int(resp_cached)
 
             token_is_control_stop_token = bool(
                 getattr(response, "token_is_stop_token", False)
@@ -1225,6 +1240,7 @@ class MLLMScheduler:
                     finish_reason=output_finish_reason,
                     prompt_tokens=request.num_prompt_tokens,
                     completion_tokens=request.num_output_tokens,
+                    cached_tokens=request.cached_tokens,
                     logprobs=getattr(response, "logprobs", None),
                     matched_stop=output_matched_stop,
                 )
@@ -2096,6 +2112,9 @@ class MLLMScheduler:
             stats["vision_embedding_cache"] = (
                 self.batch_generator.get_vision_cache_stats()
             )
+            prefix_stats = self.batch_generator.get_prefix_cache_stats()
+            if prefix_stats is not None:
+                stats["prefix_cache"] = prefix_stats
 
         if self.vision_cache:
             stats["vision_cache"] = self.vision_cache.get_stats()
@@ -2110,6 +2129,18 @@ class MLLMScheduler:
             pass
 
         return stats
+
+    def get_cache_stats(self) -> dict[str, Any] | None:
+        """Return reusable language-prefix cache statistics."""
+        if self.batch_generator is None:
+            return None
+        return self.batch_generator.get_prefix_cache_stats()
+
+    def clear_prefix_cache(self, *, reset_stats: bool = True) -> bool:
+        """Clear reusable language-prefix state without unloading weights."""
+        if self.batch_generator is None:
+            return False
+        return self.batch_generator.clear_prefix_cache(reset_stats=reset_stats)
 
     def reset(self) -> None:
         """Reset the scheduler state."""
