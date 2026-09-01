@@ -822,7 +822,7 @@ class BatchedEngine(BaseEngine):
         scheduler_config: Any | None = None,
         stream_interval: int = 1,
         force_mllm: bool = False,
-        gpu_memory_utilization: float = 0.90,
+        gpu_memory_utilization: float | None = None,
         *,
         force_text: bool = False,
         force_hybrid: bool = False,
@@ -846,7 +846,11 @@ class BatchedEngine(BaseEngine):
             stream_interval: Tokens to batch before streaming (1=every token)
             force_mllm: Force loading as MLLM even if not auto-detected
             gpu_memory_utilization: Fraction of device memory for Metal allocation
-                limit and emergency threshold (0.0-1.0, default 0.90)
+                limit and emergency threshold (0.0-1.0). ``None`` (default)
+                selects a per-model budget automatically (#2858): the limit is
+                sized to the measured weight footprint plus runtime headroom,
+                clamped to ``[0.90, 0.97]`` of the device working-set budget.
+                An explicit value is honored verbatim (advanced override).
             force_text: Keyword-only. Force loading as text-only LLM even when
                 auto-detection would route as MLLM (#393 escape hatch).
                 Mutually exclusive with ``force_mllm`` — caller is responsible
@@ -1802,37 +1806,68 @@ class BatchedEngine(BaseEngine):
                 checkpoint_source=checkpoint_source,
             )
 
-        # Set Metal memory limits on the SAME mlx-step worker that loaded
-        # the model. Calling these from the asyncio loop thread would touch
-        # MLX from a thread that doesn't own the worker stream and create
-        # a stray Stream(gpu, 1) reference (#170).
-        def _set_metal_limits() -> None:
+        # Resolve the per-model Metal budget and set the limits on the SAME
+        # mlx-step worker that loaded the model. Calling these from the
+        # asyncio loop thread would touch MLX from a thread that doesn't own
+        # the worker stream and create a stray Stream(gpu, 1) reference
+        # (#170). Runs AFTER the weights are materialized on purpose:
+        # ``mx.get_active_memory()`` here is the model's real Metal footprint
+        # (all resident models, in multi-model mode), so auto mode (#2858)
+        # sizes the limit from a measurement instead of a disk heuristic —
+        # and can only ratchet the process-wide limit upward as more models
+        # load, never below what is already resident.
+        def _resolve_and_set_metal_limits() -> float:
             import mlx.core as mx
 
+            from ..memory_budget import AUTO_UTILIZATION_FLOOR, plan_metal_limit
+
+            requested = self._gpu_memory_utilization
+            fallback = requested if requested is not None else AUTO_UTILIZATION_FLOOR
             if not mx.metal.is_available():
-                return
+                return fallback
             device_info = mx.device_info()
             max_recommended = device_info.get(
                 "max_recommended_working_set_size",
                 device_info.get("memory_size", 0),
             )
-            if max_recommended > 0:
-                soft_limit = int(max_recommended * self._gpu_memory_utilization)
-                mx.set_memory_limit(soft_limit)
-                cache_limit = _compute_metal_cache_limit(soft_limit)
-                mx.set_cache_limit(cache_limit)
-                pct = self._gpu_memory_utilization * 100
-                logger.info(
-                    f"Metal memory limits set: "
-                    f"allocation_limit={soft_limit / 1e9:.1f}GB "
-                    f"({pct:.0f}% of {max_recommended / 1e9:.1f}GB), "
-                    f"cache_limit={cache_limit / 1e9:.1f}GB"
-                )
+            if max_recommended <= 0:
+                return fallback
+            try:
+                weights_bytes = int(mx.get_active_memory())
+            except Exception:
+                weights_bytes = 0
+            plan = plan_metal_limit(
+                weights_bytes=weights_bytes,
+                device_budget_bytes=int(max_recommended),
+                requested_utilization=requested,
+            )
+            mx.set_memory_limit(plan.limit_bytes)
+            cache_limit = _compute_metal_cache_limit(plan.limit_bytes)
+            mx.set_cache_limit(cache_limit)
+            logger.info(
+                f"Metal memory limits set ({plan.mode}): "
+                f"allocation_limit={plan.limit_bytes / 1e9:.1f}GB "
+                f"({plan.resolved_utilization * 100:.0f}% of "
+                f"{max_recommended / 1e9:.1f}GB, "
+                f"weights={weights_bytes / 1e9:.1f}GB), "
+                f"cache_limit={cache_limit / 1e9:.1f}GB"
+            )
+            return plan.resolved_utilization
 
+        # The resolved utilization (== the value actually fed to
+        # ``mx.set_memory_limit``) replaces the requested one so EngineConfig
+        # and, via engine_core's D-METAL-CAP propagation, the scheduler's
+        # admission cap all enforce the SAME budget.
         try:
-            self._model_load_executor.submit(_set_metal_limits).result()
+            self._gpu_memory_utilization = self._model_load_executor.submit(
+                _resolve_and_set_metal_limits
+            ).result()
         except Exception as e:
             logger.warning(f"Failed to set Metal memory limits: {e}")
+            if self._gpu_memory_utilization is None:
+                from ..memory_budget import AUTO_UTILIZATION_FLOOR
+
+                self._gpu_memory_utilization = AUTO_UTILIZATION_FLOOR
 
         # Create engine config
         scheduler_config = self._scheduler_config or SchedulerConfig()
@@ -1856,6 +1891,15 @@ class BatchedEngine(BaseEngine):
             tokenizer=self._tokenizer,
             config=engine_config,
         )
+
+        # #2858 acceptance: a model must not report healthy while every
+        # request deterministically 503s under the resolved cap. The
+        # scheduler exists as of AsyncEngineCore construction, so run its
+        # admission preflight BEFORE the engine loop starts — an impossible
+        # budget fails the load with one actionable message instead of
+        # letting the server come up 503-wedged. MetalPreflightError must
+        # propagate; it is the load failure.
+        self._engine.engine.scheduler.preflight_metal_admission()
 
         await self._engine.engine.start(executor=self._model_load_executor)
         self._engine_started = True

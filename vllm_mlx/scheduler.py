@@ -3439,6 +3439,9 @@ class Scheduler:
         # device pay zero cost. ``0`` means "no cap" (see
         # ``gpu_memory_utilization`` doc on SchedulerConfig).
         self._metal_cap_bytes: int = 0
+        # The device working-set budget the cap was derived from — kept so
+        # the #2858 preflight error can report "X% of Y GB" faithfully.
+        self._metal_cap_base_bytes: int = 0
         self._metal_cap_bytes_resolved: bool = False
         # D-METAL-CAP: cached per-token KV-cache size for the
         # projection-based admission gate. Auto-derived from the
@@ -4565,6 +4568,7 @@ class Scheduler:
         if self._metal_cap_bytes_resolved:
             return self._metal_cap_bytes
         cap = 0
+        cap_base = 0
         util = float(getattr(self.config, "gpu_memory_utilization", 0.0) or 0.0)
         if util > 0.0:
             try:
@@ -4576,9 +4580,12 @@ class Scheduler:
                     )
                     if base and base > 0:
                         cap = int(base * util)
+                        cap_base = int(base)
             except Exception:
                 cap = 0
+                cap_base = 0
         self._metal_cap_bytes = cap
+        self._metal_cap_base_bytes = cap_base
         self._metal_cap_bytes_resolved = True
         return cap
 
@@ -5301,6 +5308,70 @@ class Scheduler:
         # historical ``per_tok × tokens``.
         return fixed_baseline + per_tok * tokens + sliding_bytes
 
+    # #2858 preflight: the smallest workload the server must be able to
+    # admit for the model to honestly count as "ready" — a short
+    # classification-style request. Big enough that a pass means real
+    # traffic can run; small enough that a config which genuinely serves
+    # short requests today is never refused.
+    PREFLIGHT_NOMINAL_TOKENS = 1024
+
+    def preflight_metal_admission(self) -> None:
+        """Fail startup when the Metal cap can never admit even a modest request.
+
+        #2858 acceptance criterion: a model must not be reported healthy
+        while every request deterministically returns HTTP 503 because the
+        configured cap is below the model's resident footprint. This runs
+        once at engine startup — after the weights are materialized and the
+        Metal limits are set, before the engine loop starts — and mirrors
+        the admission gate's own arithmetic
+        (``_enforce_metal_cap_at_admission``):
+        current Metal active plus the projected KV of one
+        ``PREFLIGHT_NOMINAL_TOKENS``-token request, against the same
+        resolved cap. If that sum already violates the gate, no real
+        request can ever admit, so raise :class:`MetalPreflightError`
+        with the actionable required-vs-available message instead of
+        letting the server come up 503-wedged.
+
+        No-op when the cap is disabled (``gpu_memory_utilization=0``), the
+        Metal probe failed, or active memory reads 0 (non-Metal CI hosts
+        and unit-test stubs) — identical guard conditions to the admission
+        gate itself.
+        """
+        cap = self._resolve_metal_cap_bytes()
+        if cap <= 0:
+            return
+        active = self._current_metal_active_bytes()
+        if active <= 0:
+            return
+        per_tok = self._resolve_kv_bytes_per_token()
+        fixed_baseline = self._resolve_kv_fixed_baseline_bytes()
+        tokens = self.PREFLIGHT_NOMINAL_TOKENS
+        sliding_bytes = 0
+        if self._kv_sliding_slot_bytes > 0 and self._kv_sliding_window > 0:
+            sliding_bytes = self._kv_sliding_slot_bytes * rotating_cache_slots(
+                self._kv_sliding_window, tokens
+            )
+        min_kv = fixed_baseline + per_tok * tokens + sliding_bytes
+        required = active + min_kv
+        # Same comparison shape as the admission gate: a request is
+        # rejected when active >= cap OR the projected sum reaches cap.
+        if active < cap and required < cap:
+            return
+
+        from .memory_budget import MetalPreflightError, format_preflight_error
+
+        util = float(getattr(self.config, "gpu_memory_utilization", 0.0) or 0.0)
+        message = format_preflight_error(
+            required_bytes=required,
+            active_bytes=active,
+            min_kv_bytes=min_kv,
+            cap_bytes=cap,
+            utilization=util,
+            device_budget_bytes=self._metal_cap_base_bytes or cap,
+        )
+        logger.error("[D-METAL-CAP preflight] %s", message)
+        raise MetalPreflightError(message)
+
     def _sum_in_flight_kv_bytes(self) -> int:
         """Sum projected KV reservations of WAITING-only requests.
 
@@ -5466,12 +5537,20 @@ class Scheduler:
                 getattr(self.config, "gpu_memory_utilization", 0.0),
                 rid_str,
             )
+        # #2858: actionable rejection — report required vs available and
+        # concrete remediations, not just the internal cap arithmetic.
+        # Keeps the "D-METAL-CAP" and "reserved KV" tokens the existing
+        # regression tests and operator runbooks grep for.
         raise BackpressureError(
-            f"Metal active {active / 1e9:.1f}GB + reserved KV "
-            f"{reserved_kv / 1e9:.1f}GB + projected KV "
-            f"{projected_kv / 1e9:.1f}GB would exceed "
-            f"gpu_memory_utilization cap {cap / 1e9:.1f}GB "
-            f"(D-METAL-CAP); retry after pressure drops"
+            f"This request needs approximately "
+            f"{(reserved_kv + projected_kv) / 1e9:.1f} GB of Metal memory "
+            f"on top of {active / 1e9:.1f} GB already in use "
+            f"(reserved KV {reserved_kv / 1e9:.1f} GB + projected KV "
+            f"{projected_kv / 1e9:.1f} GB), but the current limit is "
+            f"{cap / 1e9:.1f} GB (D-METAL-CAP). Retry after in-flight "
+            f"requests drain, reduce context length or max_tokens, lower "
+            f"concurrency, or restart with a higher "
+            f"--gpu-memory-utilization."
         )
 
     def _resolve_pressure_evict_fraction(self) -> float:
