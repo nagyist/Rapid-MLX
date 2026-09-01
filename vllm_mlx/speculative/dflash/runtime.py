@@ -38,6 +38,8 @@ class DFlashRuntime:
     drafter: Any
     kind: str
     drafter_repo: str
+    target_revision: str | None = None
+    drafter_revision: str | None = None
     algorithm: str = "dflash"
 
     def reset_accept_lens(self) -> None:
@@ -90,6 +92,8 @@ def load_runtime(
     drafter_repo: str,
     kind: str = "dflash",
     *,
+    target_revision: str | None = None,
+    drafter_revision: str | None = None,
     expected_algorithm: str | None = None,
 ) -> DFlashRuntime:
     """Lazy-import mlx-vlm's drafter loader and return a ``DFlashRuntime``.
@@ -107,8 +111,18 @@ def load_runtime(
     # Import here, not at module top, so the optional dep stays optional.
     from mlx_vlm.speculative.drafters import load_drafter
 
-    logger.info("Loading DFlash drafter: %s (kind=%s)", drafter_repo, kind)
-    drafter, resolved_kind = load_drafter(drafter_repo, kind=kind)
+    load_source = drafter_repo
+    if drafter_revision is not None:
+        from mlx_vlm.utils import get_model_path
+
+        load_source = str(get_model_path(drafter_repo, revision=drafter_revision))
+    logger.info(
+        "Loading DFlash drafter: %s revision=%s (kind=%s)",
+        drafter_repo,
+        drafter_revision or "default",
+        kind,
+    )
+    drafter, resolved_kind = load_drafter(load_source, kind=kind)
     algorithm = _runtime_algorithm(drafter)
     if expected_algorithm is not None and algorithm != expected_algorithm:
         raise RuntimeError(
@@ -122,5 +136,7 @@ def load_runtime(
         drafter=drafter,
         kind=resolved_kind,
         drafter_repo=drafter_repo,
+        target_revision=target_revision,
+        drafter_revision=drafter_revision,
         algorithm=algorithm,
     )

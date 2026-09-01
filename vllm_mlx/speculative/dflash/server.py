@@ -773,6 +773,8 @@ def _build_app(
             "algorithm": runtime.algorithm,
             "mode": "single-user-serial",
             "drafter": runtime.drafter_repo,
+            "target_revision": runtime.target_revision,
+            "drafter_revision": runtime.drafter_revision,
         }
 
     @app.get(
@@ -2058,7 +2060,9 @@ async def _non_stream_completion(
 def run_dflash_server(
     *,
     main_model_repo: str,
+    main_model_revision: str | None = None,
     drafter_repo: str,
+    drafter_revision: str | None = None,
     host: str,
     port: int,
     served_model_name: str,
@@ -2114,7 +2118,9 @@ def run_dflash_server(
 
     registry_verified_pair = is_registry_verified_pair(
         main_model_repo,
+        main_model_revision,
         drafter_repo,
+        drafter_revision,
         expected_algorithm,
     )
 
@@ -2148,9 +2154,17 @@ def run_dflash_server(
     # streams stay reachable for the lifetime of the process.
     def _load_all():
         t0 = time.perf_counter()
-        m, p = load(main_model_repo)
+        load_kwargs = (
+            {"revision": main_model_revision} if main_model_revision is not None else {}
+        )
+        m, p = load(main_model_repo, **load_kwargs)
         logger.info("DFlash: main model loaded in %.1fs", time.perf_counter() - t0)
-        rt = load_runtime(drafter_repo, expected_algorithm=expected_algorithm)
+        rt = load_runtime(
+            drafter_repo,
+            target_revision=main_model_revision,
+            drafter_revision=drafter_revision,
+            expected_algorithm=expected_algorithm,
+        )
         return m, p, rt
 
     logger.info("DFlash: loading main model via mlx-vlm: %s", main_model_repo)

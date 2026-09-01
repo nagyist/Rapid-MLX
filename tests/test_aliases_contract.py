@@ -79,6 +79,8 @@ ALLOWED_PROFILE_KEYS: frozenset[str] = frozenset(
         "suffix_bench_speedup",
         "supports_dflash",
         "dflash_draft_model",
+        "dflash_target_revision",
+        "dflash_draft_revision",
         "dflash_algorithm",
         "supports_ddtree",
         "ddtree_draft_model",
@@ -585,6 +587,12 @@ def test_dflash_requires_drafter(alias: str) -> None:
         assert profile.dflash_algorithm in {"dflash", "dflash2"}, (
             f"{alias}: verified DFlash pair must pin its runtime algorithm"
         )
+        assert (
+            profile.dflash_target_revision and len(profile.dflash_target_revision) == 40
+        )
+        assert (
+            profile.dflash_draft_revision and len(profile.dflash_draft_revision) == 40
+        )
 
 
 @pytest.mark.parametrize("alias", _alias_ids())
@@ -699,6 +707,34 @@ def test_negative_control_dflash_missing_algorithm_is_caught() -> None:
                 "hf_path": "fake/Model",
                 "supports_dflash": True,
                 "dflash_draft_model": "fake/DFlash",
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "target_revision,draft_revision",
+    [
+        (None, "b" * 40),
+        ("a" * 40, None),
+        ("short", "b" * 40),
+        ("A" * 40, "b" * 40),
+    ],
+)
+def test_dflash_pair_requires_immutable_full_revision_pins(
+    target_revision, draft_revision
+) -> None:
+    from vllm_mlx.model_aliases import _coerce
+
+    with pytest.raises(ValueError, match="revision"):
+        _coerce(
+            "fake-alias",
+            {
+                "hf_path": "fake/Model",
+                "supports_dflash": True,
+                "dflash_draft_model": "fake/DFlash",
+                "dflash_algorithm": "dflash",
+                "dflash_target_revision": target_revision,
+                "dflash_draft_revision": draft_revision,
             },
         )
 

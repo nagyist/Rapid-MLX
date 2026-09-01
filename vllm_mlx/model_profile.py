@@ -206,6 +206,11 @@ class ModelProfile:
     # ``z-lab/Qwen3.5-27B-DFlash``); required if ``supports_dflash=True``.
     supports_dflash: bool = False
     dflash_draft_model: str | None = None
+    # Immutable Hub revisions for both sides of the qualified pair. Repository
+    # names alone are mutable and therefore are not a sufficient qualification
+    # receipt.
+    dflash_target_revision: str | None = None
+    dflash_draft_revision: str | None = None
     # Expected runtime architecture.  Startup compares this receipt with the
     # loaded drafter's normalized config and fails closed on mismatch, avoiding
     # a misleading "DFlash enabled" server that loaded a different algorithm.

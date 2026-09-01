@@ -2576,6 +2576,21 @@ def _resolve_dflash_expected_algorithm(profile, drafter_repo: str | None) -> str
     return getattr(profile, "dflash_algorithm", None)
 
 
+def _resolve_dflash_revisions(
+    profile, drafter_repo: str | None
+) -> tuple[str | None, str | None]:
+    """Return immutable target/drafter pins for the exact registry pair."""
+
+    if profile is None or not drafter_repo:
+        return None, None
+    if getattr(profile, "dflash_draft_model", None) != drafter_repo:
+        return None, None
+    return (
+        getattr(profile, "dflash_target_revision", None),
+        getattr(profile, "dflash_draft_revision", None),
+    )
+
+
 def _preflight_dflash_mutexes_or_exit(args) -> None:
     """Reject DFlash flag combinations before optional-runtime probes."""
 
@@ -4086,10 +4101,17 @@ def serve_command(args):
         _check_disk_space(args.model, force=getattr(args, "force_disk_check", False))
         _check_memory_capacity(args.model, alias=_alias_name)
         server._sync_config()
+        _drafter_repo = getattr(args, "_dflash_drafter_repo", None) or (
+            _resolve_dflash_drafter_repo(args, _profile)
+        )
+        _target_revision, _drafter_revision = _resolve_dflash_revisions(
+            _profile, _drafter_repo
+        )
         run_dflash_server(
             main_model_repo=_profile.hf_path if _profile else args.model,
-            drafter_repo=getattr(args, "_dflash_drafter_repo", None)
-            or _resolve_dflash_drafter_repo(args, _profile),
+            main_model_revision=_target_revision,
+            drafter_repo=_drafter_repo,
+            drafter_revision=_drafter_revision,
             host=args.host,
             port=args.port,
             served_model_name=args.served_model_name or _alias_name,
@@ -4110,9 +4132,7 @@ def serve_command(args):
             reasoning_parser_name=args.reasoning_parser,
             experimental_opt_in=getattr(args, "_dflash_experimental", False),
             expected_algorithm=(
-                _resolve_dflash_expected_algorithm(
-                    _profile, getattr(args, "_dflash_drafter_repo", None)
-                )
+                _resolve_dflash_expected_algorithm(_profile, _drafter_repo)
             ),
         )
         return

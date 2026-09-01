@@ -83,6 +83,8 @@ def report(
     curated_pair = (
         profile.supports_dflash
         and bool(profile.dflash_algorithm)
+        and bool(profile.dflash_target_revision)
+        and bool(profile.dflash_draft_revision)
         and (not is_4bit or profile.dflash_algorithm == "dflash2")
         and bool(drafter_model or profile.dflash_draft_model)
         and (drafter_model is None or drafter_model == profile.dflash_draft_model)
@@ -146,7 +148,9 @@ def eligible_aliases() -> list[str]:
 
 def is_registry_verified_pair(
     main_model_repo: str,
+    main_model_revision: str | None,
     drafter_repo: str,
+    drafter_revision: str | None,
     expected_algorithm: str | None,
 ) -> bool:
     """Return whether the exact runtime tuple is registry-qualified.
@@ -156,7 +160,15 @@ def is_registry_verified_pair(
     verified; arbitrary programmatic callers therefore retain the explicit
     experimental opt-in requirement.
     """
-    if not main_model_repo or not drafter_repo or not expected_algorithm:
+    if not all(
+        (
+            main_model_repo,
+            main_model_revision,
+            drafter_repo,
+            drafter_revision,
+            expected_algorithm,
+        )
+    ):
         return False
     try:
         from vllm_mlx.model_aliases import list_profiles
@@ -164,7 +176,9 @@ def is_registry_verified_pair(
         for alias, profile in list_profiles().items():
             if (
                 profile.hf_path == main_model_repo
+                and profile.dflash_target_revision == main_model_revision
                 and profile.dflash_draft_model == drafter_repo
+                and profile.dflash_draft_revision == drafter_revision
                 and profile.dflash_algorithm == expected_algorithm
             ):
                 assessment = report(profile, alias=alias)

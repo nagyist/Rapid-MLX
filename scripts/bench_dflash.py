@@ -537,6 +537,30 @@ def bench_one_mode(
         handle.stop()
 
 
+def _resolve_expected_algorithm(
+    model: str,
+    draft_model: str | None,
+    explicit: str | None,
+) -> str:
+    """Preserve legacy alias invocations while keeping qualification fail-closed."""
+
+    if explicit is not None:
+        return explicit
+    from vllm_mlx.model_aliases import resolve_profile
+
+    profile = resolve_profile(model)
+    if profile is not None and (
+        draft_model is None or draft_model == profile.dflash_draft_model
+    ):
+        algorithm = profile.dflash_algorithm
+        if algorithm in {"dflash", "dflash2"}:
+            return algorithm
+    raise ValueError(
+        "cannot infer the DFlash algorithm for this model/drafter pair; "
+        "pass --expected-algorithm dflash or --expected-algorithm dflash2"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Bench DFlash speedup for one alias (Model Onboarding SOP §6)."
@@ -555,10 +579,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--expected-algorithm",
         choices=("dflash", "dflash2"),
-        required=True,
+        default=None,
         help=(
             "Require /healthz to report this concrete drafter algorithm. "
-            "Use this for publication/qualification runs."
+            "Known alias pairs infer it for backward compatibility; explicit "
+            "or local drafters must set it."
         ),
     )
     parser.add_argument("--port", type=int, default=8765, help="ephemeral port")
@@ -584,6 +609,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    try:
+        expected_algorithm = _resolve_expected_algorithm(
+            args.model, args.draft_model, args.expected_algorithm
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     logger.info("Bench DFlash: %s", args.model)
     if os.environ.get("RAPID_MLX_DFLASH_BYPASS_MOE_GATE") == "1":
@@ -609,7 +640,7 @@ def main(argv: list[str] | None = None) -> int:
         runs=args.runs,
         max_tokens=args.max_tokens,
         draft_model=args.draft_model,
-        expected_algorithm=args.expected_algorithm,
+        expected_algorithm=expected_algorithm,
     )
 
     speedup: dict[str, float] = {}

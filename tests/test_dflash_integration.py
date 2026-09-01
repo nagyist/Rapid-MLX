@@ -186,6 +186,23 @@ def test_expected_algorithm_only_applies_to_exact_registry_pair() -> None:
     assert _resolve_dflash_expected_algorithm(profile, "operator/override") is None
 
 
+def test_dflash_revision_pins_only_apply_to_exact_registry_pair() -> None:
+    from types import SimpleNamespace
+
+    from vllm_mlx.cli import _resolve_dflash_revisions
+
+    profile = SimpleNamespace(
+        dflash_draft_model="z-lab/Qwen3.8-27B-DFlash2",
+        dflash_target_revision="a" * 40,
+        dflash_draft_revision="b" * 40,
+    )
+    assert _resolve_dflash_revisions(profile, "z-lab/Qwen3.8-27B-DFlash2") == (
+        "a" * 40,
+        "b" * 40,
+    )
+    assert _resolve_dflash_revisions(profile, "operator/override") == (None, None)
+
+
 def test_programmatic_4bit_requires_explicit_experimental_opt_in(monkeypatch) -> None:
     from vllm_mlx.speculative.dflash.eligibility import DFlashUnavailable
     from vllm_mlx.speculative.dflash.server import run_dflash_server
@@ -447,6 +464,8 @@ def test_healthz_and_models_routes() -> None:
         drafter=MagicMock(),
         kind="dflash",
         drafter_repo="z-lab/Qwen3.5-27B-DFlash",
+        target_revision="a" * 40,
+        drafter_revision="b" * 40,
     )
     app = _build_app(
         model=MagicMock(),
@@ -465,6 +484,8 @@ def test_healthz_and_models_routes() -> None:
     assert body["engine"] == "dflash"
     assert body["algorithm"] == "dflash"
     assert body["drafter"] == "z-lab/Qwen3.5-27B-DFlash"
+    assert body["target_revision"] == "a" * 40
+    assert body["drafter_revision"] == "b" * 40
 
     r = client.get("/v1/models")
     assert r.status_code == 200
@@ -2380,6 +2401,46 @@ def test_load_runtime_fails_closed_on_algorithm_mismatch(monkeypatch) -> None:
         runtime_module.load_runtime("known/drafter", expected_algorithm="dflash")
 
 
+def test_load_runtime_resolves_pinned_drafter_revision(monkeypatch) -> None:
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    from vllm_mlx.speculative.dflash import runtime as runtime_module
+
+    calls: dict[str, object] = {}
+    fake_speculative = types.ModuleType("mlx_vlm.speculative")
+    fake_drafters = types.ModuleType("mlx_vlm.speculative.drafters")
+    fake_utils = types.ModuleType("mlx_vlm.utils")
+
+    def _get_model_path(repo, revision):
+        calls["resolve"] = (repo, revision)
+        return "/cache/pinned-drafter"
+
+    def _load_drafter(source, kind):
+        calls["load"] = (source, kind)
+        return SimpleNamespace(config=SimpleNamespace(model_type="dflash2")), kind
+
+    fake_utils.get_model_path = _get_model_path
+    fake_drafters.load_drafter = _load_drafter
+    monkeypatch.setitem(sys.modules, "mlx_vlm.speculative", fake_speculative)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.speculative.drafters", fake_drafters)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.utils", fake_utils)
+    monkeypatch.setattr(runtime_module, "have_runtime", lambda: True)
+
+    loaded = runtime_module.load_runtime(
+        "known/drafter",
+        target_revision="a" * 40,
+        drafter_revision="b" * 40,
+        expected_algorithm="dflash2",
+    )
+
+    assert calls["resolve"] == ("known/drafter", "b" * 40)
+    assert calls["load"] == ("/cache/pinned-drafter", "dflash")
+    assert loaded.target_revision == "a" * 40
+    assert loaded.drafter_revision == "b" * 40
+
+
 # =============================================================================
 # Eligibility error surfaces (CLI startup) — the gate must fail fast
 # with an actionable error before the user wastes 5 min downloading weights.
@@ -2425,13 +2486,16 @@ def test_run_dflash_server_loads_models_on_executor_thread(monkeypatch) -> None:
     from vllm_mlx.speculative.dflash import server as srv
 
     load_thread: dict[str, str | None] = {"load": None, "load_runtime": None}
+    load_receipt: dict[str, object] = {}
 
-    def _fake_load(_repo):
+    def _fake_load(_repo, **kwargs):
         load_thread["load"] = threading.current_thread().name
+        load_receipt["target"] = (_repo, kwargs)
         return MagicMock(), MagicMock()
 
-    def _fake_load_runtime(_repo, **_kwargs):
+    def _fake_load_runtime(_repo, **kwargs):
         load_thread["load_runtime"] = threading.current_thread().name
+        load_receipt["drafter"] = (_repo, kwargs)
         return MagicMock()
 
     # Patch the imports at the point of use inside ``run_dflash_server``.
@@ -2447,7 +2511,10 @@ def test_run_dflash_server_loads_models_on_executor_thread(monkeypatch) -> None:
 
     srv.run_dflash_server(
         main_model_repo="mlx-community/Qwen3.5-27B-8bit",
+        main_model_revision="d49462a9487464de69e2240d2bd65e50bb7d1cbc",
         drafter_repo="z-lab/Qwen3.5-27B-DFlash",
+        drafter_revision="25ee0025ff950496a634e100b75c2db4515e9824",
+        expected_algorithm="dflash",
         host="127.0.0.1",
         port=58998,
         served_model_name="qwen3.5-27b-8bit",
@@ -2460,6 +2527,18 @@ def test_run_dflash_server_loads_models_on_executor_thread(monkeypatch) -> None:
     # ThreadPoolExecutor was constructed at module load).
     assert load_thread["load"] is not None, "load() was not called"
     assert load_thread["load_runtime"] is not None, "load_runtime() was not called"
+    assert load_receipt["target"] == (
+        "mlx-community/Qwen3.5-27B-8bit",
+        {"revision": "d49462a9487464de69e2240d2bd65e50bb7d1cbc"},
+    )
+    assert load_receipt["drafter"] == (
+        "z-lab/Qwen3.5-27B-DFlash",
+        {
+            "target_revision": "d49462a9487464de69e2240d2bd65e50bb7d1cbc",
+            "drafter_revision": "25ee0025ff950496a634e100b75c2db4515e9824",
+            "expected_algorithm": "dflash",
+        },
+    )
     assert load_thread["load"].startswith("dflash-worker"), (
         f"model load must run on dflash-worker thread, ran on "
         f"{load_thread['load']!r} — Stream(gpu, N) would not be visible "

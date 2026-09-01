@@ -80,6 +80,22 @@ def test_start_server_requires_expected_algorithm_before_spawn(monkeypatch) -> N
     popen.assert_not_called()
 
 
+def test_expected_algorithm_is_inferred_for_known_alias_pair() -> None:
+    assert (
+        bench_dflash._resolve_expected_algorithm(
+            "qwen3.8-27b-4bit", "z-lab/Qwen3.8-27B-DFlash2", None
+        )
+        == "dflash2"
+    )
+
+
+def test_expected_algorithm_requires_receipt_for_unknown_override() -> None:
+    with pytest.raises(ValueError, match="cannot infer"):
+        bench_dflash._resolve_expected_algorithm(
+            "qwen3.8-27b-4bit", "/tmp/local-drafter", None
+        )
+
+
 def test_start_server_stops_process_on_algorithm_mismatch(monkeypatch) -> None:
     proc = MagicMock()
     proc.poll.return_value = None

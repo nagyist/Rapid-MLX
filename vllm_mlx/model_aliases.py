@@ -201,6 +201,8 @@ def _coerce(alias: str, value: object) -> AliasProfile:
             "suffix_bench_speedup",
             "supports_dflash",
             "dflash_draft_model",
+            "dflash_target_revision",
+            "dflash_draft_revision",
             "dflash_algorithm",
             "supports_ddtree",
             "ddtree_draft_model",
@@ -389,6 +391,31 @@ def _coerce(alias: str, value: object) -> AliasProfile:
             f"alias {alias!r}: dflash_algorithm={dflash_algorithm!r} not in "
             f"{sorted(VALID_DFLASH_ALGORITHMS)}"
         )
+    dflash_target_revision = value.get("dflash_target_revision")
+    dflash_draft_revision = value.get("dflash_draft_revision")
+    revisions = (dflash_target_revision, dflash_draft_revision)
+    if dflash_draft_model and any(revision is None for revision in revisions):
+        raise ValueError(
+            f"alias {alias!r}: dflash_draft_model requires immutable "
+            "dflash_target_revision and dflash_draft_revision pins"
+        )
+    if not dflash_draft_model and any(revision is not None for revision in revisions):
+        raise ValueError(
+            f"alias {alias!r}: DFlash revision pins require dflash_draft_model"
+        )
+    for key, revision in (
+        ("dflash_target_revision", dflash_target_revision),
+        ("dflash_draft_revision", dflash_draft_revision),
+    ):
+        if revision is not None and (
+            not isinstance(revision, str)
+            or len(revision) != 40
+            or any(char not in "0123456789abcdef" for char in revision)
+        ):
+            raise ValueError(
+                f"alias {alias!r}: {key} must be a full lowercase 40-character "
+                "Hub commit SHA"
+            )
     supports_ddtree = _strict_bool("supports_ddtree", False)
     ddtree_draft_model = value.get("ddtree_draft_model")
     if supports_ddtree and not ddtree_draft_model:
@@ -669,6 +696,8 @@ def _coerce(alias: str, value: object) -> AliasProfile:
         suffix_bench_speedup=speedup,
         supports_dflash=supports_dflash,
         dflash_draft_model=dflash_draft_model,
+        dflash_target_revision=dflash_target_revision,
+        dflash_draft_revision=dflash_draft_revision,
         dflash_algorithm=dflash_algorithm,
         supports_ddtree=supports_ddtree,
         ddtree_draft_model=ddtree_draft_model,

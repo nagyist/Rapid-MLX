@@ -28,6 +28,8 @@ def _good_profile() -> AliasProfile:
         is_moe=False,
         supports_dflash=True,
         dflash_draft_model="z-lab/Qwen3.5-27B-DFlash",
+        dflash_target_revision="a" * 40,
+        dflash_draft_revision="b" * 40,
         dflash_algorithm="dflash",
     )
 
@@ -138,16 +140,27 @@ def test_registry_pair_receipt_requires_exact_verified_tuple(monkeypatch) -> Non
         hf_path="user/target-4bit",
         supports_dflash=True,
         dflash_draft_model="user/dflash2",
+        dflash_target_revision="a" * 40,
+        dflash_draft_revision="b" * 40,
         dflash_algorithm="dflash2",
     )
     monkeypatch.setattr(model_aliases, "list_profiles", lambda: {"target": profile})
 
-    assert is_registry_verified_pair("user/target-4bit", "user/dflash2", "dflash2")
-    assert not is_registry_verified_pair("user/other-4bit", "user/dflash2", "dflash2")
-    assert not is_registry_verified_pair(
-        "user/target-4bit", "user/other-drafter", "dflash2"
+    assert is_registry_verified_pair(
+        "user/target-4bit", "a" * 40, "user/dflash2", "b" * 40, "dflash2"
     )
-    assert not is_registry_verified_pair("user/target-4bit", "user/dflash2", "dflash")
+    assert not is_registry_verified_pair(
+        "user/other-4bit", "a" * 40, "user/dflash2", "b" * 40, "dflash2"
+    )
+    assert not is_registry_verified_pair(
+        "user/target-4bit", "a" * 40, "user/other-drafter", "b" * 40, "dflash2"
+    )
+    assert not is_registry_verified_pair(
+        "user/target-4bit", "a" * 40, "user/dflash2", "b" * 40, "dflash"
+    )
+    assert not is_registry_verified_pair(
+        "user/target-4bit", "c" * 40, "user/dflash2", "b" * 40, "dflash2"
+    )
 
 
 def test_registry_pair_searches_past_duplicate_experimental_alias(monkeypatch) -> None:
@@ -157,12 +170,16 @@ def test_registry_pair_searches_past_duplicate_experimental_alias(monkeypatch) -
         hf_path="user/shared-target-4bit",
         supports_dflash=False,
         dflash_draft_model="user/shared-dflash2",
+        dflash_target_revision="a" * 40,
+        dflash_draft_revision="b" * 40,
         dflash_algorithm="dflash2",
     )
     verified = AliasProfile(
         hf_path="user/shared-target-4bit",
         supports_dflash=True,
         dflash_draft_model="user/shared-dflash2",
+        dflash_target_revision="a" * 40,
+        dflash_draft_revision="b" * 40,
         dflash_algorithm="dflash2",
     )
     monkeypatch.setattr(
@@ -172,7 +189,11 @@ def test_registry_pair_searches_past_duplicate_experimental_alias(monkeypatch) -
     )
 
     assert is_registry_verified_pair(
-        "user/shared-target-4bit", "user/shared-dflash2", "dflash2"
+        "user/shared-target-4bit",
+        "a" * 40,
+        "user/shared-dflash2",
+        "b" * 40,
+        "dflash2",
     )
 
 
