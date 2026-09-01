@@ -1836,9 +1836,12 @@ class BatchedEngine(BaseEngine):
             if not mx.metal.is_available():
                 return fallback
             device_info = mx.device_info()
-            max_recommended = device_info.get(
-                "max_recommended_working_set_size",
-                device_info.get("memory_size", 0),
+            max_recommended = int(
+                device_info.get(
+                    "max_recommended_working_set_size",
+                    device_info.get("memory_size", 0),
+                )
+                or 0
             )
             if max_recommended <= 0:
                 return fallback
@@ -1955,8 +1958,11 @@ class BatchedEngine(BaseEngine):
         # MLX allocator calls must stay on the thread that owns the model's
         # stream (#170). MetalPreflightError must propagate; it is the
         # load failure.
-        self._model_load_executor.submit(
-            self._engine.engine.scheduler.preflight_metal_admission
+        preflight_executor = self._model_load_executor
+        preflight_engine = self._engine
+        assert preflight_executor is not None and preflight_engine is not None
+        preflight_executor.submit(
+            preflight_engine.engine.scheduler.preflight_metal_admission
         ).result()
 
         await self._engine.engine.start(executor=self._model_load_executor)
