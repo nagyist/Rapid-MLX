@@ -41,6 +41,8 @@ child channel and model-server processes.
 ## MVP boundaries
 
 - Local browser playback, not Twitch/YouTube RTMP yet.
+- The Wan MVP output is silent. A local TTS/music lane can be mixed into the
+  constant-rate broadcast in the next iteration.
 - Viewer prompts are trusted local input; production needs moderation and rate
   limits before any LAN or public exposure.
 - Wan TI2V has no native cross-clip memory. Continuity is last-frame

@@ -47,7 +47,7 @@
     <section class="stage">
       <video id="player" playsinline muted></video>
       <div id="waiting" class="waiting"><div><strong>THE CHANNEL<br>IS DREAMING</strong><span id="waitText">BOOTING THE DIRECTOR</span></div></div>
-      <button id="enter" class="enter">ENTER WITH SOUND</button>
+      <button id="enter" class="enter">ENTER CHANNEL</button>
       <div class="hud"><div class="eyebrow" id="eyebrow">UP NEXT</div><div class="now" id="now">Waiting for the first locally generated scene…</div></div>
     </section>
     <aside>
@@ -83,7 +83,7 @@
     }
     player.addEventListener('ended', advance);
     player.addEventListener('error', () => setTimeout(advance, 1000));
-    enter.addEventListener('click', () => { player.muted=false; enter.classList.add('hide'); player.play().catch(()=>{}); });
+    enter.addEventListener('click', () => { enter.classList.add('hide'); player.play().catch(()=>{}); });
 
     async function refresh() {
       try {
