@@ -331,6 +331,14 @@ def test_metrics_renders_model_performance_series():
     )
     body = TestClient(app).get("/metrics").text
 
+    for metric_name in (
+        "rapid_mlx_model_requests_total",
+        "rapid_mlx_model_ttft_seconds_bucket",
+        "rapid_mlx_model_decode_tokens_per_second_bucket",
+    ):
+        assert body.count(f"# TYPE {metric_name} ") == 1
+        assert body.count(f"# HELP {metric_name} ") == 1
+
     assert (
         'rapid_mlx_model_requests_total{model="gemma-4-12b",outcome="succeeded"} 3'
         in body

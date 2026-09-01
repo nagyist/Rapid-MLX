@@ -154,6 +154,26 @@ def _fmt_metric(
     return out
 
 
+def _fmt_metric_family(
+    name: str,
+    metric_type: str,
+    help_text: str,
+    samples: list[tuple[float | int, dict[str, str]]],
+) -> list[str]:
+    """Render one metric family with zero or more samples."""
+    out = [
+        f"# HELP {name} {help_text}",
+        f"# TYPE {name} {metric_type}",
+    ]
+    for value, labels in samples:
+        label_str = ",".join(
+            f'{key}="{_escape_label_value(str(value_))}"'
+            for key, value_ in labels.items()
+        )
+        out.append(f"{name}{{{label_str}}} {value}")
+    return out
+
+
 def _coerce_number(value: Any, default: float = 0.0) -> float:
     """Best-effort numeric coercion — Prometheus samples must be numbers.
 
@@ -189,24 +209,24 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
         )
     requests_total = _coerce_number(reported_total, 0.0)
     lines.extend(
-        _fmt_metric(
+        _fmt_metric_family(
             "rapid_mlx_model_requests_total",
             "counter",
             "Text-engine requests by terminal outcome and model.",
-            requests_total,
-            labels={**labels, "outcome": "total"},
+            [
+                (requests_total, {**labels, "outcome": "total"}),
+                *[
+                    (
+                        int(
+                            _coerce_number(performance.get(f"requests_{outcome}"), 0.0)
+                        ),
+                        {**labels, "outcome": outcome},
+                    )
+                    for outcome in ("succeeded", "cancelled", "failed")
+                ],
+            ],
         )
     )
-    for outcome in ("succeeded", "cancelled", "failed"):
-        lines.extend(
-            _fmt_metric(
-                "rapid_mlx_model_requests_total",
-                "counter",
-                "Text-engine requests by terminal outcome and model.",
-                int(_coerce_number(performance.get(f"requests_{outcome}"), 0.0)),
-                labels={**labels, "outcome": outcome},
-            )
-        )
 
     for token_kind in ("prompt", "completion"):
         lines.extend(
@@ -221,16 +241,17 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
 
     ttft_buckets = performance.get("ttft_bucket_counts")
     if isinstance(ttft_buckets, dict):
-        for bucket, count in ttft_buckets.items():
-            lines.extend(
-                _fmt_metric(
-                    "rapid_mlx_model_ttft_seconds_bucket",
-                    "histogram",
-                    "Time to first token, in seconds, by model.",
-                    int(_coerce_number(count, 0.0)),
-                    labels={**labels, "le": str(bucket)},
-                )
+        lines.extend(
+            _fmt_metric_family(
+                "rapid_mlx_model_ttft_seconds_bucket",
+                "histogram",
+                "Time to first token, in seconds, by model.",
+                [
+                    (int(_coerce_number(count, 0.0)), {**labels, "le": str(bucket)})
+                    for bucket, count in ttft_buckets.items()
+                ],
             )
+        )
         lines.extend(
             _fmt_metric(
                 "rapid_mlx_model_ttft_seconds_count",
@@ -252,16 +273,17 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
 
     decode_buckets = performance.get("decode_bucket_counts")
     if isinstance(decode_buckets, dict):
-        for bucket, count in decode_buckets.items():
-            lines.extend(
-                _fmt_metric(
-                    "rapid_mlx_model_decode_tokens_per_second_bucket",
-                    "histogram",
-                    "Post-first-token decode speed in tokens per second by model.",
-                    int(_coerce_number(count, 0.0)),
-                    labels={**labels, "le": str(bucket)},
-                )
+        lines.extend(
+            _fmt_metric_family(
+                "rapid_mlx_model_decode_tokens_per_second_bucket",
+                "histogram",
+                "Post-first-token decode speed in tokens per second by model.",
+                [
+                    (int(_coerce_number(count, 0.0)), {**labels, "le": str(bucket)})
+                    for bucket, count in decode_buckets.items()
+                ],
             )
+        )
         lines.extend(
             _fmt_metric(
                 "rapid_mlx_model_decode_tokens_per_second_count",
