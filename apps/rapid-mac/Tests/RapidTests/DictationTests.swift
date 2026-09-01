@@ -15,6 +15,11 @@ struct DictationTests {
         var cached = true
     }
 
+    @MainActor
+    private final class CancellationFlag {
+        var observed = false
+    }
+
     // MARK: - Transcript tidying
 
     /// The trailing period is stripped because a dictated fragment usually
@@ -917,6 +922,7 @@ struct DictationTests {
     @Test("disable cancels an in-flight record-start probe")
     func disableCancelsRecordStartWarmup() async {
         var continuation: CheckedContinuation<Bool, Never>?
+        let probeCancellation = CancellationFlag()
         var recorderStartCount = 0
         let entry = cachedAudioEntry(alias: "whisper-small")
         let controller = DictationController(
@@ -934,7 +940,11 @@ struct DictationTests {
             ),
             testingPrewarm: { true },
             testingWarmup: {
-                await withCheckedContinuation { continuation = $0 }
+                await withTaskCancellationHandler {
+                    await withCheckedContinuation { continuation = $0 }
+                } onCancel: {
+                    Task { @MainActor in probeCancellation.observed = true }
+                }
             },
             testingHotkeyStart: { true },
             testingRecorderStart: { recorderStartCount += 1 },
@@ -945,9 +955,14 @@ struct DictationTests {
         controller.toggleFromUI()
         while continuation == nil { await Task.yield() }
         #expect(controller.testingHasRecordStartWarmup)
+        #expect(!probeCancellation.observed)
 
         controller.disable()
         #expect(!controller.testingHasRecordStartWarmup)
+        // Cancellation must actually reach the suspended probe — clearing
+        // the task slot alone would leave the request running against the
+        // engine after the feature turned off.
+        while !probeCancellation.observed { await Task.yield() }
 
         // A late probe completion must not resurrect any warmup state.
         continuation?.resume(returning: true)
