@@ -867,6 +867,7 @@ struct DictationTests {
     @Test("record start fires the page-in probe while capture is running")
     func recordStartFiresConcurrentWarmupProbe() async {
         var warmupCount = 0
+        var warmupContinuation: CheckedContinuation<Bool, Never>?
         var recorderStartCount = 0
         let entry = cachedAudioEntry(alias: "whisper-small")
         let controller = DictationController(
@@ -885,7 +886,7 @@ struct DictationTests {
             testingPrewarm: { true },
             testingWarmup: {
                 warmupCount += 1
-                return true
+                return await withCheckedContinuation { warmupContinuation = $0 }
             },
             testingHotkeyStart: { true },
             testingRecorderStart: { recorderStartCount += 1 },
@@ -896,11 +897,18 @@ struct DictationTests {
         #expect(warmupCount == 0, "the test prewarm seam owns enable-time preparation")
 
         controller.toggleFromUI()
-        while recorderStartCount == 0 { await Task.yield() }
-        while warmupCount == 0 { await Task.yield() }
+        while warmupContinuation == nil { await Task.yield() }
 
-        #expect(warmupCount == 1)
+        // The probe is suspended mid-flight, yet capture already started and
+        // the phase advanced — the page-in genuinely overlaps the recording
+        // instead of gating it.
+        #expect(recorderStartCount == 1)
         #expect(controller.phase == .starting, "the probe must not block or advance the capture phase")
+        #expect(controller.testingHasRecordStartWarmup)
+
+        warmupContinuation?.resume(returning: true)
+        while controller.testingHasRecordStartWarmup { await Task.yield() }
+        #expect(warmupCount == 1)
 
         controller.disable()
     }
