@@ -61,6 +61,22 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         try DropEventFile.clear(at: marker)
     }
 
+    func testDropEventFileCompletionFailsClosed() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-drop-completion-\(UUID().uuidString)")
+        let marker = directory.appendingPathComponent("completed.txt")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        XCTAssertNil(try DropEventFile.completedPhase(at: marker))
+        try "performed".write(to: marker, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try DropEventFile.completedPhase(at: marker), "performed")
+        try "entered".write(to: marker, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try DropEventFile.completedPhase(at: marker)) { error in
+            XCTAssertEqual(error as? DropEventFile.EventError, .invalidPhase("entered"))
+        }
+    }
+
     func testPickerAttachmentsStayWithTheirConversationAndWirePayload() throws {
         continueAfterFailure = false
         let harness = try RapidUITestHarness(

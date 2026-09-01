@@ -72,8 +72,9 @@ enum FileDropRetryPolicy {
 }
 
 enum DropEventFile {
-    enum ClearError: Error {
+    enum EventError: Error, Equatable {
         case remainedAfterRemoval
+        case invalidPhase(String)
     }
 
     static func clear(at url: URL, fileManager: FileManager = .default) throws {
@@ -83,8 +84,18 @@ enum DropEventFile {
             // An absent marker is the required pre-drag state.
         }
         guard !fileManager.fileExists(atPath: url.path) else {
-            throw ClearError.remainedAfterRemoval
+            throw EventError.remainedAfterRemoval
         }
+    }
+
+    static func completedPhase(
+        at url: URL,
+        fileManager: FileManager = .default
+    ) throws -> String? {
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let phase = try String(contentsOf: url, encoding: .utf8)
+        guard phase == "performed" else { throw EventError.invalidPhase(phase) }
+        return phase
     }
 }
 
@@ -377,7 +388,13 @@ final class RapidUITestHarness {
             }
             if chipIsSettled() { return attempt }
 
-            let observedPhase = try? String(contentsOf: dropEventFile, encoding: .utf8)
+            let observedPhase: String?
+            do {
+                observedPhase = try DropEventFile.completedPhase(at: dropEventFile)
+            } catch {
+                XCTFail("could not read valid UI-test drop marker after gesture: \(error)")
+                return attempt
+            }
             if FileDropRetryPolicy.shouldRetry(
                 completedDrop: observedPhase != nil,
                 attempt: attempt,

@@ -123,7 +123,9 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "FileDropRetryPolicy.shouldRetry(" in harness
     assert "func testFileDropRetryPolicyIsBoundedAndCompletionAware()" in chat_source
     assert "func testDropEventFileClearIsIdempotent()" in chat_source
+    assert "func testDropEventFileCompletionFailsClosed()" in chat_source
     assert "try DropEventFile.clear(at: dropEventFile)" in harness
+    assert "try DropEventFile.completedPhase(at: dropEventFile)" in harness
     assert "Date().addingTimeInterval(dropSettleTimeout)" in harness
     assert '"RAPID_XCUI_DROP_EVENT_FILE": dropEventFile.path' in harness
     assert 'recordUITestFileDrop("entered")' not in chat_view
