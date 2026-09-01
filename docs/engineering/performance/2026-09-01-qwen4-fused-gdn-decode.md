@@ -27,12 +27,30 @@ and is intentionally not included.
 
 ## Rapid port verification
 
-The focused admission, dispatch, resident-selector, cache-update, and fallback
-contracts pass: 7 tests. Python compilation and `git diff --check` also pass.
+Rapid-specific validation used an M3 Ultra with 256 GB unified memory,
+Python 3.12.14, MLX 0.32.2, and
+`rapid-mlx/Qwen3.8-Flash-Next-4bit` at revision
+`dcf657e4acda2aae72da99cde65b6c491cd96998`. No other model was resident.
 
-Rapid-specific Metal and real-model validation is pending because the shared
-GPU was occupied after the port was prepared. Run the following only on an
-idle GPU:
+The real-weight layer gate passed 32 sequential steps with exact output,
+convolution cache, and fp32 recurrent state. All 32 eligible calls used the
+fused kernel with zero fallback. Across eight interleaved 64-step observations,
+the stock path took 6.521 ms at the median and the fused path took 5.164 ms, a
+26.28% improvement for one complete GDN layer including its input and output
+projections.
+
+The same resident model then ran three interleaved 256-token observations per
+mode. All six token sequences had the same SHA-256. Median decode throughput
+was 25.43 tok/s for stock and 27.04 tok/s for fused, a 6.35% end-to-end gain.
+Each fused observation recorded 9,252 eligible calls. The 36 prefill calls
+fell back to the stock path as designed.
+
+The focused admission, dispatch, resident-selector, cache-update, fallback,
+and real-Metal numerical contracts pass: 8 tests. The Metal test reproduces
+the stock computation for 32 sequential synthetic steps and compares output
+and both cache slots bit-for-bit.
+
+Reproduce the real-weight layer gate on an idle GPU:
 
 ```bash
 MLX_ENABLE_TF32=0 PYTHONPATH=. python scripts/bench_qwen4_fused_gdn_decode.py \
@@ -41,6 +59,17 @@ MLX_ENABLE_TF32=0 PYTHONPATH=. python scripts/bench_qwen4_fused_gdn_decode.py \
   --output /tmp/qwen4-fused-gdn-decode.json
 ```
 
-Promotion requires 32 exact sequential steps, zero fallback, and a positive
-interleaved stock/fused median on the target host. Until that gate passes, keep
-the environment flag disabled.
+Reproduce the end-to-end interleaved gate without reloading the model between
+variants:
+
+```bash
+MLX_ENABLE_TF32=0 PYTHONPATH=. python \
+  scripts/bench_qwen4_fused_gdn_end_to_end.py \
+  --model /path/to/Qwen3.8-Flash-Next-MLX-4bit-MTP \
+  --repeats 3 \
+  --output /tmp/qwen4-fused-gdn-end-to-end.json
+```
+
+The environment flag remains disabled by default. Prefill, multi-request
+batching, ragged caches, and speculative rollback are explicit stock-path
+fallbacks rather than unqualified extensions of this result.

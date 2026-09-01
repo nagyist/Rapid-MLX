@@ -9,7 +9,6 @@ import statistics
 import time
 from pathlib import Path
 
-
 PLAN = {
     "scope": "one production Qwen4 GDN layer with resident real weights",
     "correctness": "32 sequential steps; exact output and both cache arrays",
@@ -40,6 +39,18 @@ def cache_equal(left, right, mx):
         bool(mx.array_equal(a, b).item())
         for a, b in zip(left.cache, right.cache, strict=True)
     )
+
+
+def cache_diagnostics(left, right, mx):
+    return [
+        {
+            "equal": bool(mx.array_equal(a, b).item()),
+            "max_abs": float(
+                mx.max(mx.abs(a.astype(mx.float32) - b.astype(mx.float32))).item()
+            ),
+        }
+        for a, b in zip(left.cache, right.cache, strict=True)
+    ]
 
 
 def run(args):
@@ -100,6 +111,7 @@ def run(args):
                 "output_equal": output_equal,
                 "states_equal": states_equal,
                 "max_output_abs": float(mx.max(mx.abs(stock - fused)).item()),
+                "cache_slots": cache_diagnostics(stock_cache, fused_cache, mx),
             }
             break
     after = qwen4_fused_gdn_stats(layer)
@@ -134,8 +146,7 @@ def run(args):
     timing = {
         "raw_seconds": timings,
         "median_seconds": medians,
-        "median_speedup_percent": 100.0
-        * (medians["stock"] / medians["fused"] - 1.0),
+        "median_speedup_percent": 100.0 * (medians["stock"] / medians["fused"] - 1.0),
     }
     return {"plan": PLAN, "correctness": correctness, "timing": timing}
 

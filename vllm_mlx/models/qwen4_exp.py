@@ -36,14 +36,13 @@ from mlx_lm.models.gated_delta import gated_delta_update  # noqa: E402
 from mlx_lm.models.rope_utils import initialize_rope  # noqa: E402
 from mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
 
-from .qwen4_exp_cache import QSAIndexCache, Qwen4ExpStateCache  # noqa: E402
 from ..kernels.qwen4_fused_gdn_decode import (  # noqa: E402
     admit_qwen4_fused_gdn_decode,
     fused_gdn_runtime_supported,
     probe_qwen4_fused_gdn_decode,
     qwen4_fused_gdn_decode,
 )
-
+from .qwen4_exp_cache import QSAIndexCache, Qwen4ExpStateCache  # noqa: E402
 
 _FUSED_GDN_MODES = ("stock", "fused")
 _FUSED_GDN_DEFAULT = os.environ.get(
@@ -443,7 +442,7 @@ class GatedDeltaNet(nn.Module):
             conv_state=cache[0],
             recurrent_state=cache[1],
             conv_weight=self.conv1d.weight,
-            A_log=self.A_log,
+            a_log=self.A_log,
             dt_bias=self.dt_bias,
             norm_weight=self.norm.weight,
             mask=mask,
@@ -644,9 +643,7 @@ def qwen4_fused_gdn_stats(model: nn.Module) -> dict[str, Any]:
         stats["fallbacks"] += module.fused_gdn_decode_fallbacks
         reason = module.fused_gdn_decode_last_fallback
         if reason is not None:
-            stats["last_fallbacks"][reason] = (
-                stats["last_fallbacks"].get(reason, 0) + 1
-            )
+            stats["last_fallbacks"][reason] = stats["last_fallbacks"].get(reason, 0) + 1
     return stats
 
 

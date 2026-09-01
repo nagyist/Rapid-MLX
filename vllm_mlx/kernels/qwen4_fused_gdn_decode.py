@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from typing import Any
 
 import mlx.core as mx
-
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ def admit_qwen4_fused_gdn_decode(
     conv_state: Any,
     recurrent_state: Any,
     conv_weight: Any,
-    A_log: Any,
+    a_log: Any,
     dt_bias: Any,
     norm_weight: Any,
     mask: Any,
@@ -120,7 +119,7 @@ def admit_qwen4_fused_gdn_decode(
         "conv_state": conv_state,
         "recurrent_state": recurrent_state,
         "conv_weight": conv_weight,
-        "A_log": A_log,
+        "A_log": a_log,
         "dt_bias": dt_bias,
         "norm_weight": norm_weight,
     }
@@ -147,8 +146,8 @@ def admit_qwen4_fused_gdn_decode(
             return FusedGdnAdmission(False, f"{name} dtype {_dtype(values[name])}")
     if _dtype(recurrent_state) != mx.float32:
         return FusedGdnAdmission(False, "recurrent_state must be float32")
-    if _dtype(A_log) not in (value_dtype, mx.float32):
-        return FusedGdnAdmission(False, f"A_log dtype {_dtype(A_log)}")
+    if _dtype(a_log) not in (value_dtype, mx.float32):
+        return FusedGdnAdmission(False, f"A_log dtype {_dtype(a_log)}")
     return FusedGdnAdmission(True, "eligible")
 
 
@@ -189,11 +188,6 @@ inline U mlx_softplus_fast(U x) {
       : (hi + mlx_log1p_fast(static_cast<U>(metal::exp(lo - hi))));
 }
 
-#pragma clang fp contract(off)
-inline float sq_acc(float acc, float v) {
-  return v * v + acc;
-}
-#pragma clang fp contract(on)
 """
 
 
@@ -213,6 +207,8 @@ _SOURCE = r"""
 
   threadgroup float sq[DK];
   threadgroup float sk[DK];
+  threadgroup T sq_squared[DK];
+  threadgroup T sk_squared[DK];
   threadgroup float sv[DV];
   threadgroup float sy[DV];
   threadgroup float shr[4];
@@ -237,11 +233,11 @@ _SOURCE = r"""
       acc += float(conv_state[(size_t)tap * CD + c]) * float(wc[tap]);
     acc += float(qkv[c]) * float(wc[K - 1]);
     T xb = static_cast<T>(acc);
-    T sl = xb * mlx_sigmoid_fast(xb);
+    T sig = mlx_sigmoid_fast(xb);
+    T sl = xb * sig;
     if (part == 0u) sq[d] = float(sl);
     else if (part == 1u) sk[d] = float(sl);
     else sv[d] = float(sl);
-
     if (part == 2u || (hv % RATIO) == 0u) {
       for (uint tap = 0; tap + 2 < (uint)K; ++tap)
         conv_state_out[(size_t)tap * CD + c] =
@@ -255,31 +251,42 @@ _SOURCE = r"""
     T sp = mlx_softplus_fast(av);
     shr[2] = metal::precise::exp(
         -metal::precise::exp(float(A_log[hv])) * float(sp));
-    shr[3] = mlx_sigmoid_precise<float>(float(beta[hv]));
+    shr[3] = float(mlx_sigmoid_fast(beta[hv]));
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint d = tid; d < (uint)DK; d += NT) {
+    T qv = static_cast<T>(sq[d]);
+    T kv = static_cast<T>(sk[d]);
+    sq_squared[d] = static_cast<T>(qv * qv);
+    sk_squared[d] = static_cast<T>(kv * kv);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   if (simdgroup_index_in_threadgroup == 0u) {
-    float pq = 0.0f, pk = 0.0f;
+    T pq = static_cast<T>(0), pk = static_cast<T>(0);
     uint base = 4u * lane;
     for (int i = 0; i < 4; ++i) {
-      pq += sq[base + i] * sq[base + i];
-      pk += sk[base + i] * sk[base + i];
+      pq = static_cast<T>(sq_squared[base + i] + pq);
+      pk = static_cast<T>(sk_squared[base + i] + pk);
     }
-    pq = simd_sum(pq);
-    pk = simd_sum(pk);
+    pq = static_cast<T>(simd_sum(float(pq)));
+    pk = static_cast<T>(simd_sum(float(pk)));
     if (lane == 0u) {
-      shr[0] = metal::precise::rsqrt(pq / (float)DK + qk_eps);
-      shr[1] = metal::precise::rsqrt(pk / (float)DK + qk_eps);
+      T eps = static_cast<T>(1.0e-6f);
+      T qdenom = pq + eps;
+      T kdenom = pk + eps;
+      shr[0] = float(static_cast<T>(metal::precise::rsqrt(qdenom)));
+      shr[1] = float(static_cast<T>(metal::precise::rsqrt(kdenom)));
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  T scale = static_cast<T>(qscale);
+  T qscale = static_cast<T>(0.08838834764831845f);
   for (uint d = tid; d < (uint)DK; d += NT) {
-    T q_rms = static_cast<T>(sq[d] * shr[0]);
-    T k_rms = static_cast<T>(sk[d] * shr[1]);
-    sq[d] = float(static_cast<T>(q_rms * static_cast<T>(scale * scale)));
-    sk[d] = float(static_cast<T>(k_rms * scale));
+    T q_normalized = static_cast<T>(static_cast<T>(sq[d]) * static_cast<T>(shr[0]));
+    T k_normalized = static_cast<T>(static_cast<T>(sk[d]) * static_cast<T>(shr[1]));
+    sq[d] = float(static_cast<T>(q_normalized * qscale));
+    sk[d] = float(k_normalized);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -310,22 +317,22 @@ _SOURCE = r"""
   if (simdgroup_index_in_threadgroup == 0u) {
     float po = 0.0f;
     uint base = 4u * lane;
-    for (int i = 0; i < 4; ++i) po = sq_acc(po, sy[base + i]);
+    for (int i = 0; i < 4; ++i) po += sy[base + i] * sy[base + i];
     po = simd_sum(po);
     if (lane == 0u)
       shr[0] = metal::precise::rsqrt(po / (float)DV + norm_eps);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint d = tid; d < (uint)DV; d += NT) {
-    float x = sy[d] * shr[0];
-    x = float(norm_weight[d]) * x;
-    x = x * mlx_sigmoid_precise<float>(float(z[hv * DV + d]));
+    T normalized = static_cast<T>(sy[d] * shr[0]);
+    normalized = norm_weight[d] * normalized;
+    float x = float(normalized) * mlx_sigmoid_fast<float>(float(z[hv * DV + d]));
     output[hv * DV + d] = static_cast<T>(x);
   }
 """
 
 
-@lru_cache(maxsize=None)
+@cache
 def _kernel():
     return mx.fast.metal_kernel(
         name="rapid_qwen4_fused_gdn_decode",
@@ -340,8 +347,6 @@ def _kernel():
             "dt_bias",
             "recurrent_state",
             "norm_weight",
-            "qscale",
-            "qk_eps",
             "norm_eps",
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
@@ -358,7 +363,7 @@ def qwen4_fused_gdn_decode(
     alpha,
     conv_state,
     conv_weight,
-    A_log,
+    a_log,
     dt_bias,
     recurrent_state,
     norm_weight,
@@ -380,12 +385,10 @@ def qwen4_fused_gdn_decode(
             alpha,
             conv_state,
             conv_weight,
-            A_log,
+            a_log,
             dt_bias,
             recurrent_state,
             norm_weight,
-            float(KEY_HEAD_DIM**-0.5),
-            float(1.0e-6 / KEY_HEAD_DIM),
             float(norm_eps),
         ],
         template=[
