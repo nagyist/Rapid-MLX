@@ -333,8 +333,8 @@ def test_metrics_renders_model_performance_series():
 
     for metric_name in (
         "rapid_mlx_model_requests_total",
-        "rapid_mlx_model_ttft_seconds_bucket",
-        "rapid_mlx_model_decode_tokens_per_second_bucket",
+        "rapid_mlx_model_ttft_seconds",
+        "rapid_mlx_model_decode_tokens_per_second",
     ):
         assert body.count(f"# TYPE {metric_name} ") == 1
         assert body.count(f"# HELP {metric_name} ") == 1
@@ -357,6 +357,11 @@ def test_metrics_renders_model_performance_series():
         in body
     )
     assert 'rapid_mlx_model_ttft_seconds_max{model="gemma-4-12b"} 0.9' in body
+    assert (
+        'rapid_mlx_model_ttft_seconds_bucket{model="gemma-4-12b",le="+Inf"} 3' in body
+    )
+    assert 'rapid_mlx_model_ttft_seconds_count{model="gemma-4-12b"} 3' in body
+    assert 'rapid_mlx_model_ttft_seconds_sum{model="gemma-4-12b"} 1.37' in body
     assert (
         'rapid_mlx_model_decode_tokens_per_second_last{model="gemma-4-12b"} 20' in body
     )

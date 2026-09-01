@@ -159,12 +159,28 @@ def _fmt_metric_family(
     metric_type: str,
     help_text: str,
     samples: list[tuple[float | int, dict[str, str]]],
+    sample_name: str | None = None,
 ) -> list[str]:
     """Render one metric family with zero or more samples."""
     out = [
         f"# HELP {name} {help_text}",
         f"# TYPE {name} {metric_type}",
     ]
+    for value, labels in samples:
+        label_str = ",".join(
+            f'{key}="{_escape_label_value(str(value_))}"'
+            for key, value_ in labels.items()
+        )
+        out.append(f"{sample_name or name}{{{label_str}}} {value}")
+    return out
+
+
+def _fmt_metric_samples(
+    name: str,
+    samples: list[tuple[float | int, dict[str, str]]],
+) -> list[str]:
+    """Render additional samples for an already-declared metric family."""
+    out: list[str] = []
     for value, labels in samples:
         label_str = ",".join(
             f'{key}="{_escape_label_value(str(value_))}"'
@@ -243,31 +259,39 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
     if isinstance(ttft_buckets, dict):
         lines.extend(
             _fmt_metric_family(
-                "rapid_mlx_model_ttft_seconds_bucket",
+                "rapid_mlx_model_ttft_seconds",
                 "histogram",
                 "Time to first token, in seconds, by model.",
                 [
                     (int(_coerce_number(count, 0.0)), {**labels, "le": str(bucket)})
                     for bucket, count in ttft_buckets.items()
                 ],
+                sample_name="rapid_mlx_model_ttft_seconds_bucket",
             )
         )
         lines.extend(
-            _fmt_metric(
+            _fmt_metric_samples(
                 "rapid_mlx_model_ttft_seconds_count",
-                "histogram",
-                "Time to first token, in seconds, by model.",
-                int(_coerce_number(performance.get("ttft_seconds_count"), 0.0)),
-                labels=labels,
+                [
+                    (
+                        int(_coerce_number(performance.get("ttft_seconds_count"), 0.0)),
+                        labels,
+                    )
+                ],
             )
         )
         lines.extend(
-            _fmt_metric(
+            _fmt_metric_samples(
                 "rapid_mlx_model_ttft_seconds_sum",
-                "histogram",
-                "Time to first token, in seconds, by model.",
-                round(_coerce_number(performance.get("ttft_seconds_sum"), 0.0), 6),
-                labels=labels,
+                [
+                    (
+                        round(
+                            _coerce_number(performance.get("ttft_seconds_sum"), 0.0),
+                            6,
+                        ),
+                        labels,
+                    )
+                ],
             )
         )
 
@@ -275,36 +299,43 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
     if isinstance(decode_buckets, dict):
         lines.extend(
             _fmt_metric_family(
-                "rapid_mlx_model_decode_tokens_per_second_bucket",
+                "rapid_mlx_model_decode_tokens_per_second",
                 "histogram",
                 "Post-first-token decode speed in tokens per second by model.",
                 [
                     (int(_coerce_number(count, 0.0)), {**labels, "le": str(bucket)})
                     for bucket, count in decode_buckets.items()
                 ],
+                sample_name="rapid_mlx_model_decode_tokens_per_second_bucket",
             )
         )
         lines.extend(
-            _fmt_metric(
+            _fmt_metric_samples(
                 "rapid_mlx_model_decode_tokens_per_second_count",
-                "histogram",
-                "Post-first-token decode speed in tokens per second by model.",
-                int(_coerce_number(performance.get("decode_observations"), 0.0)),
-                labels=labels,
+                [
+                    (
+                        int(
+                            _coerce_number(performance.get("decode_observations"), 0.0)
+                        ),
+                        labels,
+                    )
+                ],
             )
         )
         lines.extend(
-            _fmt_metric(
+            _fmt_metric_samples(
                 "rapid_mlx_model_decode_tokens_per_second_sum",
-                "histogram",
-                "Post-first-token decode speed in tokens per second by model.",
-                round(
-                    _coerce_number(
-                        performance.get("decode_tokens_per_second_sum"), 0.0
-                    ),
-                    6,
-                ),
-                labels=labels,
+                [
+                    (
+                        round(
+                            _coerce_number(
+                                performance.get("decode_tokens_per_second_sum"), 0.0
+                            ),
+                            6,
+                        ),
+                        labels,
+                    )
+                ],
             )
         )
 
