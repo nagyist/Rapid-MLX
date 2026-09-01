@@ -448,7 +448,7 @@ final class ServerModelProfileTests {
         )
         let pendingRuntimeRetry = try #require(
             source.range(
-                of: "profile?.needsLiveProfileRefresh == true",
+                of: "profile?.needsLiveProfileRefresh ?? false",
                 range: residencyRefresh.lowerBound..<retry.lowerBound
             )
         )
