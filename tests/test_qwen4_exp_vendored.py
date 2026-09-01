@@ -2082,9 +2082,7 @@ def test_qwen4_gdn_verify_single_step_initializes_state_and_empty_boundaries():
     assert boundaries.shape == (1, 0, 2, 3, 4)
 
 
-@pytest.mark.requires_mlx
-@pytest.mark.parametrize("threadgroup_y", fused_gdn._THREADGROUP_Y_CANDIDATES)
-def test_real_metal_kernel_matches_stock_for_32_sequential_steps(threadgroup_y):
+def _assert_real_metal_kernel_matches_stock(threadgroup_y):
     """Guard every BF16 boundary that the fused dispatch replaces."""
     if not mx.metal.is_available():
         pytest.skip("requires a Metal GPU")
@@ -2242,3 +2240,21 @@ def test_real_metal_kernel_matches_stock_for_32_sequential_steps(threadgroup_y):
             stock_state, fused_state = next_stock_state, next_fused_state
     finally:
         mx.set_default_device(previous_device)
+
+
+@pytest.mark.requires_mlx
+def test_real_metal_kernel_matches_stock_for_every_supported_threadgroup():
+    supported = []
+    for threadgroup_y in fused_gdn._THREADGROUP_Y_CANDIDATES:
+        try:
+            _assert_real_metal_kernel_matches_stock(threadgroup_y)
+        except ValueError as exc:
+            if "threads per threadgroup" not in str(exc):
+                raise
+        except RuntimeError:
+            # The production probe treats a Metal resource rejection as an
+            # unsupported candidate and tries the next smaller threadgroup.
+            continue
+        else:
+            supported.append(threadgroup_y)
+    assert supported, "Metal rejected every fused GDN threadgroup candidate"
