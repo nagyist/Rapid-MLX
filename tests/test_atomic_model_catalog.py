@@ -147,6 +147,14 @@ def test_product_recommendation_policy_is_atomic_ssot_and_validates_tasks() -> N
     with pytest.raises(CatalogValidationError, match="policy task_type"):
         ContractValidator().validate_recommendation_policy(broken, aliases=aliases)
 
+    unresolved = copy.deepcopy(policy)
+    unresolved["tiers"][0]["picks"][0]["alias"] = "missing-recommendation-alias"
+    unresolved["policy_digest"] = rcj_digest(
+        {key: value for key, value in unresolved.items() if key != "policy_digest"}
+    )
+    with pytest.raises(CatalogValidationError, match="does not resolve"):
+        ContractValidator().validate_recommendation_policy(unresolved, aliases=aliases)
+
 
 def test_shadow_bundle_preserves_legacy_alias_surface() -> None:
     report = build_catalog_bundle()["shadow_report"]
