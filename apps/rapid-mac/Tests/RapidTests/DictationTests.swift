@@ -864,6 +864,91 @@ struct DictationTests {
     }
 
     @MainActor
+    @Test("record start fires the page-in probe while capture is running")
+    func recordStartFiresConcurrentWarmupProbe() async {
+        var warmupCount = 0
+        var recorderStartCount = 0
+        let entry = cachedAudioEntry(alias: "whisper-small")
+        let controller = DictationController(
+            server: ServerManager(
+                testingState: .ready(alias: "whisper-small"),
+                binaryPath: Self.tempDirectory().appendingPathComponent("rapid-mlx")
+            ),
+            testingEnabled: true,
+            testingModelAlias: "whisper-small",
+            testingReadiness: .init(
+                microphone: true,
+                accessibility: true,
+                modelSelected: true,
+                modelOnDisk: true
+            ),
+            testingPrewarm: { true },
+            testingWarmup: {
+                warmupCount += 1
+                return true
+            },
+            testingHotkeyStart: { true },
+            testingRecorderStart: { recorderStartCount += 1 },
+            audioCatalogLoader: { _ in [entry] }
+        )
+
+        await controller.enable()
+        #expect(warmupCount == 0, "the test prewarm seam owns enable-time preparation")
+
+        controller.toggleFromUI()
+        while recorderStartCount == 0 { await Task.yield() }
+        while warmupCount == 0 { await Task.yield() }
+
+        #expect(warmupCount == 1)
+        #expect(controller.phase == .starting, "the probe must not block or advance the capture phase")
+
+        controller.disable()
+    }
+
+    @MainActor
+    @Test("disable cancels an in-flight record-start probe")
+    func disableCancelsRecordStartWarmup() async {
+        var continuation: CheckedContinuation<Bool, Never>?
+        var recorderStartCount = 0
+        let entry = cachedAudioEntry(alias: "whisper-small")
+        let controller = DictationController(
+            server: ServerManager(
+                testingState: .ready(alias: "whisper-small"),
+                binaryPath: Self.tempDirectory().appendingPathComponent("rapid-mlx")
+            ),
+            testingEnabled: true,
+            testingModelAlias: "whisper-small",
+            testingReadiness: .init(
+                microphone: true,
+                accessibility: true,
+                modelSelected: true,
+                modelOnDisk: true
+            ),
+            testingPrewarm: { true },
+            testingWarmup: {
+                await withCheckedContinuation { continuation = $0 }
+            },
+            testingHotkeyStart: { true },
+            testingRecorderStart: { recorderStartCount += 1 },
+            audioCatalogLoader: { _ in [entry] }
+        )
+
+        await controller.enable()
+        controller.toggleFromUI()
+        while continuation == nil { await Task.yield() }
+        #expect(controller.testingHasRecordStartWarmup)
+
+        controller.disable()
+        #expect(!controller.testingHasRecordStartWarmup)
+
+        // A late probe completion must not resurrect any warmup state.
+        continuation?.resume(returning: true)
+        for _ in 0..<10 { await Task.yield() }
+        #expect(!controller.testingHasRecordStartWarmup)
+        #expect(controller.phase == .off)
+    }
+
+    @MainActor
     @Test("disabling during model warmup cannot register a stale hotkey")
     func disableDuringWarmupDoesNotArmHotkey() async {
         var continuation: CheckedContinuation<Bool, Never>?
