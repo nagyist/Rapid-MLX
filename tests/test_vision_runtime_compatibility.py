@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import plistlib
 import sys
 from types import ModuleType
 
@@ -126,18 +127,37 @@ def test_runtime_override_stays_managed_without_home(monkeypatch):
     assert "pip-install into" in mllm._vision_install_hint()
 
 
-def test_managed_runtime_missing_dependency_never_recommends_pip(monkeypatch):
+def test_managed_runtime_missing_dependency_never_recommends_pip(monkeypatch, tmp_path):
+    app = tmp_path / "Rapid-MLX Desktop.app"
+    info = app / "Contents" / "Info.plist"
+    info.parent.mkdir(parents=True)
+    with info.open("wb") as handle:
+        plistlib.dump({"CFBundleIdentifier": "com.rapidmlx.rapid"}, handle)
     monkeypatch.setattr(
         mllm.sys,
         "executable",
-        "/Applications/Rapid-MLX Desktop.app/Contents/Resources/rapid-mlx/"
-        "python/bin/python3.12",
+        str(app / "Contents/Resources/rapid-mlx/python/bin/python3.12"),
     )
 
     hint = mllm._vlm_broken_install_hint("PIL")
 
     assert "Reinstall Rapid-MLX Desktop.app" in hint
     assert "pip install" not in hint
+
+
+def test_unrelated_app_runtime_is_not_managed(monkeypatch, tmp_path):
+    app = tmp_path / "Unrelated.app"
+    info = app / "Contents" / "Info.plist"
+    info.parent.mkdir(parents=True)
+    with info.open("wb") as handle:
+        plistlib.dump({"CFBundleIdentifier": "com.example.unrelated"}, handle)
+    monkeypatch.setattr(
+        mllm.sys,
+        "executable",
+        str(app / "Contents/Resources/rapid-mlx/python/bin/python3.12"),
+    )
+
+    assert mllm._managed_desktop_runtime_kind() is None
 
 
 def test_standalone_repair_commands_shell_quote_python_path(monkeypatch):

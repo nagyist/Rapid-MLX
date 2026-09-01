@@ -20,6 +20,7 @@ import ipaddress
 import logging
 import math
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -176,7 +177,28 @@ def _managed_desktop_runtime_kind() -> str | None:
             return "runtime-override"
         return None
     if ".app/Contents/Resources/rapid-mlx/" in executable:
-        return "embedded"
+        try:
+            root = executable_path.parents[2]
+            app_root = root.parents[2]
+            with (app_root / "Contents" / "Info.plist").open("rb") as handle:
+                bundle_id = plistlib.load(handle).get("CFBundleIdentifier", "")
+        except (IndexError, OSError, plistlib.InvalidFileException):
+            return None
+        if (
+            executable_path.parent.name == "bin"
+            and executable_path.parent.parent.name == "python"
+            and executable_path.name.startswith("python")
+            and root.name == "rapid-mlx"
+            and root.parent.name == "Resources"
+            and root.parent.parent.name == "Contents"
+            and app_root.name.endswith(".app")
+            and (
+                bundle_id == "com.rapidmlx.rapid"
+                or bundle_id.startswith("com.rapidmlx.rapid.dogfood-")
+            )
+        ):
+            return "embedded"
+        return None
     return None
 
 
