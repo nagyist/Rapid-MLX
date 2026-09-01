@@ -331,7 +331,8 @@ def test_admitted_path_updates_cache_and_counter_without_real_kernel():
 
 
 @pytest.mark.requires_mlx
-def test_real_metal_kernel_matches_stock_for_32_sequential_steps():
+@pytest.mark.parametrize("threadgroup_y", fused_gdn._THREADGROUP_Y_CANDIDATES)
+def test_real_metal_kernel_matches_stock_for_32_sequential_steps(threadgroup_y):
     """Guard every BF16 boundary that the fused dispatch replaces."""
     if not mx.metal.is_available():
         pytest.skip("requires a Metal GPU")
@@ -471,7 +472,7 @@ def test_real_metal_kernel_matches_stock_for_32_sequential_steps():
                     fused_state,
                     norm_weight,
                     1e-6,
-                    threadgroup_y=32,
+                    threadgroup_y=threadgroup_y,
                 )
             )
             mx.eval(
