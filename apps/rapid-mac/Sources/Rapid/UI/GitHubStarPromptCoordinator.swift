@@ -240,6 +240,11 @@ enum GitHubStarCLIError: Error {
 /// canonical repository, so drag-and-dropped or copied URLs cannot change it.
 enum GitHubStarCLI {
     static let timeout: Duration = .seconds(8)
+    static let trustedExecutablePaths = [
+        "/opt/homebrew/bin/gh",
+        "/usr/local/bin/gh",
+        "/usr/bin/gh"
+    ]
 
     static func star(
         _ repositoryURL: URL,
@@ -273,17 +278,8 @@ enum GitHubStarCLI {
     }
 
     static func executableURL() -> URL? {
-        let searchPaths = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            ProcessInfo.processInfo.environment["PATH"] ?? "",
-            "/usr/bin",
-            "/bin"
-        ]
-
-        return searchPaths
-            .flatMap { $0.split(separator: ":").map(String.init) }
-            .map { URL(fileURLWithPath: $0).appendingPathComponent("gh") }
+        trustedExecutablePaths
+            .map { URL(fileURLWithPath: $0) }
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 

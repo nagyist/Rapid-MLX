@@ -203,6 +203,11 @@ struct GitHubStarPromptCoordinatorTests {
             "--hostname", "github.com",
             "user/starred/raullenchai/Rapid-MLX"
         ])
+        #expect(GitHubStarCLI.trustedExecutablePaths == [
+            "/opt/homebrew/bin/gh",
+            "/usr/local/bin/gh",
+            "/usr/bin/gh"
+        ])
     }
 
     @Test("The default gh executor launches, waits, and reports command status")
