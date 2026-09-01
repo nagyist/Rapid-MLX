@@ -1829,6 +1829,7 @@ class BatchedEngine(BaseEngine):
                 AUTO_UTILIZATION_FLOOR,
                 note_resolved_utilization,
                 plan_metal_limit,
+                process_utilization_floor,
             )
 
             requested = self._gpu_memory_utilization
@@ -1859,6 +1860,15 @@ class BatchedEngine(BaseEngine):
             # behind a stale lower cap while process-wide ``active`` has
             # grown past it.
             note_resolved_utilization(plan.resolved_utilization)
+            # The allocation limit itself follows the process-wide ratchet
+            # too (codex round 3 BLOCKING #1): applying THIS model's plan
+            # verbatim would LOWER the process limit when a later, smaller
+            # model resolves below an earlier model's budget, while every
+            # resident scheduler keeps enforcing the higher floor — the
+            # single-cap invariant requires both enforcement points to use
+            # the same, monotonically non-decreasing utilization.
+            effective_utilization, _generation = process_utilization_floor()
+            effective_limit = int(max_recommended * effective_utilization)
             # Setter failures are contained HERE so the resolved
             # utilization always propagates (codex round 1 BLOCKING #2):
             # if ``mx.set_memory_limit`` succeeds but ``set_cache_limit``
@@ -1866,13 +1876,13 @@ class BatchedEngine(BaseEngine):
             # admission cap desynchronized from the allocation limit
             # Metal is actually holding.
             try:
-                mx.set_memory_limit(plan.limit_bytes)
-                cache_limit = _compute_metal_cache_limit(plan.limit_bytes)
+                mx.set_memory_limit(effective_limit)
+                cache_limit = _compute_metal_cache_limit(effective_limit)
                 mx.set_cache_limit(cache_limit)
                 logger.info(
                     f"Metal memory limits set ({plan.mode}): "
-                    f"allocation_limit={plan.limit_bytes / 1e9:.1f}GB "
-                    f"({plan.resolved_utilization * 100:.0f}% of "
+                    f"allocation_limit={effective_limit / 1e9:.1f}GB "
+                    f"({effective_utilization * 100:.0f}% of "
                     f"{max_recommended / 1e9:.1f}GB, "
                     f"weights={weights_bytes / 1e9:.1f}GB), "
                     f"cache_limit={cache_limit / 1e9:.1f}GB"
@@ -1881,10 +1891,10 @@ class BatchedEngine(BaseEngine):
                 logger.warning(
                     f"Failed to apply Metal memory limits "
                     f"(resolved {plan.mode} utilization "
-                    f"{plan.resolved_utilization:.2f} still governs the "
+                    f"{effective_utilization:.2f} still governs the "
                     f"admission cap): {limit_exc}"
                 )
-            return plan.resolved_utilization
+            return effective_utilization
 
         # The resolved utilization (== the value actually fed to
         # ``mx.set_memory_limit``) replaces the requested one so EngineConfig

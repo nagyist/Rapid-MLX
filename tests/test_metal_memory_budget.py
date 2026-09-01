@@ -131,16 +131,30 @@ class TestPreflightErrorMessage:
         assert "smaller model" in message  # remediation 2
         assert "close memory-heavy apps" in message.lower()  # remediation 3
 
-    def test_no_impossible_advice_at_the_ceiling(self):
-        """Codex round 1 NIT: at or above the auto ceiling, 'increase
-        --gpu-memory-utilization' is impossible advice — the message must
-        say the Mac lacks the memory instead."""
+    def test_advice_survives_at_auto_ceiling(self):
+        """Codex round 3 NIT: at the 0.97 auto ceiling an explicit
+        override can still legally raise the knob toward 1.0, so the
+        advice must stay."""
         message = format_preflight_error(
             required_bytes=15_000_000_000,
             active_bytes=14_500_000_000,
             min_kv_bytes=500_000_000,
             cap_bytes=11_700_000_000,
             utilization=0.97,
+            device_budget_bytes=12_100_000_000,
+        )
+        assert "Increase --gpu-memory-utilization" in message
+
+    def test_no_impossible_advice_at_full_utilization(self):
+        """Codex rounds 1+3 NITs: only at a true 1.0 is 'increase
+        --gpu-memory-utilization' impossible advice — the message must
+        say the Mac lacks the memory instead."""
+        message = format_preflight_error(
+            required_bytes=15_000_000_000,
+            active_bytes=14_500_000_000,
+            min_kv_bytes=500_000_000,
+            cap_bytes=12_100_000_000,
+            utilization=1.0,
             device_budget_bytes=12_100_000_000,
         )
         assert "Increase --gpu-memory-utilization" not in message

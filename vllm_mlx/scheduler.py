@@ -5597,13 +5597,17 @@ class Scheduler:
         # concrete remediations, not just the internal cap arithmetic.
         # Keeps the "D-METAL-CAP" and "reserved KV" tokens the existing
         # regression tests and operator runbooks grep for. The
-        # --gpu-memory-utilization suggestion is dropped once the enforced
-        # utilization has no room left (codex round 2 NIT).
+        # --gpu-memory-utilization suggestion is dropped only once the
+        # enforced utilization is truly maximal — an explicit override can
+        # legally be raised to 1.0, past the auto ceiling (codex rounds 2
+        # and 3 NITs).
+        from .memory_budget import MAX_UTILIZATION
+
         raise_advice = (
             " Retry after in-flight requests drain, reduce context "
             "length or max_tokens, or lower concurrency."
         )
-        if self._metal_cap_effective_utilization < 0.97:
+        if self._metal_cap_effective_utilization < MAX_UTILIZATION:
             raise_advice = (
                 " Retry after in-flight requests drain, reduce context "
                 "length or max_tokens, lower concurrency, or restart "

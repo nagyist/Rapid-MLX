@@ -40,6 +40,12 @@ from dataclasses import dataclass
 AUTO_UTILIZATION_FLOOR = 0.90
 AUTO_UTILIZATION_CEILING = 0.97
 
+# The knob's absolute maximum: an explicit --gpu-memory-utilization may go
+# all the way to 1.0, past the auto ceiling. Advice to raise the knob is
+# only impossible (and therefore suppressed) at or beyond this value; a
+# tiny slack absorbs float representation of "1.0".
+MAX_UTILIZATION = 1.0 - 1e-9
+
 # Runtime headroom charged on top of the measured weight footprint in auto
 # mode: KV cache for in-flight requests, activation workspace, Metal heap
 # fragmentation. Fractional so big models reserve proportionally more, with an
@@ -162,13 +168,14 @@ def format_preflight_error(
 ) -> str:
     """Build the actionable admission-impossible startup message (#2858).
 
-    The remediation list is tailored to what can still help (codex round 1
-    NIT): "increase --gpu-memory-utilization" is only suggested while the
-    configured value sits below the auto ceiling — at or above it the knob
-    is exhausted and the honest advice is that this Mac does not have the
-    memory for this configuration.
+    The remediation list is tailored to what can still help (codex rounds
+    1 and 3): "increase --gpu-memory-utilization" is suggested while the
+    enforced utilization sits below 1.0 — an explicit override can legally
+    go all the way there, even past the auto ceiling. Only at a full 1.0
+    is the knob truly exhausted, and the honest advice becomes that this
+    Mac does not have the memory for this configuration.
     """
-    if utilization < AUTO_UTILIZATION_CEILING:
+    if utilization < MAX_UTILIZATION:
         remediation = (
             "Increase --gpu-memory-utilization, reduce context length or "
             "concurrency, close memory-heavy apps, or choose a smaller model."
@@ -176,10 +183,10 @@ def format_preflight_error(
     else:
         remediation = (
             "This Mac does not have enough unified memory for this "
-            "configuration at the maximum Metal budget — reduce context "
-            "length or concurrency, close memory-heavy apps, retry after "
-            "in-flight requests on other models finish, or choose a "
-            "smaller model."
+            "configuration even at the maximum Metal budget — reduce "
+            "context length or concurrency, close memory-heavy apps, "
+            "retry after in-flight requests on other models finish, or "
+            "choose a smaller model."
         )
     return (
         f"This model needs approximately {required_bytes / 1e9:.1f} GB of "
