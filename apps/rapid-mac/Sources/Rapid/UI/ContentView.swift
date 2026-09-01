@@ -942,7 +942,7 @@ struct ContentView: View {
             CommunityBenchmarkView(
                 catalog: catalogEntries,
                 binary: server.binaryPath,
-                prepareServer: { await server.prepareForCommunityBenchmark() },
+                prepareServer: { try await server.prepareForCommunityBenchmark() },
                 releaseServer: { server.finishCommunityBenchmark($0) }
             )
         }
