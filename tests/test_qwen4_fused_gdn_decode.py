@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -190,6 +192,37 @@ def test_kernel_dispatch_is_one_threadgroup_per_value_head():
     assert outputs[1].shape == (1, 3, 10240)
     assert outputs[2].shape == (1, 48, 128, 128)
     assert ("RATIO", 3) in calls[0]["template"]
+
+
+def test_concurrent_probe_publishes_only_after_initialization():
+    entered = Event()
+    release = Event()
+    calls = 0
+
+    def blocking_kernel(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=5)
+        return (object(), object(), object())
+
+    with (
+        patch.object(fused_gdn, "_PROBE_COMPLETE", False),
+        patch.object(fused_gdn, "_PROBED_THREADGROUP_Y", None),
+        patch.object(fused_gdn, "_PROBE_LOCK", Lock()),
+        patch.object(fused_gdn, "fused_gdn_runtime_supported", return_value=True),
+        patch.object(fused_gdn, "qwen4_fused_gdn_decode", side_effect=blocking_kernel),
+        patch.object(fused_gdn.mx, "eval"),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        first = pool.submit(fused_gdn.probe_qwen4_fused_gdn_decode, mx.bfloat16)
+        assert entered.wait(timeout=5)
+        second = pool.submit(fused_gdn.probe_qwen4_fused_gdn_decode, mx.bfloat16)
+        release.set()
+        assert first.result(timeout=5) == 32
+        assert second.result(timeout=5) == 32
+
+    assert calls == 1
 
 
 def test_resident_switch_preserves_weights_and_defaults_stock():

@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import cache
+from threading import Lock
 from typing import Any
 
 import mlx.core as mx
@@ -426,56 +427,61 @@ def fused_gdn_runtime_supported() -> bool:
 
 _PROBED_THREADGROUP_Y: int | None = None
 _PROBE_COMPLETE = False
+_PROBE_LOCK = Lock()
 
 
 def probe_qwen4_fused_gdn_decode(dtype) -> int | None:
-    """Compile candidates once and retain the first supported geometry."""
+    """Compile candidates once and publish the supported geometry atomically."""
     global _PROBE_COMPLETE, _PROBED_THREADGROUP_Y
     if _PROBE_COMPLETE:
         return _PROBED_THREADGROUP_Y
-    _PROBE_COMPLETE = True
-    if not fused_gdn_runtime_supported():
-        return None
+    with _PROBE_LOCK:
+        if _PROBE_COMPLETE:
+            return _PROBED_THREADGROUP_Y
+        if not fused_gdn_runtime_supported():
+            _PROBE_COMPLETE = True
+            return None
 
-    qkv = mx.zeros((1, 1, CONV_DIM), dtype=dtype)
-    z = mx.zeros((1, 1, VALUE_DIM), dtype=dtype)
-    gates = mx.zeros((1, 1, NUM_VALUE_HEADS), dtype=dtype)
-    conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
-    conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
-    recurrent_state = mx.zeros(
-        (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM), dtype=mx.float32
-    )
-    vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
-    A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
-    norm_weight = mx.ones((VALUE_HEAD_DIM,), dtype=dtype)
-    for threadgroup_y in _THREADGROUP_Y_CANDIDATES:
-        try:
-            outputs = qwen4_fused_gdn_decode(
-                qkv,
-                z,
-                gates,
-                gates,
-                conv_state,
-                conv_weight,
-                A_log,
-                vector,
-                recurrent_state,
-                norm_weight,
-                1.0e-6,
-                threadgroup_y=threadgroup_y,
-            )
-            mx.eval(*outputs)
-            _PROBED_THREADGROUP_Y = threadgroup_y
-            return threadgroup_y
-        except ValueError as exc:
-            if "threads per threadgroup" in str(exc):
-                continue
-            logger.info("Qwen4 fused GDN probe failed: %s", exc)
-            break
-        except RuntimeError as exc:
-            logger.info("Qwen4 fused GDN kernel is unavailable: %s", exc)
-            break
-    return None
+        qkv = mx.zeros((1, 1, CONV_DIM), dtype=dtype)
+        z = mx.zeros((1, 1, VALUE_DIM), dtype=dtype)
+        gates = mx.zeros((1, 1, NUM_VALUE_HEADS), dtype=dtype)
+        conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
+        conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
+        recurrent_state = mx.zeros(
+            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM), dtype=mx.float32
+        )
+        vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
+        A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
+        norm_weight = mx.ones((VALUE_HEAD_DIM,), dtype=dtype)
+        for threadgroup_y in _THREADGROUP_Y_CANDIDATES:
+            try:
+                outputs = qwen4_fused_gdn_decode(
+                    qkv,
+                    z,
+                    gates,
+                    gates,
+                    conv_state,
+                    conv_weight,
+                    A_log,
+                    vector,
+                    recurrent_state,
+                    norm_weight,
+                    1.0e-6,
+                    threadgroup_y=threadgroup_y,
+                )
+                mx.eval(*outputs)
+                _PROBED_THREADGROUP_Y = threadgroup_y
+                break
+            except ValueError as exc:
+                if "threads per threadgroup" in str(exc):
+                    continue
+                logger.info("Qwen4 fused GDN probe failed: %s", exc)
+                break
+            except RuntimeError as exc:
+                logger.info("Qwen4 fused GDN kernel is unavailable: %s", exc)
+                break
+        _PROBE_COMPLETE = True
+        return _PROBED_THREADGROUP_Y
 
 
 __all__ = [
