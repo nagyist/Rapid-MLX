@@ -312,6 +312,50 @@ def test_local_real_import_uses_trusted_dynamic_sys_path(tmp_path, monkeypatch):
     assert eh._module_available("probe_dynamic_trusted", real_import=True) is True
 
 
+def test_import_probe_cache_separates_trust_policies(tmp_path, monkeypatch):
+    runtime = Path(sys.executable)
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    (trusted_root / "probe_cache_policy.py").write_text("probe_loaded = True\n")
+
+    trusted = eh._runtime_module_importable(
+        runtime,
+        "probe_cache_policy",
+        None,
+        trusted_roots=(trusted_root,),
+    )
+    untrusted = eh._runtime_module_importable(runtime, "probe_cache_policy", None)
+
+    assert trusted is True
+    assert untrusted is False
+
+
+def test_run_all_clears_invocation_scoped_caches(monkeypatch):
+    def section():
+        cached_section = eh.Section("Cached")
+        cached_section.add("cached", eh.CheckStatus.OK)
+        return cached_section
+
+    monkeypatch.setattr(eh, "_SECTION_BUILDERS", (section,))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: Path(sys.executable))
+    eh._RUNTIME_PROBE_CACHE[Path("/stale")] = {}
+    eh._RUNTIME_IMPORT_CACHE[Path("/stale"), "module", "", False, True, ()] = True
+    eh._RUNTIME_IMPORT_TIMEOUTS.add((Path("/stale"), "module", "", False, True, ()))
+    eh._RUNTIME_DISTRIBUTION_CACHE[Path("/stale")] = True
+    eh._RUNTIME_CONTEXTS[Path("/stale")] = (Path("/"), {})
+
+    try:
+        eh.run_all()
+    finally:
+        eh._RUNTIME_SELECTION_DONE = False
+
+    assert eh._RUNTIME_PROBE_CACHE == {}
+    assert eh._RUNTIME_IMPORT_CACHE == {}
+    assert not eh._RUNTIME_IMPORT_TIMEOUTS
+    assert eh._RUNTIME_DISTRIBUTION_CACHE == {}
+    assert eh._RUNTIME_CONTEXTS == {}
+
+
 def test_module_server_runtime_must_register_rapid_mlx_distribution(tmp_path):
     def make_runtime(name: str) -> Path:
         runtime = tmp_path / name / "bin" / "python3"
@@ -1780,7 +1824,9 @@ def test_timed_out_required_import_is_unknown_not_failed(
         "_module_visibility",
         lambda dist, runtime=None: (False, False),
     )
-    eh._RUNTIME_IMPORT_TIMEOUTS.add((runtime, "transformers", "", False))
+    eh._RUNTIME_IMPORT_TIMEOUTS.add(
+        eh._import_probe_cache_key(runtime, "transformers", None)
+    )
 
     section = eh.section_required_packages()
 
@@ -1807,7 +1853,9 @@ def test_timeout_during_visibility_is_unknown_not_failed(
     }
 
     def time_out_during_visibility(dist, runtime=None):
-        eh._RUNTIME_IMPORT_TIMEOUTS.add((runtime, "transformers", "", False))
+        eh._RUNTIME_IMPORT_TIMEOUTS.add(
+            eh._import_probe_cache_key(runtime, "transformers", None)
+        )
         return False, False
 
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))

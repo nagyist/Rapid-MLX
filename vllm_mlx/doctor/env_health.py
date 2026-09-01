@@ -322,7 +322,7 @@ def _runtime_environment(
         return "Rapid-MLX application environment"
     effective_prefix = prefix if prefix is not None else Path(sys.prefix).resolve()
     effective_base_prefix = Path(
-        str(base_prefix or getattr(sys, "base_prefix", sys.prefix))
+        str(base_prefix or getattr(sys, "base_prefix", "") or sys.prefix)
     ).resolve()
     if exe == runtime_root / "bin" / "python3" or effective_prefix == runtime_root:
         return "Rapid-MLX runtime environment"
@@ -873,10 +873,12 @@ else:
         _emit_import_result({"importable": True, "trusted_origin": True})
 """
 _RUNTIME_IMPORT_CACHE: dict[
-    tuple[Path, str, str, bool],
+    tuple[Path, str, str, bool, bool, tuple[str, ...]],
     bool,
 ] = {}
-_RUNTIME_IMPORT_TIMEOUTS: set[tuple[Path, str, str, bool]] = set()
+_RUNTIME_IMPORT_TIMEOUTS: set[tuple[Path, str, str, bool, bool, tuple[str, ...]]] = (
+    set()
+)
 
 
 def _bounded_timeout(default_s: float) -> float:
@@ -886,18 +888,41 @@ def _bounded_timeout(default_s: float) -> float:
     return max(0.05, min(default_s, _DOCTOR_DEADLINE - time.monotonic()))
 
 
+def _import_probe_cache_key(
+    runtime: Path,
+    module: str,
+    sidecar_root: Path | None,
+    *,
+    trusted_roots: tuple[Path, ...] = (),
+    exercise: bool = False,
+    isolated: bool = True,
+) -> tuple[Path, str, str, bool, bool, tuple[str, ...]]:
+    return (
+        runtime,
+        module,
+        str(sidecar_root.resolve()) if sidecar_root else "",
+        exercise,
+        isolated,
+        tuple(sorted(str(root.resolve()) for root in trusted_roots)),
+    )
+
+
 def _import_probe_was_interrupted(
     runtime: Path,
     module: str,
     sidecar_root: Path | None,
     *,
+    trusted_roots: tuple[Path, ...] = (),
     exercise: bool = False,
+    isolated: bool = True,
 ) -> bool:
-    cache_key = (
+    cache_key = _import_probe_cache_key(
         runtime,
         module,
-        str(sidecar_root.resolve()) if sidecar_root else "",
-        exercise,
+        sidecar_root,
+        trusted_roots=trusted_roots,
+        exercise=exercise,
+        isolated=isolated,
     )
     return cache_key in _RUNTIME_IMPORT_TIMEOUTS
 
@@ -938,11 +963,13 @@ def _runtime_module_importable(
     isolated: bool = True,
 ) -> bool:
     """Import one trusted module in *runtime*, independently of other probes."""
-    cache_key = (
+    cache_key = _import_probe_cache_key(
         runtime,
         module,
-        str(sidecar_root.resolve()) if sidecar_root else "",
-        exercise,
+        sidecar_root,
+        trusted_roots=trusted_roots,
+        exercise=exercise,
+        isolated=isolated,
     )
     if cache_key in _RUNTIME_IMPORT_CACHE:
         return _RUNTIME_IMPORT_CACHE[cache_key]
@@ -2755,6 +2782,11 @@ def run_all() -> Report:
     try:
         _DOCTOR_DEADLINE = time.monotonic() + _DOCTOR_BUDGET_S
         _RUNTIME_SELECTION_DONE = False
+        _RUNTIME_PROBE_CACHE.clear()
+        _RUNTIME_IMPORT_CACHE.clear()
+        _RUNTIME_IMPORT_TIMEOUTS.clear()
+        _RUNTIME_DISTRIBUTION_CACHE.clear()
+        _RUNTIME_CONTEXTS.clear()
         _selected_runtime()
         for builder in _SECTION_BUILDERS:
             try:
