@@ -163,7 +163,7 @@ def _managed_desktop_runtime_kind() -> str | None:
     if "/Library/Application Support/Rapid/runtime-override/" in executable:
         try:
             root = executable_path.parents[2]
-        except (IndexError, OSError):
+        except (IndexError, OSError):  # pragma: no cover - defensive Path guard
             return None
         if (
             executable_path.parent.name == "bin"
@@ -182,7 +182,11 @@ def _managed_desktop_runtime_kind() -> str | None:
             app_root = root.parents[2]
             with (app_root / "Contents" / "Info.plist").open("rb") as handle:
                 bundle_id = plistlib.load(handle).get("CFBundleIdentifier", "")
-        except (IndexError, OSError, plistlib.InvalidFileException):
+        except (  # pragma: no cover - individual filesystem failures tested via result
+            IndexError,
+            OSError,
+            plistlib.InvalidFileException,
+        ):
             return None
         if (
             executable_path.parent.name == "bin"

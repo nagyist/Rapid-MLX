@@ -160,6 +160,41 @@ def test_unrelated_app_runtime_is_not_managed(monkeypatch, tmp_path):
     assert mllm._managed_desktop_runtime_kind() is None
 
 
+def test_embedded_runtime_without_valid_plist_is_not_managed(monkeypatch, tmp_path):
+    app = tmp_path / "Rapid-MLX Desktop.app"
+    executable = app / "Contents/Resources/rapid-mlx/python/bin/python3.12"
+    executable.parent.mkdir(parents=True)
+    monkeypatch.setattr(mllm.sys, "executable", str(executable))
+
+    assert mllm._managed_desktop_runtime_kind() is None
+
+
+def test_vision_runtime_reports_missing_distribution_metadata(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "mlx_vlm", object())
+    monkeypatch.setattr(
+        mllm,
+        "version",
+        lambda _name: (_ for _ in ()).throw(mllm.PackageNotFoundError()),
+    )
+
+    assert mllm.vision_runtime_status() == (
+        mllm.VisionRuntimeStatus.BROKEN,
+        "mlx-vlm version metadata unavailable",
+    )
+
+
+def test_require_mlx_vlm_rejects_incompatible_runtime(monkeypatch):
+    monkeypatch.setattr(
+        mllm,
+        "vision_runtime_status",
+        lambda: (mllm.VisionRuntimeStatus.INCOMPATIBLE, "0.7.0"),
+    )
+    monkeypatch.setattr(mllm, "_vision_install_hint", lambda: "repair runtime")
+
+    with pytest.raises(ImportError, match="installed mlx-vlm '0.7.0'"):
+        mllm._require_mlx_vlm("publisher/vision-model")
+
+
 def test_standalone_repair_commands_shell_quote_python_path(monkeypatch):
     monkeypatch.setattr(
         mllm.sys, "executable", "/Users/alice/My Runtime/bin/python's preview"

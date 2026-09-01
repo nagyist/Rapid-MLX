@@ -455,6 +455,50 @@ def test_routing_metadata_download_defers_to_configured_mirror(monkeypatch):
     assert server._prefetch_routing_metadata("publisher/model") == "publisher/model"
 
 
+def test_routing_metadata_hub_failure_raises_without_mirror(monkeypatch):
+    from vllm_mlx import server
+
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "")
+    monkeypatch.setattr(
+        "huggingface_hub.model_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("HF blocked")),
+    )
+
+    with pytest.raises(OSError, match="HF blocked"):
+        server._prefetch_routing_metadata("publisher/model")
+
+
+def test_routing_metadata_requires_hub_revision(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx import server
+
+    monkeypatch.setattr(
+        "huggingface_hub.model_info", lambda _repo: SimpleNamespace(sha=None)
+    )
+
+    with pytest.raises(RuntimeError, match="did not include a revision"):
+        server._prefetch_routing_metadata("publisher/model")
+
+
+def test_routing_metadata_download_failure_raises_without_mirror(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx import server
+
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "")
+    monkeypatch.setattr(
+        "huggingface_hub.model_info", lambda _repo: SimpleNamespace(sha="abc123")
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("CDN blocked")),
+    )
+
+    with pytest.raises(OSError, match="CDN blocked"):
+        server._prefetch_routing_metadata("publisher/model")
+
+
 def test_routing_metadata_prefetch_reuses_complete_warm_cache(monkeypatch):
     from types import SimpleNamespace
 
@@ -704,7 +748,11 @@ async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(
         load_path="/cache/snapshots/revision",
         auto_text_fallback=auto_text_fallback,
         lane_reason=lane_reason,
+        is_mllm=True,
     )
+
+    vision_checks = []
+    monkeypatch.setattr("vllm_mlx.models.mllm._require_mlx_vlm", vision_checks.append)
 
     def resolve_once(model_name, **kwargs):
         calls.append((model_name, kwargs))
@@ -724,6 +772,7 @@ async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(
     startup = server._model_registry.get_entry("publisher/model")
     assert startup.experimental is True
     assert runtime.experimental is True
+    assert vision_checks == ["/cache/snapshots/revision"] * 2
 
     assert calls == [
         (
