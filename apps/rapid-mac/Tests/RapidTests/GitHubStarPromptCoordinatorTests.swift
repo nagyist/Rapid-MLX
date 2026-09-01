@@ -118,7 +118,7 @@ struct GitHubStarPromptCoordinatorTests {
         prompt.productValueDelivered(.chatReply)
         #expect(prompt.isPresented)
 
-        #expect(await prompt.attemptDirectStar())
+        #expect(await prompt.attemptDirectStar() == .starred)
         #expect(await recorder.recordedURL() == GitHubCommunity.repositoryURL)
         #expect(defaults.bool(forKey: GitHubStarPromptCoordinator.Keys.completed))
         #expect(!prompt.isPresented)
@@ -141,8 +141,8 @@ struct GitHubStarPromptCoordinatorTests {
         prompt.productValueDelivered(.chatReply)
         #expect(prompt.isPresented)
 
-        let directStarSucceeded = await prompt.attemptDirectStar()
-        #expect(!directStarSucceeded)
+        let directStarResult = await prompt.attemptDirectStar()
+        #expect(directStarResult == .unavailable)
         #expect(!defaults.bool(forKey: GitHubStarPromptCoordinator.Keys.completed))
         #expect(prompt.isPresented)
         #expect(!prompt.isStarring)
@@ -166,8 +166,8 @@ struct GitHubStarPromptCoordinatorTests {
         prompt.productValueDelivered(.chatReply)
         #expect(prompt.isPresented)
 
-        let directStarSucceeded = await prompt.attemptDirectStar()
-        #expect(!directStarSucceeded)
+        let directStarResult = await prompt.attemptDirectStar()
+        #expect(directStarResult == .unavailable)
         #expect(!defaults.bool(forKey: GitHubStarPromptCoordinator.Keys.completed))
         #expect(!prompt.isPresented)
     }
@@ -190,8 +190,8 @@ struct GitHubStarPromptCoordinatorTests {
         prompt.productValueDelivered(.chatReply)
         #expect(prompt.isPresented)
 
-        let directStarSucceeded = await prompt.attemptDirectStar()
-        #expect(directStarSucceeded)
+        let directStarResult = await prompt.attemptDirectStar()
+        #expect(directStarResult == .starred)
         #expect(defaults.bool(forKey: GitHubStarPromptCoordinator.Keys.completed))
         #expect(!prompt.isPresented)
     }
@@ -312,11 +312,31 @@ struct GitHubStarPromptCoordinatorTests {
 
         let firstAttempt = Task { await prompt.attemptDirectStar() }
         await gate.waitUntilEntered()
-        #expect(await prompt.attemptDirectStar() == false)
+        #expect(await prompt.attemptDirectStar() == .unavailable)
         await gate.release()
-        let firstAttemptSucceeded = await firstAttempt.value
-        #expect(firstAttemptSucceeded)
+        let firstAttemptResult = await firstAttempt.value
+        #expect(firstAttemptResult == .starred)
         #expect(!prompt.isStarring)
+    }
+
+    @Test("Cancelling a direct star does not trigger browser fallback")
+    func directStarCancellationIsDistinctFromFailure() async {
+        let defaults = isolatedDefaults()
+        defaults.set(34, forKey: GitHubStarPromptCoordinator.Keys.totalSuccessfulActions)
+        let prompt = GitHubStarPromptCoordinator(
+            defaults: defaults,
+            quietWindow: .zero,
+            presentationActive: true,
+            starExecutor: { _ in throw CancellationError() }
+        )
+
+        prompt.productValueDelivered(.chatReply)
+        let result = await prompt.attemptDirectStar()
+
+        #expect(result == .cancelled)
+        #expect(prompt.isPresented)
+        #expect(!prompt.isStarring)
+        #expect(!defaults.bool(forKey: GitHubStarPromptCoordinator.Keys.completed))
     }
 
     @Test("Closing the window suspends presentation and reopening earns a new quiet window")

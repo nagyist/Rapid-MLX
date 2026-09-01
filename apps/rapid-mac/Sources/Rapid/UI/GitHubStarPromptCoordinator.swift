@@ -2,6 +2,12 @@ import AppKit
 import Foundation
 import Observation
 
+enum GitHubStarAttemptResult: Equatable {
+    case starred
+    case unavailable
+    case cancelled
+}
+
 /// Owns the local-only, post-value invitation to visit Rapid-MLX on GitHub.
 ///
 /// The prompt is deliberately workload-based rather than launch-based: it is
@@ -151,18 +157,20 @@ final class GitHubStarPromptCoordinator {
     /// Tries the GitHub CLI first so developers can complete the invitation
     /// without a browser round-trip. A missing or unauthenticated CLI is not an
     /// error surface: the caller falls back to the existing browser handoff.
-    func attemptDirectStar() async -> Bool {
-        guard isPresented, !isStarring else { return false }
+    func attemptDirectStar() async -> GitHubStarAttemptResult {
+        guard isPresented, !isStarring else { return .unavailable }
         isStarring = true
         defer { isStarring = false }
 
         do {
             try await starExecutor(GitHubCommunity.repositoryURL)
-            guard isPresented || presentationPending else { return false }
+            guard isPresented || presentationPending else { return .unavailable }
             markCompleted()
-            return true
+            return .starred
+        } catch is CancellationError {
+            return .cancelled
         } catch {
-            return false
+            return .unavailable
         }
     }
 

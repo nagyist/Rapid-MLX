@@ -76,8 +76,11 @@ struct GitHubStarPromptCard: View {
                 HStack(spacing: RapidTheme.Space.sm) {
                     Button {
                         Task {
-                            if await prompt.attemptDirectStar() {
+                            switch await prompt.attemptDirectStar() {
+                            case .starred, .cancelled:
                                 return
+                            case .unavailable:
+                                break
                             }
 
                             guard prompt.isPresented, !prompt.isStarring else { return }
