@@ -2,6 +2,42 @@ import AppKit
 import Darwin
 import XCTest
 
+/// Bounded edge follower for the production memory confirmation presented to
+/// native GUI tests on a busy hosted Mac. A posted click is not proof SwiftUI
+/// consumed it, so an unchanged presentation gets spaced retries. The cap
+/// prevents a stuck alert from being hammered for the whole readiness timeout.
+struct MemoryConfirmationRetryPolicy {
+    static let maximumAttempts = 3
+    static let retryPollInterval = 10
+
+    private(set) var attempts = 0
+    private var pollsSinceAttempt = 0
+
+    mutating func shouldClick(isVisible: Bool) -> Bool {
+        guard isVisible else {
+            attempts = 0
+            pollsSinceAttempt = 0
+            return false
+        }
+        pollsSinceAttempt += 1
+        guard attempts < Self.maximumAttempts,
+              attempts == 0 || pollsSinceAttempt >= Self.retryPollInterval else {
+            return false
+        }
+        attempts += 1
+        pollsSinceAttempt = 0
+        return true
+    }
+
+    @MainActor
+    mutating func follow(_ confirmation: XCUIElement) {
+        let isVisible = confirmation.exists && confirmation.isEnabled
+        if shouldClick(isVisible: isVisible) {
+            confirmation.click()
+        }
+    }
+}
+
 @MainActor
 final class RapidUITestHarness {
     let app: XCUIApplication
@@ -139,14 +175,10 @@ final class RapidUITestHarness {
         releasePortReservation()
         readiness.click()
         let memoryConfirmation = element("MemoryWarning.Confirm")
-        var confirmedMemoryWarning = false
+        var memoryConfirmationPolicy = MemoryConfirmationRetryPolicy()
         XCTAssertTrue(waitUntil(timeout: 60) {
-            if !confirmedMemoryWarning,
-               memoryConfirmation.exists,
-               memoryConfirmation.isEnabled {
-                memoryConfirmation.click()
-                confirmedMemoryWarning = true
-            }
+            if self.serverStartCount() > priorServerStartCount { return true }
+            memoryConfirmationPolicy.follow(memoryConfirmation)
             return self.serverStartCount() > priorServerStartCount
         })
     }

@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class ImageGenerationPixelTests: XCTestCase {
+    func testMemoryConfirmationRetriesAreSpacedBoundedAndRearmed() {
+        var policy = MemoryConfirmationRetryPolicy()
+
+        XCTAssertTrue(policy.shouldClick(isVisible: true))
+        for _ in 1..<MemoryConfirmationRetryPolicy.retryPollInterval {
+            XCTAssertFalse(policy.shouldClick(isVisible: true))
+        }
+        XCTAssertTrue(policy.shouldClick(isVisible: true))
+        for _ in 1..<MemoryConfirmationRetryPolicy.retryPollInterval {
+            XCTAssertFalse(policy.shouldClick(isVisible: true))
+        }
+        XCTAssertTrue(policy.shouldClick(isVisible: true))
+        for _ in 0..<(MemoryConfirmationRetryPolicy.retryPollInterval * 2) {
+            XCTAssertFalse(policy.shouldClick(isVisible: true))
+        }
+
+        XCTAssertFalse(policy.shouldClick(isVisible: false))
+        XCTAssertTrue(policy.shouldClick(isVisible: true))
+    }
+
     func testTwoImageRendersDrawDistinctThumbnailPixels() throws {
         continueAfterFailure = false
         let testHome = FileManager.default.temporaryDirectory
@@ -71,10 +91,17 @@ final class ImageGenerationPixelTests: XCTestCase {
         let readiness = element("Readiness.Action", in: app)
         XCTAssertTrue(readiness.waitForExistence(timeout: 20))
         readiness.click()
+        let memoryConfirmation = element("MemoryWarning.Confirm", in: app)
+        var memoryConfirmationPolicy = MemoryConfirmationRetryPolicy()
         XCTAssertTrue(waitUntil(timeout: 30) {
-            guard let events = try? String(contentsOf: eventLog, encoding: .utf8) else { return false }
-            return events.contains(#""event": "server_started""#)
+            let serverStarted = {
+                guard let events = try? String(contentsOf: eventLog, encoding: .utf8) else { return false }
+                return events.contains(#""event": "server_started""#)
                 && events.contains(#""alias": "fake-image-alias""#)
+            }
+            if serverStarted() { return true }
+            memoryConfirmationPolicy.follow(memoryConfirmation)
+            return serverStarted()
         })
 
         let prompt = element("Images.Prompt", in: app)
