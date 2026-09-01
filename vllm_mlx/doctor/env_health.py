@@ -675,13 +675,35 @@ def _module_path_is_trusted(spec):
 
 distributions = json.loads(sys.argv[1])
 
-def distribution_version(name):
+def distribution_version(name, module_path):
     for metadata_roots in (trusted_metadata_roots, context_metadata_roots):
         for distribution in importlib.metadata.distributions(path=metadata_roots):
             dist_name = (distribution.metadata.get("Name") or "").lower()
-            if dist_name == name.lower():
-                return distribution.version
+            if dist_name != name.lower() or not _distribution_owns_module(
+                distribution, module_path
+            ):
+                continue
+            return distribution.version
     return None
+
+def _distribution_owns_module(distribution, module_path):
+    if module_path is None:
+        return False
+    module_path = Path(module_path).resolve()
+    owned_paths = [module_path]
+    if module_path.name == "__init__.py":
+        owned_paths.append(module_path.parent)
+    for installed_file in distribution.files or []:
+        try:
+            installed_path = Path(distribution.locate_file(installed_file)).resolve()
+        except (Exception, SystemExit):
+            continue
+        for owned_path in owned_paths:
+            if installed_path == owned_path or installed_path.is_relative_to(
+                owned_path
+            ):
+                return True
+    return False
 
 packages = {}
 for distribution, module_name in distributions.items():
@@ -689,14 +711,17 @@ for distribution, module_name in distributions.items():
     discoverable = False
     spec = None
     try:
-        version = distribution_version(distribution)
+        spec = importlib.util.find_spec(module_name)
+        version = None if spec is None else distribution_version(
+            distribution,
+            spec.origin,
+        )
     except importlib.metadata.PackageNotFoundError:
         version = None
     except (Exception, SystemExit):
         version = None
+    discoverable = spec is not None
     try:
-        spec = importlib.util.find_spec(module_name)
-        discoverable = spec is not None
         trusted_origin = spec is not None and _module_path_is_trusted(spec)
     except (Exception, SystemExit):
         spec = None
@@ -762,6 +787,7 @@ else:
         import PIL.Image as Image
 
         Image.new("RGB", (1, 1))
+        print(json.dumps({"importable": True, "trusted_origin": True}))
     else:
         try:
             importlib.import_module(module_name)
@@ -1930,28 +1956,42 @@ def section_optional_packages() -> Section:
                 CheckStatus.OK,
                 detail=f"distribution={dist} version={ver}",
             )
-        elif (
-            _visible_without_metadata(dist, runtime)
-            if runtime != Path(sys.executable).absolute()
-            else _visible_without_metadata(dist)
-        ):
-            s.add(
-                f"{label} is importable in {runtime} but version metadata "
-                "is unavailable",
-                CheckStatus.WARN,
-                detail=(
-                    f"distribution={dist} module={_DISTRIBUTION_MODULES[dist]} "
-                    f"visible=true runtime={runtime}; package is not missing, "
-                    "but compatibility cannot be verified"
-                ),
-            )
         else:
-            s.add(
-                f"{label} not installed (`{hint}`)",
-                CheckStatus.WARN,
-                detail=f"distribution={dist} hint={hint}",
+            visible, import_verified = _module_visibility(
+                dist,
+                runtime if runtime != Path(sys.executable).absolute() else None,
             )
-
+            if not visible:
+                s.add(
+                    f"{label} not installed (`{hint}`)",
+                    CheckStatus.WARN,
+                    detail=f"distribution={dist} hint={hint}",
+                )
+            elif import_verified:
+                s.add(
+                    f"{label} is importable in {runtime} but version metadata "
+                    "is unavailable",
+                    CheckStatus.WARN,
+                    detail=(
+                        f"distribution={dist} "
+                        f"module={_DISTRIBUTION_MODULES[dist]} "
+                        f"visible=true verified=true runtime={runtime}; "
+                        "package is not missing, but compatibility cannot be "
+                        "verified"
+                    ),
+                )
+            else:
+                s.add(
+                    f"{label} is visible in {runtime} but importability is "
+                    "not verified and version metadata is unavailable",
+                    CheckStatus.WARN,
+                    detail=(
+                        f"distribution={dist} "
+                        f"module={_DISTRIBUTION_MODULES[dist]} "
+                        f"visible=true verified=false runtime={runtime}; "
+                        "package is not missing, but health cannot be verified"
+                    ),
+                )
     # DFlash is the headline 0.9.x feature and is gated on mlx-vlm >= 0.5.0.
     # The plain optional-package row above only reports presence/version —
     # it cannot say "you have mlx-vlm but it's too old for [dflash]". This

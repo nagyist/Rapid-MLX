@@ -312,6 +312,7 @@ def test_remote_probe_reads_sanitized_context_metadata_without_trusting_imports(
     (dist_info / "METADATA").write_text(
         "Metadata-Version: 2.1\nName: transformers\nVersion: 5.12.1\n"
     )
+    (dist_info / "RECORD").write_text("probe_metadata_module.py,,\n")
     monkeypatch.setattr(eh, "_RUNTIME_CONTEXTS", {runtime: (context_root, {})})
     monkeypatch.setattr(
         eh, "_RUNTIME_PACKAGES", {"transformers": "probe_metadata_module"}
@@ -328,6 +329,77 @@ def test_remote_probe_reads_sanitized_context_metadata_without_trusting_imports(
     assert package["trusted_origin"] is False
     assert package["importable"] is None
     assert not eh._runtime_module_importable(runtime, "probe_metadata_module", None)
+
+
+def test_remote_probe_rejects_metadata_from_unowned_context(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = Path(sys.executable).resolve()
+    context_root = tmp_path / "server-context"
+    context_root.mkdir()
+    module_root = tmp_path / "runtime-packages"
+    site_root = module_root / "site-packages"
+    module_root.mkdir()
+    site_root.mkdir()
+    (site_root / "probe_unrelated_module.py").write_text("probe_loaded = True\n")
+    dist_info = context_root / "transformers-5.12.1.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: transformers\nVersion: 5.12.1\n"
+    )
+    monkeypatch.setattr(eh, "_RUNTIME_CONTEXTS", {runtime: (context_root, {})})
+    monkeypatch.setattr(
+        eh,
+        "_RUNTIME_PACKAGES",
+        {"transformers": "probe_unrelated_module"},
+    )
+    probe = eh._probe_runtime(runtime, sidecar_root=module_root)
+
+    assert probe is not None
+    package = cast("dict[str, object]", probe["packages"]["transformers"])
+    assert package["version"] is None
+    assert package["discoverable"] is True
+    assert package["trusted_origin"] is True
+    assert package["importable"] is None
+
+
+def test_metadata_missing_remote_module_is_not_claimed_importable(
+    tmp_path,
+    monkeypatch,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server-runtime" / "bin" / "python"
+    report = {
+        "executable": str(runtime),
+        "base_prefix": str(tmp_path / "base"),
+        "packages": {
+            "mlx-vlm": {
+                "importable": None,
+                "discoverable": True,
+                "trusted_origin": False,
+                "module": "mlx_vlm",
+                "version": None,
+            }
+        },
+        "path": [],
+        "prefix": str(tmp_path / "runtime"),
+    }
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(f"#!/bin/sh\ncat <<'JSON'\n{json.dumps(report)}\nJSON\n")
+    runtime.chmod(0o755)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
+    monkeypatch.setattr(eh, "_RUNTIME_IMPORT_CACHE", {})
+
+    section = eh.section_optional_packages()
+
+    row = next(check for check in section.checks if check.label.startswith("mlx-vlm"))
+    assert "importability is not verified" in row.label
+    assert "importable in" not in row.label
 
 
 def test_remote_probe_preserves_context_path_order(tmp_path, monkeypatch):
@@ -2067,7 +2139,10 @@ def test_failed_remote_runtime_probe_is_one_optional_failure(
     assert all("not installed" not in check.label for check in section.checks)
 
 
-def test_remote_pillow_probe_rejects_a_module_that_cannot_import(tmp_path, monkeypatch):
+def test_remote_pillow_probe_rejects_a_module_that_cannot_import(
+    tmp_path,
+    monkeypatch,
+):
     doctor_exe = tmp_path / "doctor" / "bin" / "python"
     doctor_exe.parent.mkdir(parents=True)
     doctor_exe.write_text("")
@@ -2097,6 +2172,34 @@ def test_remote_pillow_probe_rejects_a_module_that_cannot_import(tmp_path, monke
 
     assert row.status is eh.CheckStatus.WARN
     assert "Pillow (PIL) missing or broken" in row.label
+
+
+def test_remote_pillow_probe_accepts_a_successful_image_exercise(
+    tmp_path,
+    monkeypatch,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = Path(sys.executable)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(
+        eh,
+        "_safe_version",
+        lambda distribution, runtime=None: (
+            "0.6.17" if distribution == "mlx-vlm" else None
+        ),
+    )
+
+    try:
+        section = eh.section_optional_packages()
+        row = next(c for c in section.checks if c.label.startswith("mlx-vlm (vision"))
+    finally:
+        eh._RUNTIME_PROBE_CACHE.pop(runtime, None)
+
+    assert row.status is eh.CheckStatus.OK
+    assert "Pillow" not in row.label
 
 
 def test_missing_optional_package_marks_warning():

@@ -445,6 +445,11 @@ def test_doctor_vision_row_warns_when_mlx_vlm_truly_absent(monkeypatch):
         "_visible_without_metadata",
         lambda dist, runtime=None: False,
     )
+    monkeypatch.setattr(
+        env_health,
+        "_module_visibility",
+        lambda dist, runtime=None: (False, False),
+    )
 
     section = env_health.section_optional_packages()
     vision_row = _find_row(section, "mlx-vlm", "vision")
