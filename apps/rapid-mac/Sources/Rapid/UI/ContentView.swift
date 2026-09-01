@@ -378,8 +378,15 @@ struct ContentView: View {
                 // generator; a replacement clears the whole profile via the
                 // existing bearer/session lifecycle.
                 let profile = server.activeModelProfile
-                let mismatched = profile?.id.caseInsensitiveCompare(alias) != .orderedSame
-                let speculativePending = profile?.needsLiveProfileRefresh == true
+                let mismatched: Bool
+                let speculativePending: Bool
+                if let profile {
+                    mismatched = profile.id.caseInsensitiveCompare(alias) != .orderedSame
+                    speculativePending = profile.needsLiveProfileRefresh
+                } else {
+                    mismatched = true
+                    speculativePending = false
+                }
                 if mismatched || speculativePending {
                     await refreshSelectedModelProfile(for: alias)
                 }
