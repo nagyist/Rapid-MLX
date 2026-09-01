@@ -123,7 +123,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "if observedPhase == nil, attempt < maximumAttempts" in harness
     assert "Date().addingTimeInterval(dropSettleTimeout)" in harness
     assert '"RAPID_XCUI_DROP_EVENT_FILE": dropEventFile.path' in harness
-    assert 'recordUITestFileDrop("entered")' in chat_view
+    assert 'recordUITestFileDrop("entered")' not in chat_view
     assert 'recordUITestFileDrop("performed")' in chat_view
     assert 'let dropTarget = element("rapid.chat.compose")' in harness
     assert "click(forDuration: 1, thenDragTo: dropTarget)" in harness

@@ -277,10 +277,11 @@ final class RapidUITestHarness {
     /// the call site via ``element(_:)`` (which keeps the query literal in the
     /// test source for the xcui workflow contract). A landed drop is treated as
     /// one whose chip settles (exists and is hittable). The product's compose
-    /// destination emits a test-only marker when it observes the gesture. A
-    /// gesture with no destination marker may be retried once within the
-    /// original settle budget. An observed gesture is never retried: if its chip
-    /// does not appear, the test still exposes the product/AX regression. The
+    /// destination emits a test-only marker after `performDragOperation`
+    /// consumes the drop. A gesture with no completion marker may be retried
+    /// once within the original settle budget. A consumed drop is never
+    /// retried: if its chip does not appear, the test still exposes the
+    /// product/AX regression. The
     /// chip is never dereferenced before it exists, so a not-yet-matched
     /// ``firstMatch`` cannot throw (#2481).
     /// Callers without an expected chip (the unsupported-file negative case)
@@ -319,7 +320,7 @@ final class RapidUITestHarness {
             try? FileManager.default.removeItem(at: dropEventFile)
             source.click(forDuration: 1, thenDragTo: dropTarget)
 
-            // The destination marker and the product render arrive
+            // The drop-completion marker and the product render arrive
             // independently. First wait briefly for either authoritative
             // signal, then spend the rest of the original budget on an
             // observed drop's chip.
@@ -342,7 +343,7 @@ final class RapidUITestHarness {
             }
             XCTFail(
                 "dropped attachment chip did not settle within \(dropSettleTimeout)s "
-                    + "(destination phase: \(observedPhase ?? "not observed"), attempts: \(attempt))"
+                    + "(drop phase: \(observedPhase ?? "not performed"), attempts: \(attempt))"
             )
             return
         }

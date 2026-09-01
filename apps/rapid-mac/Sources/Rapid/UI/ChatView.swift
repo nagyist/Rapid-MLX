@@ -2483,10 +2483,7 @@ final class AutosizingTextView: NSTextView {
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        if Self.containsFileURLs(sender.draggingPasteboard) {
-            recordUITestFileDrop("entered")
-            return .copy
-        }
+        if Self.containsFileURLs(sender.draggingPasteboard) { return .copy }
         return super.draggingEntered(sender)
     }
 
