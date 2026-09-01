@@ -2458,20 +2458,25 @@ def _normalize_speculative_config_or_exit(args):
         args.dspark_num_speculative_tokens = config.num_speculative_tokens or 5
     elif config.method == "mtp":
         args.spec_decode = "mtp"
-        args.mtp_continuous_batching = config.continuous_batching
-        args.mtp_allow_dynamic_membership = config.allow_dynamic_membership
         continuous_tier = _alias_continuous_mtp_tier(getattr(args, "model", None))
         args.mtp_continuous_batching_tier = continuous_tier
+        continuous_was_explicit = config.continuous_batching is not None
+        args.mtp_continuous_batching = (
+            continuous_tier == "verified"
+            if config.continuous_batching is None
+            else config.continuous_batching
+        )
+        args.mtp_allow_dynamic_membership = config.allow_dynamic_membership
         if (
-            config.continuous_batching
-            and getattr(args, "model", None)
+            continuous_was_explicit
+            and args.mtp_continuous_batching
             and continuous_tier != "verified"
             and not getattr(args, "force_spec_decode", False)
         ):
             state = (
-                "failed paired output qualification"
+                "failed continuous-MTP qualification"
                 if continuous_tier == "blocked"
-                else "has not completed paired output qualification"
+                else "has not completed continuous-MTP qualification"
             )
             print(
                 "error: continuous MTP is not verified for "

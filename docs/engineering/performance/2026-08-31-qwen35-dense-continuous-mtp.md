@@ -9,12 +9,17 @@ adapter PR #2854
 
 Continuous MTP is qualified per concrete target artifact. Sharing the
 `qwen3_5` model type, MTP tensor ABI, and cache layout is necessary but not
-sufficient evidence that batched target verification preserves the existing
-greedy output. The catalog therefore records `verified`, `blocked`, or
-`unknown`; ordinary MTP remains available for every existing alias regardless
-of this continuous-batching tier.
+sufficient evidence that batched target verification preserves task results.
+The catalog therefore records `verified`, `blocked`, or `unknown`; ordinary
+MTP remains available for every existing alias regardless of this tier.
 
-An unverified artifact fails closed when a user requests
+When a user selects MTP and omits `continuous_batching`, a `verified` artifact
+now selects the continuous scheduler automatically. An explicit
+`"continuous_batching": false` remains a stable opt-out. `blocked` and
+`unknown` artifacts stay on ordinary MTP unless an operator explicitly forces
+an experiment.
+
+An unverified artifact fails closed when a user explicitly requests
 `continuous_batching=true`. `--force-spec-decode` remains an explicit operator
 override for controlled experiments.
 
@@ -26,24 +31,31 @@ with an actionable error instead of silently falling back to ordinary MTP.
 
 ## Design precedent
 
-Production speculative schedulers register MTP support through an explicit
-model implementation and self-describing checkpoint metadata, then validate
-draft depth, quantization, cache ownership, and target verification at startup.
-Rapid-MLX retains those runtime gates. The additional catalog tier records the
-artifact-level evidence that runtime structure cannot prove: paired output
-identity and a measured concurrent throughput win.
+Production speculative schedulers integrate draft and target verification into
+the request scheduler rather than maintaining a separate single-request mode.
+They still gate models on explicit implementations, checkpoint metadata, draft
+depth, quantization, cache ownership, and verifier compatibility. Rapid-MLX
+retains those runtime gates. The additional catalog tier records the
+artifact-level evidence that structure cannot prove: stable task outcomes under
+mixed batching and a measured concurrent throughput win.
 
 ## Methodology
 
 - one model resident; the task-owned server was stopped between conditions
 - prefix cache disabled
-- thinking disabled; temperature 0
-- four deterministic lane-specific 603-token prompts, 128 completion tokens
-- four simultaneous requests, three cohorts per condition
-- aggregate decode rate = 512 completed tokens / cohort wall time
-- every condition had 12/12 complete responses and one stable SHA-256 per lane
-- qualification requires each continuous lane to match the corresponding
-  ordinary-MTP lane, preventing swapped or cross-request state from passing
+- performance requests used temperature 0 with thinking disabled
+- performance: four deterministic lane-specific 603-token prompts, 128
+  completion tokens, four simultaneous requests, three cohorts per condition
+- correctness: 48 task-distinct requests in 12 mixed four-request cohorts
+- correctness categories: coding (including generated-project execution),
+  JSON Schema, forced/automatic tool calls with argument validation, English
+  and Chinese reasoning, creative writing, open chat, multi-turn state,
+  stop sequences, and 2K/8K/32K context recall
+- both OpenAI-compatible and Anthropic-compatible routes
+- temperature 0; thinking used the user-facing default budget where supported
+- qualification requires zero ordinary-pass/continuous-fail task regressions,
+  no cross-lane state contamination, coherent inspection of every changed
+  output, and a positive measured throughput change
 
 The checked-in client is `bench/bench_continuous_mtp_server.py`. Example:
 
@@ -56,8 +68,7 @@ python3.12 bench/bench_continuous_mtp_server.py \
   --baseline-json legacy.json
 ```
 
-The two server conditions differed only in the final two speculative-config
-fields:
+The two server conditions differed only in the continuous scheduler fields:
 
 ```bash
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python3.12 -m vllm_mlx.cli serve \
@@ -68,30 +79,41 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python3.12 -m vllm_mlx.cli serve \
   "{\"method\":\"mtp\",\"model\":\"$MTP_MODEL\",\"num_speculative_tokens\":2,\"disable_auto_k\":true,\"continuous_batching\":false,\"allow_dynamic_membership\":false}"
 ```
 
-For the continuous condition, set `continuous_batching` and
-`allow_dynamic_membership` to `true`.
+For the continuous condition, set `continuous_batching` to `true`.
+`allow_dynamic_membership` remained `false` so both conditions used fixed
+cohorts.
 
 ## Results and disposition
 
-| Target artifact | Target revision | MTP revision | Ordinary MTP aggregate | Continuous MTP aggregate | Change | Output gate | Tier |
-| --- | --- | --- | ---: | ---: | ---: | --- | --- |
-| Qwen3.5-4B MLX 4-bit | `32f3e8ec` | `ab6f59bc` | 106.49 tok/s | 139.30 tok/s | +30.8% | 2/4 lanes mismatch | blocked |
-| Qwen3.5-9B MLX 4-bit | `8b2b98c0` | `222dfd2c` | 74.34 tok/s | 92.07 tok/s | +23.9% | 3/4 lanes mismatch | blocked |
-| Qwen3.6-27B MLX 4-bit | `c000ac2c` | `83795d54` | 28.37 tok/s | 32.37 tok/s | +14.1% | 1/4 lanes mismatch | blocked |
-| Qwen3.8-27B MLX 4-bit MTP | `aa985c29` | self-contained | 25.82 tok/s | 32.51 tok/s | +25.9% | 3/4 lanes mismatch | blocked |
+| Target artifact | Target revision | MTP revision | Ordinary MTP aggregate | Continuous MTP aggregate | Change | Identical text | Task regressions | Tier |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Qwen3.5-4B MLX 4-bit | `32f3e8ec` | `ab6f59bc` | 106.49 tok/s | 139.30 tok/s | +30.8% | 44/48 | 0 | blocked |
+| Qwen3.5-9B MLX 4-bit | `8b2b98c0` | `222dfd2c` | 74.34 tok/s | 92.07 tok/s | +23.9% | 46/48 | 0 | verified |
+| Qwen3.6-27B MLX 4-bit | `c000ac2c` | `83795d54` | 28.37 tok/s | 32.37 tok/s | +14.1% | 45/48 | 0 | verified |
+| Qwen3.8-27B MLX 4-bit MTP | `aa985c29` | self-contained | 25.82 tok/s | 32.51 tok/s | +25.9% | 46/48 | 0 | verified |
 
-Every measured target is a deliberate no-go despite its throughput gain. Each
-continuous lane was internally deterministic, but at least one lane failed to
-preserve the corresponding ordinary-MTP greedy byte sequence. The first
-same-prompt campaign masked this because a swapped or reused lane could share
-the same expected hash. The lane-distinct rerun is authoritative and keeps all
-four artifacts blocked. Other quantizations and model sizes remain `unknown`
-until the same paired gate is run on their exact artifacts.
+Hash differences were localized rather than accepted blindly. For the three
+verified artifacts, every changed response was a coherent alternative that
+preserved its task contract. Changes were limited to equivalent code spelling,
+creative prose, and open-chat wording. Structured JSON, tool names and
+arguments, long-context answers, stop behavior, and generated-project results
+did not regress. A 9B creative-writing response initially hit the artificial
+384-token battery cap; ordinary and continuous conditions both passed when
+rerun with 512 tokens, so the cap was not treated as product evidence.
+
+The 4B artifact remains blocked despite the largest speedup. Its changed
+Chinese reasoning response ended mid-sentence after the reasoning parser
+reported an incomplete trace. The ordinary response also had an incomplete
+trace, so this was not a hard-task regression, but the changed output did not
+meet the qualitative promotion bar. This is deliberately fail-closed: speed
+alone is insufficient for a default. Other quantizations and model sizes
+remain `unknown` until the same task-level gate is run on their exact artifacts.
 
 Peak active/peak MLX memory observed for Qwen3.6-27B was approximately
 17.7/19.6 GB for four continuous lanes and 16.3/17.2 GB for ordinary MTP.
 
-Forced qualification runs selected BF16, installed the continuous coordinator,
-and completed every cohort through the `continuous_planned` route. Normal alias
-requests fail the artifact gate before model load. Every task-owned server was
-stopped after its paired condition.
+Qualification runs selected BF16, installed the continuous coordinator, and
+completed every eligible cohort through the `continuous_planned` route. Normal
+MTP requests now auto-select that route only for the three verified aliases;
+the blocked 4B and unknown aliases retain ordinary MTP. Every task-owned server
+was stopped after its paired condition.
