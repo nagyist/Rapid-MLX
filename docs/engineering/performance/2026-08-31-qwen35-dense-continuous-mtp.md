@@ -1,7 +1,7 @@
 # Qwen3.5-family continuous MTP qualification
 
-Date: 2026-08-31  
-Host: Mac Studio, M3 Ultra, 256 GB unified memory  
+Date: 2026-08-31
+Host: Mac Studio, M3 Ultra, 256 GB unified memory
 Code base: stacked on continuous-MTP foundation PR #2842 and Qwen dense
 adapter PR #2854
 
