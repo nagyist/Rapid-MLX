@@ -117,6 +117,7 @@ struct GitHubStarPromptCard: View {
                             font: .system(size: 14, weight: .medium)
                         ))
                         .frame(width: 84, height: RapidTheme.ControlHeight.medium)
+                        .disabled(prompt.isStarring)
                         .accessibilityIdentifier("GitHub.Star.ValueMoment.Later")
 
                     Menu("Feedback") {
@@ -157,6 +158,7 @@ struct GitHubStarPromptCard: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(prompt.isStarring)
             .foregroundStyle(RapidTheme.textSecondary)
             .help("Later")
             .accessibilityLabel("Show the GitHub invitation later")

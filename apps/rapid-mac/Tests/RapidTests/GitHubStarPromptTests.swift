@@ -67,6 +67,10 @@ struct GitHubStarPromptTests {
         #expect(!card.contains("@FocusState"))
         #expect(!card.contains(".keyboardShortcut"))
         #expect(!card.contains(".isModal"))
+        #expect(
+            card.components(separatedBy: ".disabled(prompt.isStarring)").count - 1 == 3,
+            "Star, Later, and close must all be disabled while the external mutation is in flight"
+        )
         #expect(coordinator.contains("NSEvent.addLocalMonitorForEvents(matching: [.keyDown])"))
         #expect(!coordinator.contains("URLSession"), "eligibility must not probe GitHub or the network")
     }
