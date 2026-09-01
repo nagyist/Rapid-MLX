@@ -246,7 +246,14 @@ class ModelPerformanceLedger:
             return True
 
     def record_failure(
-        self, request_id: str, *, request_lifetime: float | None = None
+        self,
+        request_id: str,
+        *,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        ttft_seconds: float | None = None,
+        decode_tokens_per_second: float | None = None,
+        request_lifetime: float | None = None,
     ) -> bool:
         """Record an engine/runtime failure exactly once."""
         with self._lock:
@@ -254,14 +261,26 @@ class ModelPerformanceLedger:
             if request_key in self._seen_request_ids:
                 self._seen_request_ids.move_to_end(request_key)
                 return False
+            prompt_tokens = max(0, int(prompt_tokens))
+            completion_tokens = max(0, int(completion_tokens))
             self._remember_request_id(request_key)
             self._requests_failed += 1
+            self._prompt_tokens += prompt_tokens
+            self._completion_tokens += completion_tokens
+            self._observe_timings(
+                ttft_seconds=ttft_seconds,
+                decode_tokens_per_second=decode_tokens_per_second,
+            )
             return True
 
     def record_failed_performance(self, request: Request) -> bool:
         """Record one failed request lifetime, even when its ID is later reused."""
         return self.record_failure(
             request.request_id,
+            prompt_tokens=request.num_prompt_tokens,
+            completion_tokens=request.num_output_tokens,
+            ttft_seconds=self.ttft_for_request(request),
+            decode_tokens_per_second=self.decode_rate_for_request(request),
             request_lifetime=request.arrival_time,
         )
 

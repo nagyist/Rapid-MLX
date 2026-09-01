@@ -312,6 +312,10 @@ def test_scheduler_records_generation_recovery_failures():
     performance = scheduler.performance.snapshot()
     assert performance.requests_failed == 1
     assert performance.total_requests == 1
+    assert performance.prompt_tokens == 5
+    assert performance.completion_tokens == 2
+    assert performance.ttft_seconds_count == 1
+    assert performance.decode_observations == 1
 
 
 @pytest.mark.asyncio
@@ -326,7 +330,13 @@ async def test_engine_loop_records_pending_failures():
 
     from types import SimpleNamespace
 
-    failed_request = SimpleNamespace(request_id="failure", arrival_time=time.time())
+    failed_request = SimpleNamespace(
+        request_id="failure",
+        arrival_time=time.time() - 0.25,
+        first_token_time=time.time() - 0.2,
+        num_prompt_tokens=5,
+        num_output_tokens=2,
+    )
 
     class _BoomScheduler:
         performance = ModelPerformanceLedger("model-under-test")
@@ -366,6 +376,8 @@ async def test_engine_loop_records_pending_failures():
 
     performance = engine.scheduler.performance.snapshot()
     assert performance.requests_failed == 1
+    assert performance.prompt_tokens == 5
+    assert performance.completion_tokens == 2
     final = engine._output_collectors["failure"].get_nowait()
     assert final is not None and final.finished and final.error
 
