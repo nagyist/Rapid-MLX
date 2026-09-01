@@ -338,6 +338,16 @@ struct ModelPerfConfigTests {
         #expect(merged == ["--no-spec-decode"])
     }
 
+    @Test("Only Engine default and BF16 KV cache are continuous-MTP compatible")
+    func continuousMTPKVCompatibility() {
+        #expect(ModelPerfConfig().isContinuousMTPKVCompatible)
+        #expect(ModelPerfConfig(kvCacheMode: .bf16).isContinuousMTPKVCompatible)
+        #expect(!ModelPerfConfig(kvCacheMode: .int8).isContinuousMTPKVCompatible)
+        #expect(!ModelPerfConfig(kvCacheMode: .int4).isContinuousMTPKVCompatible)
+        #expect(!ModelPerfConfig(kvCacheMode: .turboquantV4).isContinuousMTPKVCompatible)
+        #expect(!ModelPerfConfig(kvCacheMode: .turboquantK8V4).isContinuousMTPKVCompatible)
+    }
+
     @Test("A bare value-carrying flag does not swallow the flag after it")
     func bareValueCarryingFlagDoesNotEatItsNeighbour() {
         // ``--kv-cache-turboquant`` is ``nargs="?"`` in the engine, so a

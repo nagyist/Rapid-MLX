@@ -151,6 +151,44 @@ struct SpawnArgumentsTests {
             defaultPreset: unqualified,
             userOverrides: verified.launchFlags
         ))
+
+        let compressedOverrides = ServerManager.speculativeSafePerformanceOverrides(
+            defaultPreset: verified,
+            userOverrides: ["--kv-cache-dtype", "int8"]
+        )
+        #expect(compressedOverrides == ["--kv-cache-dtype", "int8", "--no-spec-decode"])
+        #expect(ServerManager.mergedPerformanceFlags(
+            recommended: verified.launchFlags,
+            userOverrides: compressedOverrides
+        ) == ["--kv-cache-dtype", "int8", "--no-spec-decode"])
+        #expect(!ServerManager.speculativeDecodingRequested(
+            defaultPreset: verified,
+            userOverrides: ["--kv-cache-dtype", "int8"]
+        ))
+
+        let explicitMTPAndTurboQuant = ServerManager.speculativeSafePerformanceOverrides(
+            defaultPreset: unqualified,
+            userOverrides: verified.launchFlags + ["--kv-cache-turboquant", "k8v4"]
+        )
+        #expect(explicitMTPAndTurboQuant == [
+            "--kv-cache-turboquant", "k8v4", "--no-spec-decode",
+        ])
+        #expect(ServerManager.speculativeSafePerformanceOverrides(
+            defaultPreset: verified,
+            userOverrides: ["--kv-cache-dtype", "bf16"]
+        ) == ["--kv-cache-dtype", "bf16"])
+        let explicitSuffix = [
+            "--speculative-config", #"{"method":"suffix"}"#,
+            "--kv-cache-dtype", "int8",
+        ]
+        #expect(ServerManager.speculativeSafePerformanceOverrides(
+            defaultPreset: verified,
+            userOverrides: explicitSuffix
+        ) == explicitSuffix)
+        #expect(ServerManager.speculativeDecodingRequested(
+            defaultPreset: verified,
+            userOverrides: explicitSuffix
+        ))
     }
 
     @Test("Composer capability follows the effective text-only launch override")

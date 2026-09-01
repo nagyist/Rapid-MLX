@@ -2710,9 +2710,13 @@ final class ServerManager {
             catalogSupportsImageInput: catalogSupportsImageInput,
             userOverrides: perfLaunchFlagsProvider?(trimmedAlias) ?? []
         )
+        let compatibleUserOverrides = Self.speculativeSafePerformanceOverrides(
+            defaultPreset: catalogEntry?.speculativeDecodingPreset,
+            userOverrides: safeUserOverrides
+        )
         let performanceFlags = Self.mergedPerformanceFlags(
             recommended: desktopDefaults,
-            userOverrides: safeUserOverrides
+            userOverrides: compatibleUserOverrides
         )
         var extraFlags = performanceFlags
         extraFlags.append(contentsOf: Self.residentLaunchFlags(
@@ -3982,8 +3986,76 @@ final class ServerManager {
         userOverrides: [String]
     ) -> Bool {
         if userOverrides.contains("--no-spec-decode") { return false }
+        if continuousMTPRequested(
+            defaultPreset: defaultPreset,
+            userOverrides: userOverrides
+        ), hasIncompatibleContinuousMTPKVCache(userOverrides) {
+            return false
+        }
         if userOverrides.contains("--speculative-config") { return true }
         return defaultPreset?.isDefaultEnabled == true
+    }
+
+    /// Resolve Desktop's two independently configurable performance controls
+    /// into a launchable combination. The engine rejects continuous MTP with
+    /// a compressed KV cache; a user's explicit cache choice therefore wins
+    /// and is represented by the standard speculative off flag. Reverting to
+    /// Engine default/BF16 automatically restores the qualified MTP default.
+    nonisolated internal static func speculativeSafePerformanceOverrides(
+        defaultPreset: SpeculativeDecodingPreset?,
+        userOverrides: [String]
+    ) -> [String] {
+        guard !userOverrides.contains("--no-spec-decode"),
+              continuousMTPRequested(
+                  defaultPreset: defaultPreset,
+                  userOverrides: userOverrides
+              ),
+              hasIncompatibleContinuousMTPKVCache(userOverrides) else {
+            return userOverrides
+        }
+
+        var resolved: [String] = []
+        var index = userOverrides.startIndex
+        while index < userOverrides.endIndex {
+            let token = userOverrides[index]
+            if token == "--speculative-config" {
+                index += 1
+                if index < userOverrides.endIndex,
+                   !userOverrides[index].hasPrefix("--") {
+                    index += 1
+                }
+                continue
+            }
+            resolved.append(token)
+            index += 1
+        }
+        resolved.append("--no-spec-decode")
+        return resolved
+    }
+
+    nonisolated private static func continuousMTPRequested(
+        defaultPreset: SpeculativeDecodingPreset?,
+        userOverrides: [String]
+    ) -> Bool {
+        if let configIndex = userOverrides.firstIndex(of: "--speculative-config"),
+           userOverrides.indices.contains(configIndex + 1),
+           let data = userOverrides[configIndex + 1].data(using: .utf8),
+           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let method = payload["method"] as? String {
+            return method == "mtp"
+        }
+        return defaultPreset?.method == .mtp && defaultPreset?.isDefaultEnabled == true
+    }
+
+    nonisolated private static func hasIncompatibleContinuousMTPKVCache(
+        _ flags: [String]
+    ) -> Bool {
+        if flags.contains("--kv-cache-turboquant") { return true }
+        guard let dtypeIndex = flags.firstIndex(of: "--kv-cache-dtype") else {
+            return false
+        }
+        guard flags.indices.contains(dtypeIndex + 1) else { return true }
+        return flags[dtypeIndex + 1].lowercased() != "bf16"
     }
 
     /// Resolve the capability users actually launched, not merely what the

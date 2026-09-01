@@ -70,6 +70,13 @@ struct ModelPerfConfig: Codable, Equatable, Sendable {
             && speculativePreset == nil && speculativeDecodingDisabled != true
     }
 
+    /// Continuous MTP currently requires an unquantized KV cache. `nil`
+    /// delegates to the engine default (BF16), while an explicit BF16 choice
+    /// is equivalent. Every compressed mode must take the ordinary lane.
+    var isContinuousMTPKVCompatible: Bool {
+        kvCacheMode == nil || kvCacheMode == .bf16
+    }
+
     /// Bounds for ``cacheMemoryMB``. The floor is the engine's own smallest
     /// useful budget; below it the cache thrashes and the knob reads as
     /// "prefix caching is broken" rather than "I set it too low".

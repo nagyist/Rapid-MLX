@@ -253,6 +253,8 @@ struct SettingsPerformancePanel: View {
 
     private func speculativeDecodingSection(alias: String) -> some View {
         let preset = speculativePreset(for: alias)
+        let kvCompatible = perf.config(forAlias: alias).isContinuousMTPKVCompatible
+            || preset?.method != .mtp
         return SettingsSection(
             "Speculative decoding",
             subtitle: "Drafts candidate tokens and verifies them with the full model."
@@ -264,11 +266,13 @@ struct SettingsPerformancePanel: View {
                     isOn: speculativeDecodingBinding(alias: alias, preset: preset)
                 )
                     .toggleStyle(.switch)
-                    .disabled(preset == nil)
+                    .disabled(preset == nil || !kvCompatible)
                     .accessibilityIdentifier("Settings.Performance.SpeculativeDecoding.Enabled")
                 tradeOffLine(
                     preset == nil
                         ? "This alias does not declare a verified speculative-decoding preset."
+                        : !kvCompatible
+                            ? "MTP requires Engine default or Full precision (bf16) KV cache. It turns back on automatically when that cache mode is selected."
                         : preset?.method == .mtp
                             ? "Enabled by default for qualified models. It improves concurrent generation speed; turning it off applies after a restart."
                             : "Off by default. It can improve generation speed on some Macs, but may be slower on others; accepted output remains token-exact.",
@@ -409,6 +413,7 @@ struct SettingsPerformancePanel: View {
     ) -> Bool {
         let config = perf.config(forAlias: alias)
         if config.speculativeDecodingDisabled == true { return false }
+        if preset?.method == .mtp, !config.isContinuousMTPKVCompatible { return false }
         if config.speculativePreset != nil { return true }
         return preset?.isDefaultEnabled == true
     }
