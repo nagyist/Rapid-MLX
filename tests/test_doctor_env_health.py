@@ -48,6 +48,7 @@ def clean_runtime_probe_state(monkeypatch):
     monkeypatch.setattr(eh, "_SELECTED_SERVER_RUNTIME", False)
     monkeypatch.setattr(eh, "_RUNTIME_SELECTION_DONE", False)
     eh._RUNTIME_IMPORT_CACHE.clear()
+    eh._RUNTIME_IMPORT_TIMEOUTS.clear()
     original_import_probe = eh._runtime_module_importable
 
     def import_from_probe_when_available(
@@ -70,6 +71,7 @@ def clean_runtime_probe_state(monkeypatch):
     yield
     eh._RUNTIME_PROBE_CACHE.clear()
     eh._RUNTIME_IMPORT_CACHE.clear()
+    eh._RUNTIME_IMPORT_TIMEOUTS.clear()
     eh._RUNTIME_DISTRIBUTION_CACHE.clear()
     eh._RUNTIME_CONTEXTS.clear()
     eh._RUNTIME_SELECTION_DONE = False
@@ -1644,6 +1646,41 @@ def test_runtime_probes_stop_after_deadline(tmp_path, monkeypatch):
 
     assert eh._probe_runtime(runtime) is None
     assert not eh._runtime_module_importable(runtime, "transformers", None)
+    assert eh._import_probe_was_interrupted(runtime, "transformers", None)
+
+
+def test_timed_out_required_import_is_unknown_not_failed(
+    tmp_path,
+    monkeypatch,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server-runtime" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    report = {
+        "executable": str(runtime),
+        "prefix": str(tmp_path),
+        "base_prefix": str(tmp_path),
+        "path": [],
+        "packages": {},
+    }
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: report)
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: "5.12.1")
+    monkeypatch.setattr(
+        eh,
+        "_module_visibility",
+        lambda dist, runtime=None: (False, False),
+    )
+    eh._RUNTIME_IMPORT_TIMEOUTS.add((runtime, "transformers", "", False))
+
+    section = eh.section_required_packages()
+
+    row = next(check for check in section.checks if "transformers" in check.label)
+    assert row.status is eh.CheckStatus.WARN
+    assert "importability unknown" in row.label
 
 
 def test_unrelated_vllm_mlx_module_server_is_not_selected(

@@ -847,6 +847,7 @@ _RUNTIME_IMPORT_CACHE: dict[
     tuple[Path, str, str, bool],
     bool,
 ] = {}
+_RUNTIME_IMPORT_TIMEOUTS: set[tuple[Path, str, str, bool]] = set()
 
 
 def _bounded_timeout(default_s: float) -> float:
@@ -854,6 +855,22 @@ def _bounded_timeout(default_s: float) -> float:
     if _DOCTOR_DEADLINE is None:
         return default_s
     return max(0.05, min(default_s, _DOCTOR_DEADLINE - time.monotonic()))
+
+
+def _import_probe_was_interrupted(
+    runtime: Path,
+    module: str,
+    sidecar_root: Path | None,
+    *,
+    exercise: bool = False,
+) -> bool:
+    cache_key = (
+        runtime,
+        module,
+        str(sidecar_root.resolve()) if sidecar_root else "",
+        exercise,
+    )
+    return cache_key in _RUNTIME_IMPORT_TIMEOUTS
 
 
 def _probe_package(
@@ -899,8 +916,10 @@ def _runtime_module_importable(
     )
     if cache_key in _RUNTIME_IMPORT_CACHE:
         return _RUNTIME_IMPORT_CACHE[cache_key]
+    _RUNTIME_IMPORT_TIMEOUTS.discard(cache_key)
     if _DOCTOR_DEADLINE is not None and time.monotonic() >= _DOCTOR_DEADLINE:
         _RUNTIME_IMPORT_CACHE[cache_key] = False
+        _RUNTIME_IMPORT_TIMEOUTS.add(cache_key)
         return False
     importable = False
     try:
@@ -947,7 +966,10 @@ def _runtime_module_importable(
             importable = False
         else:
             importable = bool(result_json.get("importable"))
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+    except subprocess.TimeoutExpired:
+        importable = False
+        _RUNTIME_IMPORT_TIMEOUTS.add(cache_key)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
         importable = False
     _RUNTIME_IMPORT_CACHE[cache_key] = importable
     return importable
@@ -1719,6 +1741,18 @@ def section_required_packages() -> Section:
             )
         elif ver:
             repair = sidecar_hint or _runtime_pip_command("rapid-mlx", runtime=runtime)
+            module = _DISTRIBUTION_MODULES[dist]
+            if _import_probe_was_interrupted(
+                runtime,
+                module,
+                sidecar_root,
+            ):
+                s.add(
+                    f"{label} {ver} importability unknown — doctor probe timed out",
+                    CheckStatus.WARN,
+                    detail=f"distribution={dist} module={module} timeout=true",
+                )
+                continue
             visible, import_verified = _module_visibility(
                 dist,
                 runtime if _runtime_uses_context(runtime) else None,
@@ -1754,6 +1788,18 @@ def section_required_packages() -> Section:
                 detail=f"distribution={dist} version={ver}",
             )
         else:
+            module = _DISTRIBUTION_MODULES[dist]
+            if _import_probe_was_interrupted(
+                runtime,
+                module,
+                sidecar_root,
+            ):
+                s.add(
+                    f"{label} importability unknown — doctor probe timed out",
+                    CheckStatus.WARN,
+                    detail=f"distribution={dist} module={module} timeout=true",
+                )
+                continue
             visible, import_verified = _module_visibility(
                 dist,
                 runtime if _runtime_uses_context(runtime) else None,
@@ -2019,6 +2065,18 @@ def section_optional_packages() -> Section:
                 detail=f"distribution={dist} version={ver}",
             )
         else:
+            module = _DISTRIBUTION_MODULES[dist]
+            if _import_probe_was_interrupted(
+                runtime,
+                module,
+                sidecar_root,
+            ):
+                s.add(
+                    f"{label} importability unknown — doctor probe timed out",
+                    CheckStatus.WARN,
+                    detail=f"distribution={dist} module={module} timeout=true",
+                )
+                continue
             visible, import_verified = _module_visibility(
                 dist,
                 runtime if _runtime_uses_context(runtime) else None,
