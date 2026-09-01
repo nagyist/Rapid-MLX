@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import statistics
 import time
 from pathlib import Path
+
+try:
+    from scripts.bench_metadata import format_bench_json, write_bench_json
+except ImportError:  # direct `python scripts/bench_*.py` execution
+    from bench_metadata import format_bench_json, write_bench_json
 
 PLAN = {
     "scope": "one production Qwen4 GDN layer with resident real weights",
@@ -154,14 +158,14 @@ def run(args):
 def main() -> int:
     args = parse_args()
     if not args.execute_metal:
-        print(json.dumps({"plan_only": True, "plan": PLAN}, indent=2))
+        print(format_bench_json({"plan_only": True, "plan": PLAN}, __file__))
         return 0
     result = run(args)
-    payload = json.dumps(result, indent=2, sort_keys=True)
+    payload = format_bench_json(result, __file__, indent=2, sort_keys=True)
     print(payload)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(payload + "\n")
+        write_bench_json(args.output, result, __file__, indent=2, sort_keys=True)
     return 0 if result["correctness"]["passed"] else 1
 
 

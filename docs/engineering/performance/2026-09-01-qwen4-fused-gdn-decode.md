@@ -46,9 +46,10 @@ Each fused observation recorded 9,252 eligible calls. The 36 prefill calls
 fell back to the stock path as designed.
 
 The focused admission, dispatch, resident-selector, cache-update, fallback,
-and real-Metal numerical contracts pass: 8 tests. The Metal test reproduces
-the stock computation for 32 sequential synthetic steps and compares output
-and both cache slots bit-for-bit.
+and real-Metal numerical contracts pass. The Apple-enrolled Metal test runs
+all four probe candidates (threadgroup Y of 32, 16, 8, and 4), reproduces the
+stock computation for 32 sequential synthetic steps, and compares output and
+both cache slots bit-for-bit.
 
 Reproduce the real-weight layer gate on an idle GPU:
 

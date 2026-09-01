@@ -399,6 +399,7 @@ class GatedDeltaNet(nn.Module):
             activation=args.output_gate_type or args.hidden_act,
         )
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+        self.sharding_group = None
         self.fused_gdn_decode_mode = "fused" if _FUSED_GDN_DEFAULT else "stock"
         self.fused_gdn_decode_calls = 0
         self.fused_gdn_decode_fallbacks = 0
@@ -449,7 +450,7 @@ class GatedDeltaNet(nn.Module):
             cache_lengths=getattr(cache, "lengths", None),
             record_rollback=record_rollback,
             training=bool(self.training),
-            sharded=False,
+            sharded=self.sharding_group is not None,
             num_key_heads=self.num_k_heads,
             num_value_heads=self.num_v_heads,
             key_head_dim=self.head_k_dim,
@@ -462,23 +463,34 @@ class GatedDeltaNet(nn.Module):
         if not fused_gdn_runtime_supported():
             return self._fused_gdn_fallback("Metal runtime unavailable")
 
-        threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
-        if threadgroup_y is None:
-            return self._fused_gdn_fallback("Metal kernel probe declined")
-        output, conv_state, recurrent_state = qwen4_fused_gdn_decode(
-            qkv,
-            z,
-            beta,
-            alpha,
-            cache[0],
-            self.conv1d.weight,
-            self.A_log,
-            self.dt_bias,
-            cache[1],
-            self.norm.weight,
-            self.norm.eps,
-            threadgroup_y=threadgroup_y,
-        )
+        try:
+            threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
+            if threadgroup_y is None:
+                return self._fused_gdn_fallback("Metal kernel probe declined")
+            output, conv_state, recurrent_state = qwen4_fused_gdn_decode(
+                qkv,
+                z,
+                beta,
+                alpha,
+                cache[0],
+                self.conv1d.weight,
+                self.A_log,
+                self.dt_bias,
+                cache[1],
+                self.norm.weight,
+                self.norm.eps,
+                threadgroup_y=threadgroup_y,
+            )
+        except Exception as exc:  # noqa: BLE001 - an optional fast path fails closed
+            return self._fused_gdn_fallback(
+                f"Metal kernel dispatch failed: {type(exc).__name__}"
+            )
+        # The probe compile-and-runs this exact dtype/geometry before this
+        # path is admitted. Do not mx.eval here: a per-layer synchronization
+        # barrier would serialize decode and erase the fusion's benefit.
+        # Custom-kernel outputs are fresh arrays, so constructing them cannot
+        # mutate the live cache; commit their lazy graph only after dispatch
+        # construction succeeds.
         cache[0] = conv_state
         cache[1] = recurrent_state
         cache.advance(1)

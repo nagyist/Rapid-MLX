@@ -4,10 +4,12 @@ from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import mlx.core as mx
-import mlx.nn as nn
 import pytest
-from mlx_lm.models.gated_delta import gated_delta_update
+
+pytest.importorskip("mlx")
+pytestmark = pytest.mark.requires_mlx
+
+import mlx.core as mx
 
 from vllm_mlx.kernels import qwen4_fused_gdn_decode as fused_gdn
 from vllm_mlx.models import qwen4_exp
@@ -292,6 +294,28 @@ def test_uninitialized_and_speculative_cache_do_not_probe_metal():
     assert layer.fused_gdn_decode_last_fallback == "speculative rollback"
 
 
+def test_sharded_layer_falls_back_before_probe():
+    layer = qwen4_exp.GatedDeltaNet(tiny_args())
+    layer.eval()
+    layer.set_fused_gdn_decode_mode("fused")
+    layer.sharding_group = object()
+    values = production_values()
+    cache = FakeCache(values["conv_state"], values["recurrent_state"])
+    with patch.object(qwen4_exp, "probe_qwen4_fused_gdn_decode") as probe:
+        result = layer._try_fused_decode(
+            values["qkv"],
+            values["z"],
+            values["beta"],
+            values["alpha"],
+            None,
+            cache,
+            record_rollback=False,
+        )
+    assert result is None
+    probe.assert_not_called()
+    assert layer.fused_gdn_decode_last_fallback == "distributed sharding"
+
+
 def test_admitted_path_updates_cache_and_counter_without_real_kernel():
     layer = qwen4_exp.GatedDeltaNet(tiny_args())
     layer.eval()
@@ -330,163 +354,74 @@ def test_admitted_path_updates_cache_and_counter_without_real_kernel():
     assert execute.call_args.kwargs["threadgroup_y"] == 8
 
 
-@pytest.mark.requires_mlx
-@pytest.mark.parametrize("threadgroup_y", fused_gdn._THREADGROUP_Y_CANDIDATES)
-def test_real_metal_kernel_matches_stock_for_32_sequential_steps(threadgroup_y):
-    """Guard every BF16 boundary that the fused dispatch replaces."""
-    if not mx.metal.is_available():
-        pytest.skip("requires a Metal GPU")
-    previous_device = mx.default_device()
-    mx.set_default_device(mx.gpu)
-    dtype = mx.bfloat16
-    conv_weight = (
-        mx.random.normal(
-            (fused_gdn.CONV_DIM, fused_gdn.CONV_KERNEL, 1),
-            key=mx.random.key(1),
-        )
-        * 0.02
-    ).astype(dtype)
-    a_log = (
-        mx.random.normal((fused_gdn.NUM_VALUE_HEADS,), key=mx.random.key(2)) * 0.2
-    ).astype(mx.float32)
-    dt_bias = (
-        mx.random.normal((fused_gdn.NUM_VALUE_HEADS,), key=mx.random.key(3)) * 0.2
-    ).astype(dtype)
-    norm_weight = (
-        mx.random.normal((fused_gdn.VALUE_HEAD_DIM,), key=mx.random.key(4)) * 0.05 + 1
-    ).astype(dtype)
-    stock_conv = mx.zeros(
-        (1, fused_gdn.CONV_KERNEL - 1, fused_gdn.CONV_DIM), dtype=dtype
-    )
-    fused_conv = mx.array(stock_conv)
-    stock_state = mx.zeros(
-        (
-            1,
-            fused_gdn.NUM_VALUE_HEADS,
-            fused_gdn.VALUE_HEAD_DIM,
-            fused_gdn.KEY_HEAD_DIM,
+def test_synchronous_dispatch_failure_preserves_cache():
+    layer = qwen4_exp.GatedDeltaNet(tiny_args())
+    layer.eval()
+    layer.set_fused_gdn_decode_mode("fused")
+    values = production_values()
+    cache = FakeCache(values["conv_state"], values["recurrent_state"])
+    accepted = fused_gdn.FusedGdnAdmission(True, "eligible")
+    with (
+        patch.object(qwen4_exp, "admit_qwen4_fused_gdn_decode", return_value=accepted),
+        patch.object(qwen4_exp, "fused_gdn_runtime_supported", return_value=True),
+        patch.object(qwen4_exp, "probe_qwen4_fused_gdn_decode", return_value=8),
+        patch.object(
+            qwen4_exp,
+            "qwen4_fused_gdn_decode",
+            side_effect=RuntimeError("dispatch rejected"),
         ),
-        dtype=mx.float32,
+    ):
+        result = layer._try_fused_decode(
+            values["qkv"],
+            values["z"],
+            values["beta"],
+            values["alpha"],
+            None,
+            cache,
+            record_rollback=False,
+        )
+    assert result is None
+    assert cache[0] is values["conv_state"]
+    assert cache[1] is values["recurrent_state"]
+    assert cache.advanced == 0
+    assert layer.fused_gdn_decode_calls == 0
+    assert layer.fused_gdn_decode_last_fallback == (
+        "Metal kernel dispatch failed: RuntimeError"
     )
-    fused_state = mx.array(stock_state)
 
-    try:
-        for step in range(32):
-            qkv = (
-                mx.random.normal(
-                    (1, 1, fused_gdn.CONV_DIM), key=mx.random.key(100 + step)
-                )
-                * 0.2
-            ).astype(dtype)
-            z = (
-                mx.random.normal(
-                    (1, 1, fused_gdn.VALUE_DIM), key=mx.random.key(200 + step)
-                )
-                * 0.2
-            ).astype(dtype)
-            beta = (
-                mx.random.normal(
-                    (1, 1, fused_gdn.NUM_VALUE_HEADS),
-                    key=mx.random.key(300 + step),
-                )
-                * 0.2
-            ).astype(dtype)
-            alpha = (
-                mx.random.normal(
-                    (1, 1, fused_gdn.NUM_VALUE_HEADS),
-                    key=mx.random.key(400 + step),
-                )
-                * 0.2
-            ).astype(dtype)
 
-            conv_input = mx.concatenate([stock_conv, qkv], axis=1)
-            next_stock_conv = mx.contiguous(
-                conv_input[:, -(fused_gdn.CONV_KERNEL - 1) :, :]
-            )
-            convolved = nn.silu(
-                mx.conv1d(
-                    conv_input,
-                    conv_weight,
-                    groups=fused_gdn.CONV_DIM,
-                )
-            )
-            query, key, value = [
-                item.reshape(1, 1, heads, dim)
-                for item, heads, dim in zip(
-                    mx.split(
-                        convolved,
-                        [fused_gdn.KEY_DIM, 2 * fused_gdn.KEY_DIM],
-                        axis=-1,
-                    ),
-                    [
-                        fused_gdn.NUM_KEY_HEADS,
-                        fused_gdn.NUM_KEY_HEADS,
-                        fused_gdn.NUM_VALUE_HEADS,
-                    ],
-                    [
-                        fused_gdn.KEY_HEAD_DIM,
-                        fused_gdn.KEY_HEAD_DIM,
-                        fused_gdn.VALUE_HEAD_DIM,
-                    ],
-                )
-            ]
-            query = query * mx.rsqrt(
-                mx.sum(mx.square(query), axis=-1, keepdims=True) + 1e-6
-            )
-            key = key * mx.rsqrt(mx.sum(mx.square(key), axis=-1, keepdims=True) + 1e-6)
-            query = query * (fused_gdn.KEY_HEAD_DIM**-0.5)
-            stock_output, next_stock_state = gated_delta_update(
-                query,
-                key,
-                value,
-                alpha,
-                beta,
-                a_log,
-                dt_bias,
-                stock_state,
-                use_kernel=True,
-            )
-            stock_output = (
-                mx.fast.rms_norm(stock_output, norm_weight, 1e-6).astype(mx.float32)
-                * mx.sigmoid(
-                    z.reshape(
-                        1,
-                        1,
-                        fused_gdn.NUM_VALUE_HEADS,
-                        fused_gdn.VALUE_HEAD_DIM,
-                    ).astype(mx.float32)
-                )
-            ).astype(dtype)
-            stock_output = stock_output.reshape(1, 1, fused_gdn.VALUE_DIM)
-
-            fused_output, next_fused_conv, next_fused_state = (
-                fused_gdn.qwen4_fused_gdn_decode(
-                    qkv,
-                    z,
-                    beta,
-                    alpha,
-                    fused_conv,
-                    conv_weight,
-                    a_log,
-                    dt_bias,
-                    fused_state,
-                    norm_weight,
-                    1e-6,
-                    threadgroup_y=threadgroup_y,
-                )
-            )
-            mx.eval(
-                stock_output,
-                fused_output,
-                next_stock_conv,
-                next_fused_conv,
-                next_stock_state,
-                next_fused_state,
-            )
-            assert mx.array_equal(stock_output, fused_output).item(), step
-            assert mx.array_equal(next_stock_conv, next_fused_conv).item(), step
-            assert mx.array_equal(next_stock_state, next_fused_state).item(), step
-            stock_conv, fused_conv = next_stock_conv, next_fused_conv
-            stock_state, fused_state = next_stock_state, next_fused_state
-    finally:
-        mx.set_default_device(previous_device)
+def test_probe_exception_preserves_cache():
+    layer = qwen4_exp.GatedDeltaNet(tiny_args())
+    layer.eval()
+    layer.set_fused_gdn_decode_mode("fused")
+    values = production_values()
+    cache = FakeCache(values["conv_state"], values["recurrent_state"])
+    accepted = fused_gdn.FusedGdnAdmission(True, "eligible")
+    with (
+        patch.object(qwen4_exp, "admit_qwen4_fused_gdn_decode", return_value=accepted),
+        patch.object(qwen4_exp, "fused_gdn_runtime_supported", return_value=True),
+        patch.object(
+            qwen4_exp,
+            "probe_qwen4_fused_gdn_decode",
+            side_effect=ValueError("probe rejected"),
+        ),
+        patch.object(qwen4_exp, "qwen4_fused_gdn_decode") as execute,
+    ):
+        result = layer._try_fused_decode(
+            values["qkv"],
+            values["z"],
+            values["beta"],
+            values["alpha"],
+            None,
+            cache,
+            record_rollback=False,
+        )
+    assert result is None
+    execute.assert_not_called()
+    assert cache[0] is values["conv_state"]
+    assert cache[1] is values["recurrent_state"]
+    assert cache.advanced == 0
+    assert layer.fused_gdn_decode_calls == 0
+    assert layer.fused_gdn_decode_last_fallback == (
+        "Metal kernel dispatch failed: ValueError"
+    )
