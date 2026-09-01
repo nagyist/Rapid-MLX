@@ -67,8 +67,10 @@ def _serve_cache_policy_context(cli, *, stop_at_scheduler: bool):
     ]
     if stop_at_scheduler:
         patches.append(
-            mock.patch(
-                "vllm_mlx.scheduler.SchedulerConfig", side_effect=_StopServeError
+            mock.patch.object(
+                sys.modules["vllm_mlx.scheduler"],
+                "SchedulerConfig",
+                side_effect=_StopServeError,
             )
         )
     with ExitStack() as stack:
