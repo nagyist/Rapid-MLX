@@ -118,6 +118,30 @@ def test_python_section_identifies_application_environment(tmp_path, monkeypatch
     assert "relevant_sys.path" in runtime_row.detail
 
 
+def test_python_section_preserves_symlinked_application_environment(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    application_bin = home / ".rapid-mlx" / "bin"
+    base_python = tmp_path / "base" / "python3"
+    base_python.parent.mkdir(parents=True)
+    base_python.write_text("")
+    application_runtime = application_bin / "python3"
+    application_bin.mkdir(parents=True)
+    application_runtime.symlink_to(base_python)
+    monkeypatch.setattr(eh.Path, "home", lambda: home)
+    monkeypatch.setattr(eh.sys, "executable", str(application_runtime))
+    monkeypatch.setattr(eh.sys, "prefix", str(home / ".rapid-mlx"))
+
+    section = eh.section_python()
+    runtime_row = next(
+        c for c in section.checks if c.label.startswith("Active runtime")
+    )
+
+    assert runtime_row.status is eh.CheckStatus.OK
+    assert "Rapid-MLX application environment" in runtime_row.label
+
+
 @pytest.fixture(name="allow_rapid_mlx_module_servers")
 def allow_rapid_mlx_module_servers(monkeypatch):
     monkeypatch.setattr(

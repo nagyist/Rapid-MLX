@@ -318,12 +318,14 @@ def _runtime_environment(
     if _bundled_sidecar_root(exe) is not None:
         return "desktop sidecar"
     home = Path.home()
-    application_exe = (home / ".rapid-mlx" / "bin" / "python").resolve()
-    application_python3 = (home / ".rapid-mlx" / "bin" / "python3").resolve()
+    application_bin = home / ".rapid-mlx" / "bin"
+    application_exe = (application_bin / "python").resolve()
+    application_python3 = (application_bin / "python3").resolve()
     runtime_root = (home / ".rapid-mlx-python").resolve()
     if (
-        exe in {application_exe, application_python3}
-        or exe.parent == application_exe.parent
+        exe in {application_bin / "python", application_bin / "python3"}
+        or exe in {application_exe, application_python3}
+        or exe.parent in {application_bin, application_exe.parent}
     ):
         return "Rapid-MLX application environment"
     effective_prefix = prefix if prefix is not None else Path(sys.prefix).resolve()
@@ -1289,7 +1291,7 @@ def section_python() -> Section:
         if server_differs
         else None
     )
-    runtime = _runtime_environment(exe)
+    runtime = _runtime_environment(exe, Path(sys.prefix))
     detail = (
         f"runtime_type={runtime}; sys.executable={exe}; "
         f"sys.prefix={Path(sys.prefix).resolve()}; "
