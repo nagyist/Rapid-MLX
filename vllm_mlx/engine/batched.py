@@ -1830,12 +1830,11 @@ class BatchedEngine(BaseEngine):
         # Create async engine and hand it the EXISTING model-load executor
         # so all subsequent MLX work (forward passes, cache materialization,
         # eval) runs on the same worker thread that owns the model weights.
-        engine_core = AsyncEngineCore(
+        self._engine = AsyncEngineCore(
             model=self._model,
             tokenizer=self._tokenizer,
             config=engine_config,
         )
-        self._engine = engine_core
 
         # #2858 acceptance: a model must not report healthy while every
         # request deterministically 503s under the resolved cap. The
@@ -1844,7 +1843,7 @@ class BatchedEngine(BaseEngine):
         # MetalPreflightError must propagate; it is the load failure.
         self._run_metal_admission_preflight()  # pragma: no cover
 
-        await engine_core.engine.start(executor=self._model_load_executor)
+        await self._engine.engine.start(executor=self._model_load_executor)
         self._engine_started = True
 
     def _resolve_and_set_metal_limits(self) -> float:
