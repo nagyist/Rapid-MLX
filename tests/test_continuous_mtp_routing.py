@@ -13,7 +13,12 @@ from vllm_mlx.spec_decode.config import (
     SpeculativeConfigError,
     parse_speculative_config,
 )
-from vllm_mlx.spec_decode.mtp.batched import SamplingContract
+from vllm_mlx.spec_decode.mtp import continuous_routing as routing_module
+from vllm_mlx.spec_decode.mtp.batched import (
+    AdmissionDecision,
+    BatchedMTPRoute,
+    SamplingContract,
+)
 from vllm_mlx.spec_decode.mtp.continuous_routing import (
     ContinuousMTPAPCHit,
     ContinuousMTPIntegrationRoute,
@@ -59,6 +64,71 @@ class _Model:
 
     def make_mtp_cache(self):
         return object()
+
+
+class _SchedulerResponse:
+    """Strict mlx-lm response twin used to exercise compatibility filling."""
+
+    def __init__(
+        self,
+        uid,
+        token,
+        logprobs,
+        finish_reason,
+        required_bookkeeping,
+    ):
+        self.uid = uid
+        self.token = token
+        self.logprobs = logprobs
+        self.finish_reason = finish_reason
+        self.required_bookkeeping = required_bookkeeping
+
+
+class _SchedulerBatchGenerator:
+    class _GenerationBatch:
+        Response = _SchedulerResponse
+
+    def __init__(self, *, raw_next=([], ()), with_response=True):
+        if not with_response:
+            self._generation_batch = SimpleNamespace()
+        else:
+            self._generation_batch = self._GenerationBatch()
+        self._unprocessed_sequences = deque()
+        self.raw_next = raw_next
+        self.closed = False
+        self.removed = []
+
+    def next(self):
+        return self.raw_next
+
+    def close(self):
+        self.closed = True
+        return "closed"
+
+    def remove(self, uids, *_args, **_kwargs):
+        self.removed.append(tuple(uids))
+        return {uid: (f"plain-cache-{uid}", [uid]) for uid in uids}
+
+
+def _scheduler_sequence(uid, *, caches=None, segments=None, processors=None):
+    return (
+        uid,
+        [[10 + uid, 20 + uid]] if segments is None else segments,
+        16,
+        [SimpleNamespace(offset=0, nbytes=0)] if caches is None else caches,
+        [],
+        object(),
+        [] if processors is None else processors,
+        None,
+        None,
+    )
+
+
+def _scheduler_request(*, temperature=0.0, stop=None, has_tools=False):
+    return SimpleNamespace(
+        sampling_params=SimpleNamespace(temperature=temperature, stop=stop),
+        has_tools=has_tools,
+    )
 
 
 def _request(lane, uid, **changes):
@@ -327,6 +397,315 @@ def test_scheduler_wiring_diverts_next_and_refusal_precedes_mutation():
 
 
 @pytest.mark.requires_mlx
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"mtp_continuous_batching": 1}, "must be a boolean"),
+        ({"mtp_allow_dynamic_membership": 1}, "must be a boolean"),
+        (
+            {"mtp_continuous_batching": True, "spec_decode": "none"},
+            "requires spec_decode='mtp'",
+        ),
+        (
+            {"mtp_allow_dynamic_membership": True},
+            "requires mtp_continuous_batching",
+        ),
+    ],
+)
+def test_scheduler_config_rejects_ambiguous_continuous_mtp_policy(changes, message):
+    from vllm_mlx.scheduler import SchedulerConfig
+
+    with pytest.raises(ValueError, match=message):
+        SchedulerConfig(**changes)
+
+
+@pytest.mark.requires_mlx
+def test_live_installer_fails_closed_before_mutating_unsupported_generators(
+    monkeypatch,
+):
+    from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
+    from vllm_mlx.spec_decode.mtp import continuous_runtime
+
+    enabled = SchedulerConfig(
+        spec_decode="mtp",
+        mtp_continuous_batching=True,
+        max_num_seqs=4,
+        completion_batch_size=4,
+    )
+    assert not _install_continuous_mtp_router(
+        SimpleNamespace(next=lambda: ([], [])), _Model(), enabled
+    )
+
+    no_capacity = _SchedulerBatchGenerator()
+    assert not _install_continuous_mtp_router(
+        no_capacity,
+        _Model(),
+        SimpleNamespace(
+            spec_decode="mtp",
+            mtp_continuous_batching=True,
+            max_num_seqs=0,
+            completion_batch_size=4,
+        ),
+    )
+    assert not hasattr(no_capacity, "_continuous_mtp_router")
+
+    disabled = _SchedulerBatchGenerator()
+    assert not _install_continuous_mtp_router(
+        disabled, _Model(), SchedulerConfig(spec_decode="mtp")
+    )
+    assert not hasattr(disabled, "_continuous_mtp_router")
+
+    monkeypatch.setattr(
+        continuous_runtime,
+        "assemble_continuous_self_mtp_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("refused")),
+    )
+    assembly_refused = _SchedulerBatchGenerator()
+    assert not _install_continuous_mtp_router(assembly_refused, _Model(), enabled)
+    assert not hasattr(assembly_refused, "_continuous_mtp_router")
+
+    monkeypatch.setattr(
+        continuous_runtime,
+        "assemble_continuous_self_mtp_runtime",
+        lambda *_args, **_kwargs: object(),
+    )
+    missing_response = _SchedulerBatchGenerator(with_response=False)
+    assert not _install_continuous_mtp_router(missing_response, _Model(), enabled)
+    assert not hasattr(missing_response, "_continuous_mtp_router")
+
+
+@pytest.mark.requires_mlx
+def test_live_installer_drives_join_detach_remove_and_compat_response(monkeypatch):
+    from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
+    from vllm_mlx.spec_decode.mtp import continuous_runtime
+    from vllm_mlx.spec_decode.mtp.continuous_driver import ContinuousMTPDriver
+    from vllm_mlx.spec_decode.mtp.continuous_engine import (
+        ContinuousSelfMTPCapabilities,
+    )
+
+    capabilities = ContinuousSelfMTPCapabilities(
+        target_return_hidden=True,
+        mtp_return_hidden=True,
+        confirmed_target_forward=True,
+        ragged_rollback=True,
+        atomic_cache_commit=True,
+        dynamic_membership=True,
+    )
+    runtime = SimpleNamespace(capabilities=capabilities)
+    monkeypatch.setattr(
+        continuous_runtime,
+        "assemble_continuous_self_mtp_runtime",
+        lambda *_args, **_kwargs: runtime,
+    )
+
+    class _Driver:
+        dynamic_membership = True
+        lane_uids = (1, 2)
+        pending_join_uids = ()
+        has_work = True
+        closed = False
+        has_pending_responses = False
+
+        def __init__(self):
+            self.calls = []
+            self.fail_discard = False
+
+        def next(self):
+            self.calls.append("next")
+            return [SimpleNamespace(uid=1, token=31)]
+
+        def take_terminal_detaches(self):
+            self.calls.append("take-terminal")
+            return ()
+
+        def resume_turnover(self):
+            self.calls.append("resume")
+            return ()
+
+        def queue_lanes(self, specs, *, stop_tokens):
+            self.calls.append(("join", tuple(spec.uid for spec in specs), stop_tokens))
+            return tuple(spec.uid for spec in specs)
+
+        def discard_all(self):
+            self.calls.append("discard")
+            if self.fail_discard:
+                raise RuntimeError("already detached")
+
+        def remove_uids(self, uids):
+            self.calls.append(("remove", tuple(uids)))
+            return (
+                SimpleNamespace(
+                    uid=1,
+                    target_cache="target-cache",
+                    token_ids=(10, 11),
+                    draft_cache="draft-cache",
+                    lane=SimpleNamespace(seed_hidden="seed-hidden"),
+                ),
+                SimpleNamespace(
+                    uid=99,
+                    target_cache="foreign",
+                    token_ids=(),
+                    draft_cache="foreign",
+                    lane=SimpleNamespace(seed_hidden=None),
+                ),
+            )
+
+    driver = _Driver()
+    captured = {}
+
+    def _create(_cls, specs, installed_runtime, **kwargs):
+        captured["uids"] = tuple(spec.uid for spec in specs)
+        captured["runtime"] = installed_runtime
+        captured["response_factory"] = kwargs["response_factory"]
+        return driver
+
+    monkeypatch.setattr(ContinuousMTPDriver, "create", classmethod(_create))
+
+    batch_gen = _SchedulerBatchGenerator(raw_next=[SimpleNamespace(uid=50)])
+    requests = {}
+    uid_to_request_id = {}
+    for uid in (1, 2, 3, 4, 5, 6, 95):
+        request_id = f"req-{uid}"
+        requests[request_id] = _scheduler_request()
+        uid_to_request_id[uid] = request_id
+    uid_to_request_id[97] = "req-97"
+    batch_gen._unprocessed_sequences.extend(
+        [
+            (0,),
+            _scheduler_sequence(98),
+            _scheduler_sequence(97, segments=[]),
+            _scheduler_sequence(95, segments=[]),
+            _scheduler_sequence(
+                96,
+                caches=[SimpleNamespace(caches=[SimpleNamespace(offset="bad")])],
+                processors=[object()],
+            ),
+            _scheduler_sequence(1),
+            _scheduler_sequence(2),
+        ]
+    )
+    requests["req-96"] = _scheduler_request()
+    uid_to_request_id[96] = "req-96"
+
+    config = SchedulerConfig(
+        spec_decode="mtp",
+        mtp_continuous_batching=True,
+        mtp_allow_dynamic_membership=True,
+        max_num_seqs=4,
+        completion_batch_size=4,
+    )
+    assert _install_continuous_mtp_router(
+        batch_gen,
+        _Model(),
+        config,
+        requests=requests,
+        uid_to_request_id=uid_to_request_id,
+        free_bytes_getter=lambda: 16 * 1024**3,
+        stop_tokens={99},
+    )
+
+    prompt, fallback = batch_gen.next()
+    assert prompt == []
+    assert [item.uid for item in fallback] == [50]
+    assert captured["uids"] == (1, 2)
+    assert captured["runtime"] is runtime
+
+    compatible = captured["response_factory"](
+        uid=1,
+        token=2,
+        logprobs=None,
+        finish_reason=None,
+        from_draft=True,
+    )
+    assert compatible.required_bookkeeping is None
+    assert compatible.from_draft is True
+
+    batch_gen.raw_next = ([], [])
+    batch_gen._unprocessed_sequences.append(
+        _scheduler_sequence(3, processors=[object()])
+    )
+    _, responses = batch_gen.next()
+    assert [item.uid for item in responses] == [1]
+    assert driver.calls[:2] == ["next", "take-terminal"]
+
+    batch_gen._unprocessed_sequences.extend(
+        [_scheduler_sequence(uid) for uid in (4, 5, 6)]
+    )
+    batch_gen.next()
+    join = next(
+        call for call in driver.calls if isinstance(call, tuple) and call[0] == "join"
+    )
+    assert join[1] == (4, 5)
+
+    driver.lane_uids = (1, 2, 4, 5)
+    batch_gen.next()
+    driver.dynamic_membership = False
+    batch_gen.next()
+    driver.closed = True
+    batch_gen.next()
+    assert "resume" in driver.calls
+
+    removed = batch_gen.remove([1], return_prompt_caches=True)
+    assert removed[1] == ("target-cache", [10, 11])
+    assert batch_gen._continuous_mtp_removed_states[1] == (
+        "draft-cache",
+        "seed-hidden",
+    )
+
+    assert batch_gen.close() == "closed"
+    driver.fail_discard = True
+    assert batch_gen.close() == "closed"
+
+
+@pytest.mark.requires_mlx
+def test_live_installer_handles_empty_pressure_and_optional_base_hooks(monkeypatch):
+    from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
+    from vllm_mlx.spec_decode.mtp import continuous_runtime
+
+    monkeypatch.setattr(
+        continuous_runtime,
+        "assemble_continuous_self_mtp_runtime",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    batch_gen = _SchedulerBatchGenerator()
+    batch_gen.close = None
+    batch_gen.remove = None
+    batch_gen._unprocessed_sequences.append(_scheduler_sequence(1))
+    config = SchedulerConfig(
+        spec_decode="mtp",
+        mtp_continuous_batching=True,
+        max_num_seqs=4,
+        completion_batch_size=4,
+    )
+    assert _install_continuous_mtp_router(
+        batch_gen,
+        _Model(),
+        config,
+        requests={"req-1": _scheduler_request()},
+        uid_to_request_id={1: "req-1"},
+        free_bytes_getter=lambda: (_ for _ in ()).throw(RuntimeError("pressure")),
+    )
+    assert batch_gen.next() == ([], [])
+    assert batch_gen.remove([1], return_prompt_caches=True) == {}
+    assert batch_gen.close() is None
+
+    no_getter = _SchedulerBatchGenerator()
+    no_getter._unprocessed_sequences.append(_scheduler_sequence(2))
+    assert _install_continuous_mtp_router(
+        no_getter,
+        _Model(),
+        config,
+        requests={"req-2": _scheduler_request()},
+        uid_to_request_id={2: "req-2"},
+    )
+    assert no_getter.next() == ([], [])
+
+    empty = _SchedulerBatchGenerator()
+    assert _install_continuous_mtp_router(empty, _Model(), config)
+    assert empty.next() == ([], [])
+
+
+@pytest.mark.requires_mlx
 def test_live_installer_forms_fixed_initial_cohort_without_dynamic_join(monkeypatch):
     """Exercise the real scheduler import and installer on the Apple lane.
 
@@ -451,3 +830,134 @@ def test_cli_and_scheduler_config_carry_the_default_off_opt_in_by_ast():
         in scheduler_source
     )
     assert "mtp_allow_dynamic_membership=getattr(" in cli_source
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"uid": True}, "uid must be an integer"),
+        ({"prompt_tokens": ()}, "non-negative integers"),
+        ({"prompt_tokens": (1, -1)}, "non-negative integers"),
+        ({"max_tokens": True}, "max_tokens must be an integer"),
+        ({"max_tokens": 0}, "max_tokens must be positive"),
+        ({"stop_tokens": frozenset({True})}, "stop_tokens must contain integers"),
+        ({"temperature": 0.5}, "greedy sampling requires"),
+        (
+            {"sampling": SamplingContract(greedy=False), "temperature": 0.0},
+            "non-greedy sampling requires",
+        ),
+    ],
+)
+def test_request_metadata_rejects_ambiguous_scheduler_facts(changes, message):
+    values = {
+        "lane_id": "lane",
+        "uid": 1,
+        "prompt_tokens": (1, 2),
+        "max_tokens": 8,
+    }
+    values.update(changes)
+    with pytest.raises(ValueError, match=message):
+        ContinuousMTPRequestMetadata(**values)
+
+
+def test_router_rejects_duplicate_lane_and_uid_identity():
+    router = _router()
+    with pytest.raises(ValueError, match="lane_id values must be unique"):
+        router.plan([_request("same", 1), _request("same", 2)], free_bytes=1)
+    with pytest.raises(ValueError, match="uid values must be unique"):
+        router.plan([_request("a", 1), _request("b", 1)], free_bytes=1)
+
+
+def test_static_refusals_preserve_plain_fallback_without_legacy_mtp():
+    class _PlainOnly:
+        batched_mtp_capability = _descriptor("qwen4_exp")
+
+    decision = plan_router_install(
+        _PlainOnly(),
+        enabled=True,
+        cache_windowed=True,
+        allow_dynamic_membership=True,
+        hard_reserve_bytes=0,
+    )
+    assert decision.admitted is False
+    assert decision.fallback is ContinuousMTPIntegrationRoute.PLAIN_DECODE
+    joined = " ".join(decision.reasons)
+    assert "unsupported model family" in joined
+    assert "windowed cache" in joined
+    assert "dynamic membership" in joined
+
+
+def test_descriptor_mismatch_and_plain_runtime_fallback_are_explicit():
+    class _Mismatched(_Model):
+        batched_mtp_capability = MappingProxyType(
+            {**dict(_descriptor()), "protocol_version": 2}
+        )
+
+    refused = plan_router_install(_Mismatched(), enabled=True, hard_reserve_bytes=0)
+    assert refused.admitted is False
+    assert "protocol_version" in " ".join(refused.reasons)
+
+    plain_router = _router()
+    plain_router.runtime = type(plain_router.runtime)(
+        model_family=plain_router.runtime.model_family,
+        capability_descriptor=plain_router.runtime.capability_descriptor,
+        capabilities=plain_router.runtime.capabilities,
+        legacy_mtp_available=False,
+    )
+    transformed = SamplingContract(greedy=False)
+    decision = plain_router.plan(
+        [
+            _request("a", 1, sampling=transformed, temperature=0.8),
+            _request("b", 2, sampling=transformed, temperature=0.8),
+        ],
+        free_bytes=1,
+    )
+    assert decision.route is ContinuousMTPIntegrationRoute.PLAIN_DECODE
+    assert decision.plain_lane_ids == ("a", "b")
+
+
+def test_runtime_static_refusal_routes_legacy_or_plain_per_loaded_surface():
+    for legacy in (True, False):
+        router = _router()
+        router._static_refusals = ("runtime drift",)
+        router.runtime = type(router.runtime)(
+            model_family=router.runtime.model_family,
+            capability_descriptor=router.runtime.capability_descriptor,
+            capabilities=router.runtime.capabilities,
+            legacy_mtp_available=legacy,
+        )
+        decision = router.plan([_request("a", 1)], free_bytes=1)
+        expected = (
+            ContinuousMTPIntegrationRoute.LEGACY_MTP
+            if legacy
+            else ContinuousMTPIntegrationRoute.PLAIN_DECODE
+        )
+        assert decision.route is expected
+        assert decision.reasons == ("runtime drift",)
+
+
+def test_request_local_cache_refusal_does_not_block_other_cohort_lanes():
+    decision = _router().plan(
+        [
+            _request("quantized", 1, cache_quantized=True),
+            _request("a", 2),
+            _request("b", 3),
+        ],
+        free_bytes=1,
+    )
+    assert decision.route is ContinuousMTPIntegrationRoute.CONTINUOUS_PLANNED
+    assert decision.plain_lane_ids == ("quantized",)
+    assert "quantized/windowed" in " ".join(decision.reasons)
+
+
+def test_queue_only_admission_remains_queue_when_every_lane_is_plain(monkeypatch):
+    monkeypatch.setattr(
+        routing_module,
+        "plan_admission",
+        lambda *_args, **_kwargs: AdmissionDecision(BatchedMTPRoute.QUEUE),
+    )
+    decision = _router().plan(
+        [_request("quantized", 1, cache_quantized=True)],
+        free_bytes=0,
+    )
+    assert decision.route is ContinuousMTPIntegrationRoute.QUEUE

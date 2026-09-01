@@ -980,8 +980,6 @@ def _install_continuous_mtp_router(
         return candidates
 
     def _remove_queued(uids: set[int]) -> None:
-        if not uids:
-            return
         batch_gen._unprocessed_sequences = deque(
             sequence
             for sequence in batch_gen._unprocessed_sequences
@@ -1000,8 +998,6 @@ def _install_continuous_mtp_router(
         if routed.route is not ContinuousMTPIntegrationRoute.CONTINUOUS_PLANNED:
             return
         specs = [lane.spec for lane in routed.cohort]
-        if not specs:
-            return
         selected = {spec.uid for spec in specs}
         _remove_queued(selected)
         driver = ContinuousMTPDriver.create(

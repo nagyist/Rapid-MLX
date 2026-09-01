@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -260,5 +261,87 @@ def test_outer_and_resolved_inner_descriptors_must_match():
     with pytest.raises(ContinuousSelfMTPUnsupportedError, match="descriptors disagree"):
         runtime_module.assemble_continuous_self_mtp_runtime(
             outer,
+            array_ops=_ArrayOpsStub(),
+        )
+
+
+def test_prompt_cache_factory_uses_the_lazy_mlx_lm_boundary(monkeypatch):
+    cache_module = ModuleType("mlx_lm.models.cache")
+    calls = []
+    cache_module.make_prompt_cache = lambda model: calls.append(model) or "cache"
+    models_module = ModuleType("mlx_lm.models")
+    models_module.__path__ = []
+    mlx_lm_module = ModuleType("mlx_lm")
+    mlx_lm_module.__path__ = []
+    monkeypatch.setitem(sys.modules, "mlx_lm", mlx_lm_module)
+    monkeypatch.setitem(sys.modules, "mlx_lm.models", models_module)
+    monkeypatch.setitem(sys.modules, "mlx_lm.models.cache", cache_module)
+
+    model = object()
+    assert runtime_module._make_prompt_cache(model) == "cache"
+    assert calls == [model]
+
+
+def test_descriptor_resolution_and_target_introspection_fail_closed(monkeypatch):
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="no batched"):
+        runtime_module._descriptor_for(object())
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="cannot resolve"):
+        runtime_module._resolve_inner(object(), "unsupported")
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="not callable"):
+        runtime_module._require_target_abi(object())
+
+    inner = _InjectedTextModel()
+    monkeypatch.setattr(
+        runtime_module.inspect,
+        "signature",
+        lambda _value: (_ for _ in ()).throw(ValueError("opaque")),
+    )
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="cannot inspect"):
+        runtime_module._require_target_abi(inner)
+
+
+def test_resolved_inner_descriptor_and_hidden_return_are_enforced(
+    monkeypatch,
+    ragged_install_stub,
+):
+    outer = SimpleNamespace(batched_mtp_capability=_descriptor())
+    mismatched_inner = _InjectedTextModel(_descriptor(protocol_version=2))
+    monkeypatch.setattr(
+        runtime_module,
+        "_resolve_inner",
+        lambda _model, _family: mismatched_inner,
+    )
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="same descriptor"):
+        runtime_module.assemble_continuous_self_mtp_runtime(
+            outer,
+            array_ops=_ArrayOpsStub(),
+        )
+
+    inner = _InjectedTextModel()
+    monkeypatch.setattr(
+        runtime_module,
+        "_resolve_inner",
+        lambda _model, _family: inner,
+    )
+    runtime = runtime_module.assemble_continuous_self_mtp_runtime(
+        inner,
+        array_ops=_ArrayOpsStub(),
+    )
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="return hidden"):
+        runtime.forwards.mtp_forward("hidden", "tokens", "cache", return_hidden=False)
+
+
+def test_future_fixed_capability_addition_remains_fail_closed(
+    monkeypatch,
+    ragged_install_stub,
+):
+    monkeypatch.setattr(
+        runtime_module.ContinuousSelfMTPCapabilities,
+        "missing_fixed_core",
+        lambda _self: ("future_contract",),
+    )
+    with pytest.raises(ContinuousSelfMTPUnsupportedError, match="future_contract"):
+        runtime_module.assemble_continuous_self_mtp_runtime(
+            _InjectedTextModel(),
             array_ops=_ArrayOpsStub(),
         )

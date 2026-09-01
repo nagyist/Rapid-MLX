@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
 
+from vllm_mlx.spec_decode.mtp import mlx_backend as backend_module
 from vllm_mlx.spec_decode.mtp.continuous_engine import (
     ContinuousSelfMTPCapabilities,
     ContinuousSelfMTPConfig,
@@ -82,6 +85,12 @@ class _LayerCache:
 
     def finalize(self):
         self.events.append(("finalize",))
+
+    def start_speculation(self):
+        self.events.append(("start_speculation",))
+
+    def stop_speculation(self):
+        self.events.append(("stop_speculation",))
 
     def extract(self, index):
         self.events.append(("extract", index))
@@ -438,3 +447,337 @@ def test_backend_has_no_eager_mlx_import_and_uses_only_rapid_forward_seams():
     assert eager_mlx == []
     assert "forwards.target(" in source
     assert "forwards.draft(" in source
+
+
+def test_lazy_mlx_array_adapter_delegates_to_the_installed_runtime(monkeypatch):
+    fake = ModuleType("mlx.core")
+    fake.uint32 = np.uint32
+    fake.array = lambda value, dtype: np.asarray(value, dtype=dtype)
+    fake.concatenate = lambda values, axis: np.concatenate(values, axis=axis)
+    fake.pad = lambda value, widths: np.pad(value, widths)
+    fake.expand_dims = lambda value, axis: np.expand_dims(value, axis)
+    fake.logsumexp = lambda value, axis, keepdims: np.log(
+        np.exp(value).sum(axis=axis, keepdims=keepdims)
+    )
+    fake.argmax = lambda value, axis: np.asarray(np.argmax(value, axis=axis))
+    parent = ModuleType("mlx")
+    parent.__path__ = []
+    parent.core = fake
+    monkeypatch.setitem(sys.modules, "mlx", parent)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake)
+
+    ops = backend_module._MLXArrayOps()
+    values = ops.uint32([1, 2])
+    assert values.dtype == np.uint32
+    assert ops.concatenate([values, values], axis=0).tolist() == [1, 2, 1, 2]
+    assert ops.pad(values, [(1, 0)]).tolist() == [0, 1, 2]
+    assert ops.expand_dims(values, 0).shape == (1, 2)
+    lps = ops.logprobs(np.asarray([0.0, 1.0]))
+    assert np.exp(lps).sum() == pytest.approx(1.0)
+    assert ops.argmax_int(lps) == 1
+
+
+def test_cache_boundary_restores_nested_state_and_rejects_row_motion():
+    child = SimpleNamespace(cache=["a"], offset=1)
+    parent = SimpleNamespace(caches=[child], left_padding=np.asarray([0]), offset=2)
+    boundary = backend_module._cache_boundary(parent)
+    child.cache.append("b")
+    child.offset = 9
+    child.keys = "transient"
+    parent.offset = 7
+    backend_module._restore_cache_boundary(boundary)
+    assert child.cache == ["a"]
+    assert child.offset == 1
+    assert not hasattr(child, "keys")
+    assert parent.offset == 2
+
+    moved = backend_module._cache_boundary(parent)
+    parent.left_padding = np.asarray([1])
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="rows moved"):
+        backend_module._restore_cache_boundary(moved)
+
+    assert backend_module._plain_vector(None) is None
+    assert backend_module._plain_vector(np.asarray([1, 2])) == [1, 2]
+    assert backend_module._plain_vector(3) == 3
+
+
+def test_cache_step_helpers_finalize_every_prepared_child_on_failure():
+    class _FailPrepare(_LayerCache):
+        def prepare(self, *, lengths, right_padding):
+            raise RuntimeError("prepare boom")
+
+    good = _LayerCache("good")
+    bad = _FailPrepare("bad")
+    composite = SimpleNamespace(caches=[good, bad])
+    with pytest.raises(RuntimeError, match="prepare boom"):
+        backend_module._prepare_cache(composite, [1], [0])
+    assert ("finalize",) in good.events
+
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="no prepare"):
+        backend_module._prepare_cache(object(), [1], [0])
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="no finalize"):
+        backend_module._finalize_cache(object())
+
+    native = SimpleNamespace(events=[])
+    native.prepare_self_mtp_step = lambda **kwargs: native.events.append(
+        ("prepare", kwargs)
+    )
+    native.finalize_self_mtp_step = lambda: native.events.append(("finalize",))
+    backend_module._prepare_cache(native, [1], [0])
+    backend_module._finalize_cache(native)
+    assert native.events[-1] == ("finalize",)
+
+    nested_good = _LayerCache("nested-good")
+    nested = SimpleNamespace(caches=[nested_good])
+    backend_module._prepare_cache(nested, [1], [0])
+    backend_module._finalize_cache(nested)
+    assert nested_good.events[-1] == ("finalize",)
+
+    prepared = _LayerCache("prepared")
+    with pytest.raises(RuntimeError, match="prepare boom"):
+        backend_module._prepare_group([prepared, bad], [1])
+    assert prepared.events[-1] == ("finalize",)
+
+    class _FailFinalize(_LayerCache):
+        def finalize(self):
+            self.events.append(("finalize",))
+            raise RuntimeError("finalize boom")
+
+    failing = _FailFinalize("failing")
+    trailing = _LayerCache("trailing")
+    with pytest.raises(RuntimeError, match="finalize boom"):
+        backend_module._finalize_group([failing, trailing])
+    assert ("finalize",) in trailing.events
+
+    nested_failure = SimpleNamespace(caches=[failing, trailing])
+    with pytest.raises(RuntimeError, match="finalize boom"):
+        backend_module._finalize_cache(nested_failure)
+
+
+def test_backend_validation_surfaces_fail_closed_before_model_work():
+    with pytest.raises(ValueError, match="prefill_step_size"):
+        RapidMLXSelfMTPBackend(array_ops=_NumpyOps(), prefill_step_size=0)
+    with pytest.raises(ValueError, match="K=2"):
+        RapidMLXSelfMTPBackend(array_ops=_NumpyOps(), draft_depth=1)
+
+    backend = RapidMLXSelfMTPBackend(array_ops=_NumpyOps())
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="explicit factory"):
+        backend._cache(None, None, "target")
+    with pytest.raises(ValueError, match="non-empty"):
+        backend_module._as_group([], "target")
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="must return"):
+        backend._forward_pair("not-a-pair", "target forward")
+
+    runtime, _forward, _events = _runtime()
+    lane, _ = _prepare(runtime, 1, [1, 2])
+    assert backend._prefix(lane.lane, []).tolist() == [1, 2]
+    lane.lane.sampling = SelfMTPSampling(temperature=0.5)
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="greedy sampling only"):
+        backend._distribution(lane.lane, lane.lane.token_prefix, np.zeros(4))
+
+    lane.lane.sampling = SelfMTPSampling(has_logits_processors=True)
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="injected hook"):
+        backend._apply_processor(lane.lane, lane.lane.token_prefix, np.zeros(4))
+    processed = RapidMLXSelfMTPBackend(
+        array_ops=_NumpyOps(),
+        logits_processor=lambda _lane, _prefix, logits: logits + 1,
+    )
+    assert np.array_equal(
+        processed._apply_processor(lane.lane, lane.lane.token_prefix, np.zeros(4)),
+        np.ones(4),
+    )
+
+
+def test_long_prefill_threads_previous_hidden_into_recursive_draft():
+    runtime, forward, _events = _runtime()
+    runtime.compute.prefill_step_size = 2
+    prepared, first = prepare_self_mtp_lane(
+        SelfMTPLaneSpec(uid=9, prompt=list(range(1, 8)), max_tokens=16, num_draft=2),
+        runtime,
+    )
+    assert first.from_draft is False
+    assert prepared.lane.token_prefix.tolist() == list(range(1, 8))
+    draft_calls = [call for call in forward.calls if call[0] == "draft"]
+    assert len(draft_calls) >= 3
+
+
+@pytest.mark.parametrize(
+    ("sampling", "num_draft", "message"),
+    [
+        (SelfMTPSampling(), 1, "requires K=2"),
+        (SelfMTPSampling(uses_xtc=True), 2, "XTC"),
+        (SelfMTPSampling(temperature=0.5), 2, "greedy sampling only"),
+        (SelfMTPSampling(has_logits_processors=True), 2, "injected hook"),
+    ],
+)
+def test_prepare_refuses_unattested_sampling_and_depth(sampling, num_draft, message):
+    runtime, _forward, _events = _runtime()
+    spec = SelfMTPLaneSpec(
+        uid=1,
+        prompt=[1, 2],
+        max_tokens=8,
+        num_draft=num_draft,
+        sampling=sampling,
+    )
+    with pytest.raises(ContinuousSelfMTPUnsupported, match=message):
+        runtime.compute.prepare(spec, runtime.forwards)
+
+
+def test_prepare_rejects_empty_prompt_and_bad_forward_shape():
+    runtime, _forward, _events = _runtime()
+    empty = SelfMTPLaneSpec(uid=1, prompt=[], max_tokens=8, num_draft=2)
+    with pytest.raises(ValueError, match="non-empty rank-1"):
+        runtime.compute.prepare(empty, runtime.forwards)
+
+    bad_forwards = RapidForwardSeams(
+        lambda *_args, **_kwargs: "bad",
+        lambda *_args, **_kwargs: "bad",
+    )
+    valid = SelfMTPLaneSpec(uid=1, prompt=[1, 2], max_tokens=8, num_draft=2)
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="must return"):
+        runtime.compute.prepare(valid, bad_forwards)
+
+
+def test_proposal_boundary_and_pending_pair_corruption_fail_closed():
+    runtime, _forward, _events = _runtime()
+    detached, _ = _prepare(runtime, 0, [1, 2])
+    batch = attach_self_mtp_lanes(None, [detached])
+    backend = runtime.compute
+
+    with pytest.raises(ValueError, match="empty batch"):
+        backend.propose([], batch.caches, runtime.forwards)
+
+    proposal = propose_batched_self_mtp(batch)
+    with pytest.raises(RuntimeError, match="already open"):
+        backend.propose(batch.lanes, batch.caches, runtime.forwards)
+    abort_batched_self_mtp(batch, proposal)
+
+    batch.lanes[0].pending_hidden = np.zeros((1, 1, 4))
+    batch.lanes[0].pending_tokens = []
+    with pytest.raises(RuntimeError, match="hidden has no pending tokens"):
+        backend.propose(batch.lanes, batch.caches, runtime.forwards)
+    backend.abort(batch.lanes, batch.caches, None, None)
+
+    batch.lanes[0].pending_hidden = None
+    batch.lanes[0].pending_tokens = [3]
+    with pytest.raises(RuntimeError, match="tokens have no pending hidden"):
+        backend.propose(batch.lanes, batch.caches, runtime.forwards)
+    backend.abort(batch.lanes, batch.caches, None, None)
+
+
+def test_commit_abort_and_detach_reject_foreign_or_missing_state():
+    runtime, _forward, _events = _runtime()
+    detached, _ = _prepare(runtime, 0, [1, 2])
+    batch = attach_self_mtp_lanes(None, [detached])
+    backend = runtime.compute
+
+    foreign = SimpleNamespace(payload=object())
+    with pytest.raises(TypeError, match="foreign cycle payload"):
+        backend.commit(batch.lanes, foreign, emitted_counts=(1,), terminal=(False,))
+    with pytest.raises(RuntimeError, match="no matching proposal boundary"):
+        backend.abort(batch.lanes, batch.caches, None, None)
+
+    proposal = propose_batched_self_mtp(batch)
+    with pytest.raises(RuntimeError, match="membership changed"):
+        backend.abort([], batch.caches, proposal._computation, None)
+
+    batch.lanes[0].pending_tokens = []
+    backend.detach_lane(batch.lanes[0], batch.caches)
+    batch.lanes[0].pending_tokens = [1]
+    batch.lanes[0].pending_hidden = None
+    with pytest.raises(RuntimeError, match="no pending hidden"):
+        backend.detach_lane(batch.lanes[0], batch.caches)
+    batch.lanes[0].pending_hidden = np.zeros((1, 1, 4))
+    batch.lanes[0].backend_state = None
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="no Rapid forward seam"):
+        backend.detach_lane(batch.lanes[0], batch.caches)
+
+
+def test_commit_merges_existing_pending_pairs_and_rejects_double_commit():
+    runtime, _forward, _events = _runtime()
+    detached, _ = _prepare(runtime, 0, [1, 2])
+    batch = attach_self_mtp_lanes(None, [detached])
+    computation = runtime.compute.propose(batch.lanes, batch.caches, runtime.forwards)
+    lane = batch.lanes[0]
+    lane.pending_tokens = [99]
+    lane.pending_hidden = np.zeros((1, 1, 4))
+    runtime.compute.commit(
+        batch.lanes,
+        computation,
+        emitted_counts=(len(computation.outputs[0]),),
+        terminal=(False,),
+    )
+    assert lane.pending_tokens[0] == 99
+    with pytest.raises(RuntimeError, match="no matching proposal boundary"):
+        runtime.compute.commit(
+            batch.lanes,
+            computation,
+            emitted_counts=(len(computation.outputs[0]),),
+            terminal=(False,),
+        )
+
+
+def test_ragged_adapter_rejects_incomplete_cache_transaction_surfaces():
+    adapter = RapidRaggedCacheAdapter(
+        preflight=lambda *args, **kwargs: None,
+        trim=lambda *args, **kwargs: None,
+    )
+    pair = SelfMTPCachePair([_LayerCache("t")], [_LayerCache("d")])
+    assert adapter.attach(pair, []) is pair
+    with pytest.raises(ValueError, match="attach no cache rows"):
+        adapter.attach(None, [])
+    with pytest.raises(ValueError, match="empty target"):
+        adapter._merge([], "target")
+    with pytest.raises(ValueError, match="equal non-zero width"):
+        adapter._merge([[], []], "target")
+
+    no_merge = type("NoMerge", (), {})
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="no merge surface"):
+        adapter._merge([[no_merge()], [no_merge()]], "target")
+    mixed = type("Mixed", (_LayerCache,), {})
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="mixed target"):
+        adapter._merge([[_LayerCache("a")], [mixed("b")]], "target")
+
+    current = SelfMTPCachePair([_LayerCache("t")], [_LayerCache("d")])
+    wider = SelfMTPCachePair(
+        [_LayerCache("t1"), _LayerCache("t2")],
+        [_LayerCache("d1")],
+    )
+    with pytest.raises(ValueError, match="layer widths differ"):
+        adapter.attach(current, [wider])
+
+    class _NoExtend(_LayerCache):
+        extend = None
+
+    broken = SelfMTPCachePair([_NoExtend("t")], [_NoExtend("d")])
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="no extend surface"):
+        adapter.attach(broken, [SelfMTPCachePair([_NoExtend("x")], [_NoExtend("y")])])
+
+    class _NoExtract(_LayerCache):
+        extract = None
+
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="no extract surface"):
+        adapter.detach(SelfMTPCachePair([_NoExtract("t")], [_NoExtract("d")]), [0], [])
+
+    class _NoFilter(_LayerCache):
+        filter = None
+
+    with pytest.raises(ContinuousSelfMTPUnsupported, match="no filter surface"):
+        adapter.detach(SelfMTPCachePair([_NoFilter("t")], [_NoFilter("d")]), [0], [0])
+
+    remaining, rows = adapter.detach(pair, [0], [])
+    assert remaining.target == [] and remaining.draft == []
+    assert len(rows) == 1
+
+
+def test_ragged_adapter_default_hooks_and_nested_speculation_lifecycle():
+    adapter = RapidRaggedCacheAdapter()
+    assert callable(adapter._preflight)
+    assert callable(adapter._trim)
+
+    leaf = _LayerCache("leaf")
+    nested = SimpleNamespace(caches=[leaf])
+    backend_module._set_cache_speculation([nested], on=True)
+    backend_module._set_cache_speculation([nested], on=False)
+    assert ("start_speculation",) in leaf.events
+    assert ("stop_speculation",) in leaf.events

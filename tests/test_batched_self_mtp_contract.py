@@ -221,3 +221,85 @@ def test_inputs_are_validated_without_model_or_array_dependencies():
             capabilities=_capabilities(),
             free_bytes=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"max_lanes": True}, "positive integer"),
+        ({"max_lanes": 0}, "must be positive"),
+        ({"max_draft_tokens": True}, "positive integer"),
+        ({"max_draft_tokens": 0}, "must be positive"),
+        ({"min_batch_lanes": True}, "must be an integer"),
+        ({"min_batch_lanes": 0}, "must be positive"),
+        ({"max_lanes": 1, "min_batch_lanes": 2}, "cannot exceed"),
+        ({"hard_reserve_bytes": -1}, "cannot be negative"),
+    ],
+)
+def test_policy_numeric_contracts_fail_closed(changes, message):
+    with pytest.raises(ValueError, match=message):
+        BatchedMTPConfig(**changes)
+
+
+@pytest.mark.parametrize("changes", [{"greedy": 1}, {"uses_xtc": "yes"}])
+def test_sampling_contract_requires_real_booleans(changes):
+    with pytest.raises(ValueError, match="flags must be booleans"):
+        SamplingContract(**changes)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"lane_id": ""}, "non-empty string"),
+        ({"base_bytes": True}, "estimates must be integers"),
+        ({"bytes_per_draft_token": -1}, "cannot be negative"),
+        ({"cache_ready": 1}, "flags must be booleans"),
+    ],
+)
+def test_lane_metadata_contracts_fail_closed(changes, message):
+    values = {"lane_id": "lane"}
+    values.update(changes)
+    with pytest.raises(ValueError, match=message):
+        LaneAdmission(**values)
+
+
+def test_terminal_empty_and_plain_on_pressure_routes_are_explicit():
+    terminal = assess_lane(
+        LaneAdmission("done", terminal=True),
+        config=_config(),
+        capabilities=_capabilities(),
+    )
+    assert terminal.reasons == ("lane is terminal",)
+
+    empty = plan_admission(
+        [], config=_config(), capabilities=_capabilities(), free_bytes=1000
+    )
+    assert empty.route is BatchedMTPRoute.PLAIN_DECODE
+    assert empty.reasons == ("no candidate lanes",)
+
+    lanes = [LaneAdmission("a", base_bytes=1), LaneAdmission("b", base_bytes=1)]
+    plain = plan_admission(
+        lanes,
+        config=_config(queue_on_memory_pressure=False),
+        capabilities=_capabilities(),
+        free_bytes=100,
+    )
+    assert plain.route is BatchedMTPRoute.PLAIN_DECODE
+    assert plain.plain_lane_ids == ("a", "b")
+
+    overflow = plan_admission(
+        lanes + [LaneAdmission("c", base_bytes=1)],
+        config=_config(max_lanes=2, queue_on_memory_pressure=False),
+        capabilities=_capabilities(),
+        free_bytes=1000,
+    )
+    assert overflow.route is BatchedMTPRoute.BATCHED_MTP
+    assert overflow.plain_lane_ids == ("c",)
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        plan_admission(
+            lanes,
+            config=_config(),
+            capabilities=_capabilities(),
+            free_bytes=-1,
+        )

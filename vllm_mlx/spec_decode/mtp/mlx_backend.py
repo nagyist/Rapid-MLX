@@ -563,21 +563,20 @@ class RapidMLXSelfMTPBackend:
         hidden_rows = []
         token_rows = []
         for lane, valid in zip(lanes, first_lengths):
-            if valid:
-                hidden = lane.seed_hidden
-                if lane.pending_hidden is not None:
-                    if len(lane.pending_tokens) == 0:
-                        raise RuntimeError("pending hidden has no pending tokens")
-                    hidden = self.ops.concatenate(
-                        [lane.pending_hidden, lane.seed_hidden], axis=1
-                    )
-                elif lane.pending_tokens:
-                    raise RuntimeError("pending tokens have no pending hidden")
-                tokens = self.ops.uint32([lane.pending_tokens + [lane.cur]])
-            else:
-                # This row is padded and ignored by cache lengths.
-                hidden = lane.seed_hidden
-                tokens = self.ops.uint32([[0]])
+            # ``shared_depth`` is positive in this branch, so every row has at
+            # least its current token.  Uniform depth is required by the
+            # target model's one-scalar ``n_confirmed`` ABI; a padded inactive
+            # row here would violate that same contract.
+            hidden = lane.seed_hidden
+            if lane.pending_hidden is not None:
+                if len(lane.pending_tokens) == 0:
+                    raise RuntimeError("pending hidden has no pending tokens")
+                hidden = self.ops.concatenate(
+                    [lane.pending_hidden, lane.seed_hidden], axis=1
+                )
+            elif lane.pending_tokens:
+                raise RuntimeError("pending tokens have no pending hidden")
+            tokens = self.ops.uint32([lane.pending_tokens + [lane.cur]])
             hidden_rows.append(
                 self.ops.pad(
                     hidden,
@@ -601,8 +600,6 @@ class RapidMLXSelfMTPBackend:
         finally:
             _finalize_group(draft_cache)
         for row, (lane, depth, valid) in enumerate(zip(lanes, depths, first_lengths)):
-            if depth == 0:
-                continue
             position = valid - 1
             token, _ = self._distribution(
                 lane,
@@ -618,10 +615,7 @@ class RapidMLXSelfMTPBackend:
         if any(second_lengths):
             hidden_batch = self.ops.concatenate(draft_hidden, axis=0)
             token_batch = self.ops.uint32(
-                [
-                    [drafts[row][-1] if active else 0]
-                    for row, active in enumerate(second_lengths)
-                ]
+                [[drafts[row][-1]] for row in range(len(second_lengths))]
             )
             _prepare_group(draft_cache, second_lengths)
             try:
@@ -631,9 +625,7 @@ class RapidMLXSelfMTPBackend:
                 )
             finally:
                 _finalize_group(draft_cache)
-            for row, (lane, active) in enumerate(zip(lanes, second_lengths)):
-                if not active:
-                    continue
+            for row, lane in enumerate(lanes):
                 token, _ = self._distribution(
                     lane,
                     self._prefix(lane, [lane.cur] + drafts[row]),

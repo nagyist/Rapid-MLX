@@ -93,3 +93,35 @@ def test_injected_class_exposes_descriptor_seam_and_separate_recursive_depth(
 
 def test_qwen35_attests_cycle_boundary_dynamic_join():
     assert qwen3_5_inject.BATCHED_MTP_CAPABILITY["dynamic_join"] is True
+
+
+def test_validator_requires_the_full_continuous_mtp_surface():
+    class _Valid:
+        args = object()
+        model = object()
+        mtp = object()
+        batched_mtp_capability = qwen3_5_inject.BATCHED_MTP_CAPABILITY
+        mtp_recursive_draft_depth = 2
+
+        def __call__(self, inputs, *, return_hidden=False, n_confirmed=0):
+            return inputs, return_hidden, n_confirmed
+
+        def mtp_forward(self, *args, **kwargs):
+            return args, kwargs
+
+        def mtp_batch_forward(self, *args, **kwargs):
+            return args, kwargs
+
+        def make_mtp_cache(self):
+            return []
+
+    assert qwen3_5_inject.validate_mtp_support(_Valid()) is True
+
+    for attribute in (
+        "mtp_batch_forward",
+        "batched_mtp_capability",
+        "mtp_recursive_draft_depth",
+    ):
+        candidate = _Valid()
+        setattr(candidate, attribute, None)
+        assert qwen3_5_inject.validate_mtp_support(candidate) is False, attribute

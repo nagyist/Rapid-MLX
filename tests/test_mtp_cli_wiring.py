@@ -2453,6 +2453,178 @@ def test_scheduler_stop_retirement_requires_live_batch_generator():
         scheduler._retire_scheduler_finished_uid(SimpleNamespace(uid=7))
 
 
+def test_scheduler_installs_continuous_router_before_vendored_fallback(monkeypatch):
+    import vllm_mlx.scheduler as scheduler_module
+    from vllm_mlx.request import SamplingParams
+
+    events = []
+    batch_generator = object()
+    monkeypatch.setattr(
+        scheduler_module, "BatchGenerator", lambda **_kwargs: batch_generator
+    )
+    monkeypatch.setattr(scheduler_module, "make_sampler", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        scheduler_module,
+        "_install_continuous_mtp_router",
+        lambda *_args, **_kwargs: events.append("continuous") or True,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_install_mtp_vendored",
+        lambda *_args, **_kwargs: events.append("vendored") or True,
+    )
+    monkeypatch.setattr(
+        scheduler_module, "_install_dense_sampler_fastpath", lambda _bg: None
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.singleton_cache_fastpath.install_singleton_cache_fastpath",
+        lambda: None,
+    )
+
+    scheduler = scheduler_module.Scheduler.__new__(scheduler_module.Scheduler)
+    scheduler.model = object()
+    scheduler.model_config = SimpleNamespace(
+        supports_spec_decode=True,
+        name="Qwen3.8-27B",
+    )
+    scheduler.requests = {}
+    scheduler.uid_to_request_id = {}
+    scheduler.uid_to_request_processors = {}
+    scheduler._get_stop_tokens = lambda: set()
+    scheduler._continuous_mtp_free_bytes = lambda: 1
+    scheduler.config = SimpleNamespace(
+        prefill_batch_size=1,
+        completion_batch_size=4,
+        prefill_step_size=512,
+        kv_cache_quantization=False,
+        kv_cache_turboquant=None,
+        spec_decode="mtp",
+        mtp_model_type="qwen3_5",
+        mtp_continuous_batching=True,
+        mtp_max_k=3,
+        mtp_disable_auto_k=False,
+        mtp_sidecar=None,
+        enable_suffix_decoding=False,
+    )
+
+    created = scheduler._create_batch_generator(SamplingParams(max_tokens=8))
+
+    assert created is batch_generator
+    assert events == ["continuous", "vendored"]
+    assert scheduler.spec_decode_runtime_method == "mtp"
+
+
+@pytest.mark.parametrize(
+    ("cap", "metal", "resident", "expected"),
+    [
+        (0, 10, 20, 0),
+        (100, 40, 60, 40),
+        (100, 140, 60, 0),
+    ],
+)
+def test_scheduler_continuous_mtp_headroom_uses_unified_process_pressure(
+    cap,
+    metal,
+    resident,
+    expected,
+):
+    from vllm_mlx.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._resolve_metal_cap_bytes = lambda: cap
+    scheduler._current_metal_active_bytes = lambda: metal
+    scheduler._current_process_resident_bytes = lambda: resident
+
+    assert scheduler._continuous_mtp_free_bytes() == expected
+
+
+def test_scheduler_native_stop_promotes_continuous_mtp_detach_state():
+    from unittest.mock import MagicMock
+
+    from vllm_mlx.request import Request, RequestStatus, SamplingParams
+    from vllm_mlx.scheduler import Scheduler, SchedulerConfig
+
+    tokenizer = MagicMock()
+    tokenizer.encode = lambda _text: [1]
+    scheduler = Scheduler(MagicMock(), tokenizer, SchedulerConfig(max_num_seqs=4))
+
+    uid = 7
+    request = Request(
+        "req-7",
+        "prompt",
+        SamplingParams(max_tokens=8, temperature=0.0),
+    )
+    request.status = RequestStatus.RUNNING
+    request.batch_uid = uid
+    request.num_prompt_tokens = 1
+    scheduler.running[request.request_id] = request
+    scheduler.uid_to_request_id[uid] = request.request_id
+    scheduler.request_id_to_uid[request.request_id] = uid
+
+    target_cache = [object()]
+    mtp_state = ("draft-cache", "seed-hidden")
+
+    class _Driver:
+        def owns_uid(self, candidate):
+            return candidate == uid
+
+    class _BatchGenerator:
+        _continuous_mtp_driver = _Driver()
+        _continuous_mtp_removed_states = {uid: mtp_state}
+
+        def remove(self, uids, *, return_prompt_caches):
+            assert uids == [uid]
+            assert return_prompt_caches is True
+            return {uid: (target_cache, [1, 2, 3])}
+
+    scheduler.batch_generator = _BatchGenerator()
+    response = SimpleNamespace(
+        uid=uid,
+        token=2,
+        finish_reason="stop",
+        logprobs=None,
+    )
+
+    outputs, finished = scheduler._process_batch_responses([response])
+
+    assert outputs[0].finish_reason == "stop"
+    assert finished == {request.request_id}
+    assert response.prompt_cache is target_cache
+    assert response.all_tokens == [1, 2, 3]
+    assert response.mtp_state == mtp_state
+    assert request._continuous_mtp_state == mtp_state
+    assert _BatchGenerator._continuous_mtp_removed_states == {}
+
+
+def test_scheduler_continuous_mtp_detach_failure_does_not_hide_terminal():
+    from unittest.mock import MagicMock
+
+    from vllm_mlx.request import Request, RequestStatus, SamplingParams
+    from vllm_mlx.scheduler import Scheduler, SchedulerConfig
+
+    tokenizer = MagicMock()
+    tokenizer.encode = lambda _text: [1]
+    scheduler = Scheduler(MagicMock(), tokenizer, SchedulerConfig(max_num_seqs=4))
+    request = Request("req-9", "prompt", SamplingParams(max_tokens=8))
+    request.status = RequestStatus.RUNNING
+    request.batch_uid = 9
+    scheduler.running[request.request_id] = request
+    scheduler.uid_to_request_id[9] = request.request_id
+
+    scheduler.batch_generator = SimpleNamespace(
+        _continuous_mtp_driver=SimpleNamespace(owns_uid=lambda _uid: True),
+        remove=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("detach failed")
+        ),
+    )
+    outputs, finished = scheduler._process_batch_responses(
+        [SimpleNamespace(uid=9, token=2, finish_reason="stop", logprobs=None)]
+    )
+
+    assert outputs[0].finish_reason == "stop"
+    assert finished == {request.request_id}
+
+
 def test_install_mtp_vendored_first_call_construction_failure_does_not_double_book(
     monkeypatch,
 ):
