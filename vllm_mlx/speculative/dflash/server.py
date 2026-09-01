@@ -770,6 +770,7 @@ def _build_app(
         return {
             "status": "ok",
             "engine": "dflash",
+            "algorithm": runtime.algorithm,
             "mode": "single-user-serial",
             "drafter": runtime.drafter_repo,
         }
@@ -2075,6 +2076,8 @@ def run_dflash_server(
     tool_call_parser: str | None = "hermes",
     reasoning_parser_name: str | None = "qwen3",
     experimental_opt_in: bool = False,
+    verified_pair: bool = False,
+    expected_algorithm: str | None = None,
 ) -> None:
     """Load the model + DFlash drafter via mlx-vlm and start uvicorn.
 
@@ -2107,16 +2110,17 @@ def run_dflash_server(
     from .eligibility import DFlashUnavailable, _looks_like_4bit
 
     if _looks_like_4bit(main_model_repo):
-        if not experimental_opt_in:
+        if not (experimental_opt_in or verified_pair):
             raise DFlashUnavailable(
                 "4-bit DFlash is unverified. Programmatic callers must pass "
                 "experimental_opt_in=True after accepting that it may provide "
                 "no speedup or may be slower than autoregressive decoding."
             )
-        logger.warning(
-            "Experimental DFlash: this 4-bit target/drafter pair has not "
-            "been performance-validated by Rapid-MLX and may be slower"
-        )
+        if not verified_pair:
+            logger.warning(
+                "Experimental DFlash: this 4-bit target/drafter pair has not "
+                "been performance-validated by Rapid-MLX and may be slower"
+            )
     if not drafter_repo:
         raise DFlashUnavailable(
             "DFlash requires a non-empty drafter_repo — pass the DFlash "
@@ -2137,7 +2141,7 @@ def run_dflash_server(
         t0 = time.perf_counter()
         m, p = load(main_model_repo)
         logger.info("DFlash: main model loaded in %.1fs", time.perf_counter() - t0)
-        rt = load_runtime(drafter_repo)
+        rt = load_runtime(drafter_repo, expected_algorithm=expected_algorithm)
         return m, p, rt
 
     logger.info("DFlash: loading main model via mlx-vlm: %s", main_model_repo)

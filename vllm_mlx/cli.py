@@ -2563,6 +2563,19 @@ def _resolve_dflash_drafter_repo(args, profile) -> str | None:
     return None
 
 
+def _resolve_dflash_expected_algorithm(profile, drafter_repo: str | None) -> str | None:
+    """Return a registry receipt only for the exact declared pairing.
+
+    Explicit operator overrides remain experimental and are identified from
+    the loaded config instead of inheriting an unrelated alias expectation.
+    """
+    if profile is None or not drafter_repo:
+        return None
+    if getattr(profile, "dflash_draft_model", None) != drafter_repo:
+        return None
+    return getattr(profile, "dflash_algorithm", None)
+
+
 def _preflight_dflash_mutexes_or_exit(args) -> None:
     """Reject DFlash flag combinations before optional-runtime probes."""
 
@@ -4096,6 +4109,12 @@ def serve_command(args):
             ),
             reasoning_parser_name=args.reasoning_parser,
             experimental_opt_in=getattr(args, "_dflash_experimental", False),
+            verified_pair=not getattr(args, "_dflash_experimental", False),
+            expected_algorithm=(
+                _resolve_dflash_expected_algorithm(
+                    _profile, getattr(args, "_dflash_drafter_repo", None)
+                )
+            ),
         )
         return
 
@@ -9331,11 +9350,10 @@ def info_command(args):
 
 
 def _print_dflash_status(alias: str, profile) -> None:
-    """Render a 3-row DFlash status block for ``rapid-mlx info <alias>``.
+    """Render the DFlash status block for ``rapid-mlx info <alias>``.
 
-    Shows each gate (declared support / not MoE / not 4-bit / drafter
-    present) so a user who tried DFlash and got a vague error can see
-    exactly which gate they're tripping.
+    Shows qualification, target precision, declared pairing, and runtime
+    identity so an explicit experiment cannot be mistaken for a recommendation.
     """
     from vllm_mlx.spec_decode.capability import assess_method
     from vllm_mlx.speculative.dflash.eligibility import (
@@ -9352,6 +9370,14 @@ def _print_dflash_status(alias: str, profile) -> None:
     def _yes(ok: bool, msg_ok: str, msg_no: str) -> str:
         return ("✓ " + msg_ok) if ok else ("✗ " + msg_no)
 
+    quantized_target = _looks_like_4bit(profile.hf_path)
+    if not quantized_target:
+        precision_status = "✓ 8-bit or higher"
+    elif profile.supports_dflash and profile.dflash_algorithm == "dflash2":
+        precision_status = "✓ 4-bit (exact pair qualified)"
+    else:
+        precision_status = "⚠ 4-bit (experimental pair)"
+
     rows = [
         (
             "Declared support",
@@ -9359,12 +9385,12 @@ def _print_dflash_status(alias: str, profile) -> None:
         ),
         ("Not MoE", _yes(not profile.is_moe, "yes (dense)", "no (MoE)")),
         (
-            "Precision ≥8-bit",
-            _yes(
-                not _looks_like_4bit(profile.hf_path),
-                "yes",
-                "no (4-bit/mxfp4/nvfp4)",
-            ),
+            "Target precision",
+            precision_status,
+        ),
+        (
+            "Drafter algorithm",
+            profile.dflash_algorithm or "unknown (load-time detection only)",
         ),
         (
             "Drafter declared",
@@ -9412,10 +9438,11 @@ def _print_dflash_status(alias: str, profile) -> None:
         )
         print()
     elif capable:
+        drafter_hint = profile.dflash_draft_model or "<drafter>"
         print(
             f"  Experimental opt-in: rapid-mlx serve {alias} "
             "--speculative-config "
-            '\'{"method":"dflash","model":"<drafter>"}\''
+            f'\'{{"method":"dflash","model":"{drafter_hint}"}}\''
         )
         print("  Performance and output quality are not Rapid-MLX recommendations.")
         print()

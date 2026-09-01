@@ -27,6 +27,7 @@ def _good_profile() -> AliasProfile:
         is_moe=False,
         supports_dflash=True,
         dflash_draft_model="z-lab/Qwen3.5-27B-DFlash",
+        dflash_algorithm="dflash",
     )
 
 
@@ -175,6 +176,27 @@ def test_qwen3_5_27b_8bit_alias_passes_check() -> None:
     profile = resolve_profile("qwen3.5-27b-8bit")
     assert profile is not None, "qwen3.5-27b-8bit alias missing"
     check(profile, alias="qwen3.5-27b-8bit")
+
+
+def test_qwen3_8_27b_dflash2_pair_remains_explicit_after_negative_bench() -> None:
+    """Known pairing metadata must not turn a failed qualification into support."""
+    from vllm_mlx.model_aliases import resolve_profile
+
+    profile = resolve_profile("qwen3.8-27b-4bit")
+    assert profile is not None
+    default_result = report(profile, alias="qwen3.8-27b-4bit")
+    assert default_result.recommendation == "experimental"
+    assert default_result.reasons
+
+    explicit_result = report(
+        profile,
+        alias="qwen3.8-27b-4bit",
+        explicit=True,
+        drafter_model=profile.dflash_draft_model,
+    )
+    assert explicit_result.reasons == ()
+    assert explicit_result.recommendation == "experimental"
+    assert "performance-validated" in " ".join(explicit_result.warnings)
 
 
 def test_default_qwen3_5_27b_alias_fails_check_with_4bit_reason() -> None:

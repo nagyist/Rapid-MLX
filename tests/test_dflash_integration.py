@@ -170,6 +170,22 @@ def test_unverified_dflash_profile_cannot_inherit_residual_drafter() -> None:
     assert _resolve_dflash_drafter_repo(args, profile) is None
 
 
+def test_expected_algorithm_only_applies_to_exact_registry_pair() -> None:
+    from types import SimpleNamespace
+
+    from vllm_mlx.cli import _resolve_dflash_expected_algorithm
+
+    profile = SimpleNamespace(
+        dflash_draft_model="z-lab/Qwen3.8-27B-DFlash2",
+        dflash_algorithm="dflash2",
+    )
+    assert (
+        _resolve_dflash_expected_algorithm(profile, "z-lab/Qwen3.8-27B-DFlash2")
+        == "dflash2"
+    )
+    assert _resolve_dflash_expected_algorithm(profile, "operator/override") is None
+
+
 def test_programmatic_4bit_requires_explicit_experimental_opt_in(monkeypatch) -> None:
     from vllm_mlx.speculative.dflash.eligibility import DFlashUnavailable
     from vllm_mlx.speculative.dflash.server import run_dflash_server
@@ -273,6 +289,19 @@ def test_info_dflash_marks_4bit_alias_experimental(capsys) -> None:
     captured = capsys.readouterr()
     assert "DFlash eligibility" in captured.out
     assert "experimental" in captured.out
+
+
+def test_info_qwen38_exposes_exact_dflash2_experiment_without_recommending_it(
+    capsys,
+) -> None:
+    from vllm_mlx.cli import info_command
+
+    args = type("Args", (), {"model": "qwen3.8-27b-4bit"})()
+    info_command(args)
+    output = capsys.readouterr().out
+    assert "Drafter algorithm : dflash2" in output
+    assert '\'{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2"}\'' in output
+    assert "recommended / verified" not in output
 
 
 def test_info_dflash_start_with_uses_alias_not_hf_path(capsys, monkeypatch) -> None:
@@ -413,6 +442,7 @@ def test_healthz_and_models_routes() -> None:
     body = r.json()
     assert body["status"] == "ok"
     assert body["engine"] == "dflash"
+    assert body["algorithm"] == "dflash"
     assert body["drafter"] == "z-lab/Qwen3.5-27B-DFlash"
 
     r = client.get("/v1/models")
@@ -444,7 +474,7 @@ def test_run_dflash_server_wires_security_configuration(monkeypatch) -> None:
         drafter_repo="z-lab/Qwen3.5-27B-DFlash",
     )
     monkeypatch.setattr(srv, "have_runtime", lambda: True)
-    monkeypatch.setattr(srv, "load_runtime", lambda _repo: runtime)
+    monkeypatch.setattr(srv, "load_runtime", lambda _repo, **_kwargs: runtime)
 
     fake_mlx_vlm = types.ModuleType("mlx_vlm")
     fake_mlx_vlm.load = lambda _repo: (MagicMock(), MagicMock())
@@ -2294,6 +2324,41 @@ def test_dflashruntime_accept_lens_tolerates_wrong_type(caplog) -> None:
     assert rt.accept_lens_snapshot() == []
 
 
+def test_runtime_algorithm_distinguishes_dflash2_from_dispatch_kind() -> None:
+    """Both generations dispatch as kind=dflash; config identity is the receipt."""
+    from types import SimpleNamespace
+
+    from vllm_mlx.speculative.dflash.runtime import _runtime_algorithm
+
+    legacy = SimpleNamespace(config=SimpleNamespace(model_type="qwen3"))
+    dflash2 = SimpleNamespace(config=SimpleNamespace(model_type="dflash2"))
+    assert _runtime_algorithm(legacy) == "dflash"
+    assert _runtime_algorithm(dflash2) == "dflash2"
+
+
+def test_load_runtime_fails_closed_on_algorithm_mismatch(monkeypatch) -> None:
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    from vllm_mlx.speculative.dflash import runtime as runtime_module
+
+    fake_speculative = types.ModuleType("mlx_vlm.speculative")
+    fake_drafters = types.ModuleType("mlx_vlm.speculative.drafters")
+    fake_drafters.load_drafter = lambda _repo, kind: (
+        SimpleNamespace(config=SimpleNamespace(model_type="dflash2")),
+        kind,
+    )
+    monkeypatch.setitem(sys.modules, "mlx_vlm.speculative", fake_speculative)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.speculative.drafters", fake_drafters)
+    monkeypatch.setattr(runtime_module, "have_runtime", lambda: True)
+
+    loaded = runtime_module.load_runtime("known/drafter", expected_algorithm="dflash2")
+    assert loaded.algorithm == "dflash2"
+    with pytest.raises(RuntimeError, match="architecture mismatch"):
+        runtime_module.load_runtime("known/drafter", expected_algorithm="dflash")
+
+
 # =============================================================================
 # Eligibility error surfaces (CLI startup) — the gate must fail fast
 # with an actionable error before the user wastes 5 min downloading weights.
@@ -2344,7 +2409,7 @@ def test_run_dflash_server_loads_models_on_executor_thread(monkeypatch) -> None:
         load_thread["load"] = threading.current_thread().name
         return MagicMock(), MagicMock()
 
-    def _fake_load_runtime(_repo):
+    def _fake_load_runtime(_repo, **_kwargs):
         load_thread["load_runtime"] = threading.current_thread().name
         return MagicMock()
 

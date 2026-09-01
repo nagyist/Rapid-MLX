@@ -6,14 +6,12 @@ This is the single chokepoint between user intent
 Failures here surface as actionable error
 messages at server-start, never as silent regressions at request time.
 
-Gates derived from PoC bench data (see issue #264):
+Gates derived from qualification bench data (see issue #264):
   - Alias must declare ``supports_dflash=True`` (explicit opt-in)
   - Alias must NOT be ``is_moe=True`` (MoE acceptance floors at ~1.5)
-  - Main model must be 8-bit or higher; detected from the HF path
-    naming convention (``-4bit``/``mxfp4``/``nvfp4`` suffixes used by
-    mlx-community). A custom-named 4-bit repo would slip through this
-    heuristic — for v1 we accept that risk since every supported alias
-    is curated; load-time quant-config inspection is a phase-2 item.
+  - A curated alias pins both a drafter repository and its expected runtime
+    algorithm. Quantized pairs remain experimental unless that exact registry
+    entry has passed the benchmark gate.
   - Drafter HF path must be reachable (no auth-gated repo without token)
 """
 
@@ -82,7 +80,13 @@ def report(
             "measured on Qwen3.6-35B-A3B"
         )
     is_4bit = _looks_like_4bit(profile.hf_path)
-    if is_4bit:
+    curated_pair = (
+        profile.supports_dflash
+        and bool(profile.dflash_algorithm)
+        and bool(drafter_model or profile.dflash_draft_model)
+        and (drafter_model is None or drafter_model == profile.dflash_draft_model)
+    )
+    if is_4bit and not curated_pair:
         warnings.append(
             f"main model hf_path={profile.hf_path!r} is 4-bit quantized; "
             "this pair has not been performance-validated and may be slower"
@@ -97,12 +101,6 @@ def report(
         # Should be caught at JSON-load time by _coerce, but defend
         # against direct AliasProfile construction in tests/code.
         reasons.append("DFlash requires an explicit drafter model")
-    curated_pair = (
-        not is_4bit
-        and profile.supports_dflash
-        and has_drafter
-        and (drafter_model is None or drafter_model == profile.dflash_draft_model)
-    )
     if explicit and not curated_pair:
         warnings.append(
             "this target/drafter pair is experimental and has not been "

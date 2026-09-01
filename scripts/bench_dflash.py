@@ -3,7 +3,7 @@
 """DFlash speculative-decoding speedup bench (Model Onboarding SOP §6).
 
 Measures the per-workload TPS speedup of ``--enable-dflash`` vs the
-baseline (autoregressive) decode on a fixed prompt set. Mirrors the
+alias's default decode policy on a fixed prompt set. Mirrors the
 sequential two-server pattern of ``bench_suffix_decoding_integrated.py``
 and reuses the same reliability gates (decode-time floor, TPS ceiling,
 raw-runs persistence).
@@ -186,7 +186,12 @@ class ServerHandle:
                     pass
 
 
-def start_server(model: str, port: int, dflash: bool) -> ServerHandle:
+def start_server(
+    model: str,
+    port: int,
+    dflash: bool,
+    draft_model: str | None = None,
+) -> ServerHandle:
     """Spin up ``rapid-mlx serve`` and wait for /v1/models to answer.
 
     Sets ``--disable-prefix-cache`` to prevent disk-persisted cache
@@ -208,6 +213,8 @@ def start_server(model: str, port: int, dflash: bool) -> ServerHandle:
     ]
     if dflash:
         cmd.append("--enable-dflash")
+        if draft_model:
+            cmd.extend(["--dflash-drafter-path", draft_model])
 
     logger.info("  starting server: port=%d dflash=%s", port, dflash)
     logf = open(log_path, "w")
@@ -384,8 +391,9 @@ def bench_one_mode(
     dflash: bool,
     runs: int,
     max_tokens: int,
+    draft_model: str | None = None,
 ) -> ModeResult:
-    handle = start_server(model, port, dflash)
+    handle = start_server(model, port, dflash, draft_model=draft_model)
     try:
         # Discard warmup: Metal JIT + cache population + drafter load.
         run_workload(handle, WORKLOADS["fibonacci"], max_tokens=32)
@@ -424,6 +432,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", required=True, help="HF repo or alias")
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--runs", type=int, default=3, help="runs per workload")
+    parser.add_argument(
+        "--draft-model",
+        default=None,
+        help=(
+            "Explicit DFlash drafter repo or local path. Omit to use the "
+            "alias-qualified drafter."
+        ),
+    )
     parser.add_argument("--port", type=int, default=8765, help="ephemeral port")
     parser.add_argument(
         "--output",
@@ -455,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
             "bypassed (PoC mode)"
         )
 
-    logger.info("--- baseline (autoregressive) ---")
+    logger.info("--- baseline (alias default policy) ---")
     base = bench_one_mode(
         args.model,
         args.port,
@@ -471,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
         dflash=True,
         runs=args.runs,
         max_tokens=args.max_tokens,
+        draft_model=args.draft_model,
     )
 
     speedup: dict[str, float] = {}
@@ -536,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "model": args.model,
+        "draft_model": args.draft_model,
         "max_tokens": args.max_tokens,
         "runs": args.runs,
         "gate": args.gate,
