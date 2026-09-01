@@ -268,6 +268,8 @@ def _runtime_has_rapid_mlx_distribution(
     cache_key = runtime.absolute()
     if cache_key in _RUNTIME_DISTRIBUTION_CACHE:
         return _RUNTIME_DISTRIBUTION_CACHE[cache_key]
+    if _DOCTOR_DEADLINE is not None and time.monotonic() >= _DOCTOR_DEADLINE:
+        return False
     if runtime == Path("/usr/bin/python3") and cwd != Path("/"):
         if _runtime_has_rapid_mlx_distribution(
             Path("/usr/bin/python3"),
@@ -428,6 +430,20 @@ def _is_diagnostic_python_override(candidate: Path) -> bool:
     return True
 
 
+def _is_trusted_runtime_executable(runtime: Path) -> bool:
+    """Allow automatic runtime following only from known Rapid-MLX layouts."""
+    if _bundled_sidecar_root(runtime) is not None:
+        return True
+    home = Path.home().resolve()
+    managed_roots = (
+        home / ".rapid-mlx",
+        home / ".rapid-mlx-python",
+        Path(__file__).resolve().parents[2],
+    )
+    runtime = runtime.absolute()
+    return any(runtime == root or root in runtime.parents for root in managed_roots)
+
+
 def _runtime_python_path() -> Path:
     """Return the authoritative Python executable for runtime checks.
 
@@ -532,11 +548,19 @@ def _runtime_python_path() -> Path:
             return interpreter.absolute()
 
         def _module_command_entry(command: list[str]) -> str | None:
-            for index, argument in enumerate(command[1:], start=1):
+            value_options = {"-X", "-W", "--check-hash-based-pycs"}
+            index = 1
+            while index < len(command):
+                argument = command[index]
                 if argument == "-m":
                     return command[index + 1] if index + 1 < len(command) else None
-                if not argument.startswith("-"):
-                    return None
+                if argument in value_options:
+                    index += 2
+                    continue
+                if argument.startswith("-"):
+                    index += 1
+                    continue
+                return None
             return None
 
         def _runtime_candidate(cmdline: list[str], process: Any) -> Path | None:
@@ -595,6 +619,7 @@ def _runtime_python_path() -> Path:
                 not candidate.is_absolute()
                 or not candidate.is_file()
                 or not candidate.name.lower().startswith("python")
+                or not _is_trusted_runtime_executable(candidate)
             ):
                 return None
             if not _runtime_has_rapid_mlx_distribution(
@@ -889,10 +914,13 @@ def _runtime_module_importable(
     )
     if cache_key in _RUNTIME_IMPORT_CACHE:
         return _RUNTIME_IMPORT_CACHE[cache_key]
+    if _DOCTOR_DEADLINE is not None and time.monotonic() >= _DOCTOR_DEADLINE:
+        _RUNTIME_IMPORT_CACHE[cache_key] = False
+        return False
     importable = False
     try:
         command = [str(runtime)]
-        if isolated and _runtime_uses_context(runtime):
+        if isolated:
             command.append("-I")
         command.extend(
             [
@@ -955,6 +983,9 @@ def _probe_runtime(
     if cache_key in cache:
         return cache[cache_key]
     try:
+        if _DOCTOR_DEADLINE is not None and time.monotonic() >= _DOCTOR_DEADLINE:
+            cache[cache_key] = None
+            return None
         env = {
             "HOME": os.environ.get("HOME", str(Path.home())),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),

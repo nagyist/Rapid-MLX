@@ -192,6 +192,7 @@ def allow_rapid_mlx_module_servers(monkeypatch):
         "_runtime_has_rapid_mlx_distribution",
         lambda runtime, cwd, env: True,
     )
+    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: True)
 
 
 def test_stopped_runtime_override_accepts_system_python_and_resolves_relative_path(
@@ -1106,6 +1107,105 @@ def test_module_command_accepts_python_flags_before_dash_m(
     assert eh._runtime_python_path() == doctor_exe.absolute()
 
 
+def test_module_command_accepts_python_value_flags_before_dash_m(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [
+                    str(doctor_exe),
+                    "-X",
+                    "dev",
+                    "-m",
+                    "vllm_mlx.cli",
+                    "serve",
+                    "test-model",
+                ],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(doctor_exe)
+
+        def environ(self):
+            return {"PATH": str(doctor_exe.parent)}
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
+def test_untrusted_server_interpreter_is_not_selected(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    attacker_runtime = tmp_path / "attacker" / "bin" / "python"
+    attacker_runtime.parent.mkdir(parents=True)
+    attacker_runtime.write_text("")
+    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: False)
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [
+                    str(attacker_runtime),
+                    "-m",
+                    "vllm_mlx.cli",
+                    "serve",
+                    "test-model",
+                ],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(attacker_runtime)
+
+        def environ(self):
+            return {"PATH": str(attacker_runtime.parent)}
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+    assert eh._SELECTED_SERVER_RUNTIME is False
+
+
 def test_running_server_same_interpreter_is_still_server_context(
     tmp_path,
     monkeypatch,
@@ -1535,6 +1635,16 @@ def test_runtime_import_probe_rejects_non_object_json(tmp_path):
     runtime.chmod(0o755)
     eh._RUNTIME_IMPORT_CACHE.clear()
 
+    assert not eh._runtime_module_importable(runtime, "transformers", None)
+
+
+def test_runtime_probes_stop_after_deadline(tmp_path, monkeypatch):
+    runtime = Path(sys.executable)
+    monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", 0.0)
+    monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
+    monkeypatch.setattr(eh, "_RUNTIME_IMPORT_CACHE", {})
+
+    assert eh._probe_runtime(runtime) is None
     assert not eh._runtime_module_importable(runtime, "transformers", None)
 
 
