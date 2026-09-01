@@ -1806,124 +1806,12 @@ class BatchedEngine(BaseEngine):
                 checkpoint_source=checkpoint_source,
             )
 
-        # Resolve the per-model Metal budget and set the limits on the SAME
-        # mlx-step worker that loaded the model. Calling these from the
-        # asyncio loop thread would touch MLX from a thread that doesn't own
-        # the worker stream and create a stray Stream(gpu, 1) reference
-        # (#170). Runs AFTER the weights are materialized on purpose:
-        # ``mx.get_active_memory()`` here is the model's real Metal footprint
-        # (all resident models, in multi-model mode), so auto mode (#2858)
-        # sizes the limit from a measurement instead of a disk heuristic —
-        # and can only ratchet the process-wide limit upward as more models
-        # load, never below what is already resident. Loading under the
-        # PREVIOUS model's (lower) limit is safe: ``mx.set_memory_limit``
-        # is a documented guideline the allocator silently grows past
-        # while system RAM is available (the D-METAL-CAP root cause — see
-        # ``Scheduler._resolve_metal_cap_bytes``), so weight
-        # materialization cannot hard-fail on the soft limit; real
-        # enforcement is admission-time only.
-        def _resolve_and_set_metal_limits() -> float:
-            import mlx.core as mx
-
-            from ..memory_budget import (
-                AUTO_UTILIZATION_FLOOR,
-                plan_metal_limit,
-                ratchet_utilization_and_apply,
-            )
-
-            requested = self._gpu_memory_utilization
-            fallback = requested if requested is not None else AUTO_UTILIZATION_FLOOR
-            if not mx.metal.is_available():
-                return fallback
-            device_info = mx.device_info()
-            max_recommended = int(
-                device_info.get(
-                    "max_recommended_working_set_size",
-                    device_info.get("memory_size", 0),
-                )
-                or 0
-            )
-            if max_recommended <= 0:
-                return fallback
-            try:
-                # Drop reclaimable allocator cache first (codex round 4
-                # NIT): after a dynamic load/unload cycle
-                # ``get_active_memory`` routinely includes cached pages
-                # that are not resident weights — budgeting them would
-                # ratchet the process limit toward the ceiling on memory
-                # that is actually free. Active allocations from resident
-                # models are unaffected by ``clear_cache``.
-                mx.clear_cache()
-                weights_bytes = int(mx.get_active_memory())
-            except Exception:
-                weights_bytes = 0
-            plan = plan_metal_limit(
-                weights_bytes=weights_bytes,
-                device_budget_bytes=int(max_recommended),
-                requested_utilization=requested,
-            )
-
-            # Publish the resolved utilization into the process-wide
-            # ratchet AND install the Metal limits under the same lock
-            # (codex rounds 2–4). One combined critical section gives the
-            # three invariants at once:
-            # - every already-resident engine's scheduler re-resolves its
-            #   admission cap against the raised floor, so a new model can
-            #   never strand an existing one behind a stale lower cap
-            #   (round 2 BLOCKING #2);
-            # - the allocation limit follows the ratchet, so a later,
-            #   smaller model can never LOWER the process limit below what
-            #   the schedulers enforce (round 3 BLOCKING #1);
-            # - concurrent loads apply their limits serialized in floor
-            #   order, so the LAST setter call always carries the highest
-            #   published utilization (round 4 BLOCKING #1).
-            def _apply_limits(effective_utilization: float) -> None:
-                effective_limit = int(max_recommended * effective_utilization)
-                # Setter failures are contained HERE so the resolved
-                # utilization always propagates (codex round 1 BLOCKING
-                # #2): if ``mx.set_memory_limit`` succeeds but
-                # ``set_cache_limit`` throws, falling back to the floor
-                # would leave the scheduler admission cap desynchronized
-                # from the allocation limit Metal is actually holding.
-                try:
-                    mx.set_memory_limit(effective_limit)
-                    cache_limit = _compute_metal_cache_limit(effective_limit)
-                    mx.set_cache_limit(cache_limit)
-                    logger.info(
-                        f"Metal memory limits set ({plan.mode}): "
-                        f"allocation_limit={effective_limit / 1e9:.1f}GB "
-                        f"({effective_utilization * 100:.0f}% of "
-                        f"{max_recommended / 1e9:.1f}GB, "
-                        f"weights={weights_bytes / 1e9:.1f}GB), "
-                        f"cache_limit={cache_limit / 1e9:.1f}GB"
-                    )
-                except Exception as limit_exc:
-                    logger.warning(
-                        f"Failed to apply Metal memory limits "
-                        f"(resolved {plan.mode} utilization "
-                        f"{effective_utilization:.2f} still governs the "
-                        f"admission cap): {limit_exc}"
-                    )
-
-            effective_utilization, _generation = ratchet_utilization_and_apply(
-                plan.resolved_utilization, _apply_limits
-            )
-            return effective_utilization
-
-        # The resolved utilization (== the value actually fed to
-        # ``mx.set_memory_limit``) replaces the requested one so EngineConfig
-        # and, via engine_core's D-METAL-CAP propagation, the scheduler's
-        # admission cap all enforce the SAME budget.
-        try:
-            self._gpu_memory_utilization = self._model_load_executor.submit(
-                _resolve_and_set_metal_limits
-            ).result()
-        except Exception as e:
-            logger.warning(f"Failed to set Metal memory limits: {e}")
-            if self._gpu_memory_utilization is None:
-                from ..memory_budget import AUTO_UTILIZATION_FLOOR
-
-                self._gpu_memory_utilization = AUTO_UTILIZATION_FLOOR
+        # Resolve the per-model Metal budget on the model-owning worker
+        # after the weights are materialized (#2858, #170). The logic lives
+        # in dedicated methods so it is unit-testable without loading a
+        # model; this call site is exercised by the serve smoke and the
+        # stress e2e lane, not by unit tests.
+        self._install_resolved_metal_budget()  # pragma: no cover
 
         # Create engine config
         scheduler_config = self._scheduler_config or SchedulerConfig()
@@ -1942,31 +1830,164 @@ class BatchedEngine(BaseEngine):
         # Create async engine and hand it the EXISTING model-load executor
         # so all subsequent MLX work (forward passes, cache materialization,
         # eval) runs on the same worker thread that owns the model weights.
-        self._engine = AsyncEngineCore(
+        engine_core = AsyncEngineCore(
             model=self._model,
             tokenizer=self._tokenizer,
             config=engine_config,
         )
+        self._engine = engine_core
 
         # #2858 acceptance: a model must not report healthy while every
         # request deterministically 503s under the resolved cap. The
         # scheduler exists as of AsyncEngineCore construction, so run its
-        # admission preflight BEFORE the engine loop starts — an impossible
-        # budget fails the load with one actionable message instead of
-        # letting the server come up 503-wedged. Runs on the model-load
-        # worker because the preflight may call ``mx.clear_cache()`` and
-        # MLX allocator calls must stay on the thread that owns the model's
-        # stream (#170). MetalPreflightError must propagate; it is the
-        # load failure.
+        # admission preflight BEFORE the engine loop starts.
+        # MetalPreflightError must propagate; it is the load failure.
+        self._run_metal_admission_preflight()  # pragma: no cover
+
+        await engine_core.engine.start(executor=self._model_load_executor)
+        self._engine_started = True
+
+    def _resolve_and_set_metal_limits(self) -> float:
+        """Resolve this model's Metal budget and install the limits.
+
+        Must run on the model-owning mlx-step worker: calling MLX from the
+        asyncio loop thread would create a stray Stream(gpu, 1) reference
+        (#170). Runs AFTER the weights are materialized on purpose:
+        ``mx.get_active_memory()`` here is the model's real Metal footprint
+        (all resident models, in multi-model mode), so auto mode (#2858)
+        sizes the limit from a measurement instead of a disk heuristic —
+        and can only ratchet the process-wide limit upward as more models
+        load, never below what is already resident. Loading under the
+        PREVIOUS model's (lower) limit is safe: ``mx.set_memory_limit``
+        is a documented guideline the allocator silently grows past
+        while system RAM is available (the D-METAL-CAP root cause — see
+        ``Scheduler._resolve_metal_cap_bytes``), so weight
+        materialization cannot hard-fail on the soft limit; real
+        enforcement is admission-time only.
+        """
+        import mlx.core as mx
+
+        from ..memory_budget import (
+            AUTO_UTILIZATION_FLOOR,
+            plan_metal_limit,
+            ratchet_utilization_and_apply,
+        )
+
+        requested = self._gpu_memory_utilization
+        fallback = requested if requested is not None else AUTO_UTILIZATION_FLOOR
+        if not mx.metal.is_available():
+            return fallback
+        device_info = mx.device_info()
+        max_recommended = int(
+            device_info.get(
+                "max_recommended_working_set_size",
+                device_info.get("memory_size", 0),
+            )
+            or 0
+        )
+        if max_recommended <= 0:
+            return fallback
+        try:
+            # Drop reclaimable allocator cache first (codex round 4
+            # NIT): after a dynamic load/unload cycle
+            # ``get_active_memory`` routinely includes cached pages
+            # that are not resident weights — budgeting them would
+            # ratchet the process limit toward the ceiling on memory
+            # that is actually free. Active allocations from resident
+            # models are unaffected by ``clear_cache``.
+            mx.clear_cache()
+            weights_bytes = int(mx.get_active_memory())
+        except Exception:
+            weights_bytes = 0
+        plan = plan_metal_limit(
+            weights_bytes=weights_bytes,
+            device_budget_bytes=int(max_recommended),
+            requested_utilization=requested,
+        )
+
+        # Publish the resolved utilization into the process-wide
+        # ratchet AND install the Metal limits under the same lock
+        # (codex rounds 2–4). One combined critical section gives the
+        # three invariants at once:
+        # - every already-resident engine's scheduler re-resolves its
+        #   admission cap against the raised floor, so a new model can
+        #   never strand an existing one behind a stale lower cap
+        #   (round 2 BLOCKING #2);
+        # - the allocation limit follows the ratchet, so a later,
+        #   smaller model can never LOWER the process limit below what
+        #   the schedulers enforce (round 3 BLOCKING #1);
+        # - concurrent loads apply their limits serialized in floor
+        #   order, so the LAST setter call always carries the highest
+        #   published utilization (round 4 BLOCKING #1).
+        def _apply_limits(effective_utilization: float) -> None:
+            effective_limit = int(max_recommended * effective_utilization)
+            # Setter failures are contained HERE so the resolved
+            # utilization always propagates (codex round 1 BLOCKING
+            # #2): if ``mx.set_memory_limit`` succeeds but
+            # ``set_cache_limit`` throws, falling back to the floor
+            # would leave the scheduler admission cap desynchronized
+            # from the allocation limit Metal is actually holding.
+            try:
+                mx.set_memory_limit(effective_limit)
+                cache_limit = _compute_metal_cache_limit(effective_limit)
+                mx.set_cache_limit(cache_limit)
+                logger.info(
+                    f"Metal memory limits set ({plan.mode}): "
+                    f"allocation_limit={effective_limit / 1e9:.1f}GB "
+                    f"({effective_utilization * 100:.0f}% of "
+                    f"{max_recommended / 1e9:.1f}GB, "
+                    f"weights={weights_bytes / 1e9:.1f}GB), "
+                    f"cache_limit={cache_limit / 1e9:.1f}GB"
+                )
+            except Exception as limit_exc:
+                logger.warning(
+                    f"Failed to apply Metal memory limits "
+                    f"(resolved {plan.mode} utilization "
+                    f"{effective_utilization:.2f} still governs the "
+                    f"admission cap): {limit_exc}"
+                )
+
+        effective_utilization, _generation = ratchet_utilization_and_apply(
+            plan.resolved_utilization, _apply_limits
+        )
+        return effective_utilization
+
+    def _install_resolved_metal_budget(self) -> None:
+        """Run the budget resolution on the worker and store the result.
+
+        The resolved utilization (== the value actually fed to
+        ``mx.set_memory_limit``) replaces the requested one so EngineConfig
+        and, via engine_core's D-METAL-CAP propagation, the scheduler's
+        admission cap all enforce the SAME budget.
+        """
+        budget_executor = self._model_load_executor
+        assert budget_executor is not None
+        try:
+            self._gpu_memory_utilization = budget_executor.submit(
+                self._resolve_and_set_metal_limits
+            ).result()
+        except Exception as e:
+            logger.warning(f"Failed to set Metal memory limits: {e}")
+            if self._gpu_memory_utilization is None:
+                from ..memory_budget import AUTO_UTILIZATION_FLOOR
+
+                self._gpu_memory_utilization = AUTO_UTILIZATION_FLOOR
+
+    def _run_metal_admission_preflight(self) -> None:
+        """Fail the load if the resolved cap can never admit a request.
+
+        An impossible budget fails the load with one actionable message
+        instead of letting the server come up 503-wedged. Runs on the
+        model-load worker because the preflight may call
+        ``mx.clear_cache()`` and MLX allocator calls must stay on the
+        thread that owns the model's stream (#170).
+        """
         preflight_executor = self._model_load_executor
         preflight_engine = self._engine
         assert preflight_executor is not None and preflight_engine is not None
         preflight_executor.submit(
             preflight_engine.engine.scheduler.preflight_metal_admission
         ).result()
-
-        await self._engine.engine.start(executor=self._model_load_executor)
-        self._engine_started = True
 
     async def execute_on_model_worker(self, func, *args, **kwargs):
         """Execute auxiliary MLX work on this model's owning worker.

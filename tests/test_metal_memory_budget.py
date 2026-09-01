@@ -259,6 +259,33 @@ class TestSchedulerPreflight:
         ):
             sched.preflight_metal_admission()
 
+    def test_counts_sliding_window_kv_and_survives_clear_cache_failure(self):
+        """Sliding-window KV is part of the smallest-request estimate, and
+        a failing ``mx.clear_cache`` must not mask the real verdict."""
+        import vllm_mlx.scheduler as sched_mod
+
+        sched = _make_scheduler()
+        per_tok = 100_000
+        cap = 10 * GB
+        with (
+            patch.object(sched, "_resolve_kv_bytes_per_token", return_value=per_tok),
+            patch.object(sched, "_resolve_kv_fixed_baseline_bytes", return_value=0),
+            patch.object(sched, "_resolve_metal_cap_bytes", return_value=cap),
+            patch.object(
+                sched, "_current_metal_active_bytes", return_value=cap - per_tok
+            ),
+            patch.object(
+                sched_mod.mx,
+                "clear_cache",
+                side_effect=RuntimeError("no metal"),
+                create=True,
+            ),
+            pytest.raises(MetalPreflightError),
+        ):
+            sched._kv_sliding_slot_bytes = 50_000
+            sched._kv_sliding_window = 8
+            sched.preflight_metal_admission()
+
 
 class TestProcessUtilizationRatchet:
     """Codex round 2 BLOCKING #2: a resident scheduler's cap must follow
@@ -305,6 +332,18 @@ class TestProcessUtilizationRatchet:
         sched = _make_scheduler(gpu_memory_utilization=0.0)
         with self._fake_device():
             note_resolved_utilization(0.97)
+            assert sched._resolve_metal_cap_bytes() == 0
+
+    def test_cap_disables_when_device_info_unreadable(self):
+        import vllm_mlx.scheduler as sched_mod
+
+        sched = _make_scheduler(gpu_memory_utilization=0.5)
+        metal = MagicMock()
+        metal.is_available.return_value = True
+        device_info = MagicMock(side_effect=RuntimeError("no device info"))
+        with patch.multiple(
+            sched_mod.mx, metal=metal, device_info=device_info, create=True
+        ):
             assert sched._resolve_metal_cap_bytes() == 0
 
     def test_ratchet_and_apply_is_atomic_and_serialized(self):
@@ -377,3 +416,144 @@ class TestActionableAdmission503:
         message = str(exc_info.value)
         assert "D-METAL-CAP" in message
         assert "--gpu-memory-utilization" not in message
+
+
+class TestBatchedEngineBudgetInstall:
+    """The BatchedEngine-side wiring: resolve on the worker, install the
+    result, and run the admission preflight (#2858)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_floor(self):
+        import vllm_mlx.memory_budget as mb
+
+        with mb._process_floor_lock:
+            saved = (mb._process_utilization_floor, mb._process_floor_generation)
+            mb._process_utilization_floor = 0.0
+            mb._process_floor_generation += 1
+        yield
+        with mb._process_floor_lock:
+            mb._process_utilization_floor = saved[0]
+            mb._process_floor_generation += 1
+
+    def _bare_engine(self, requested=None):
+        from vllm_mlx.engine.batched import BatchedEngine
+
+        engine = BatchedEngine.__new__(BatchedEngine)
+        engine._gpu_memory_utilization = requested
+        engine._model_load_executor = None
+        engine._engine = None
+        return engine
+
+    def _patched_mx(self, *, available=True, budget=100 * GB, active=50 * GB):
+        device_info = {"max_recommended_working_set_size": budget}
+        return patch.multiple(
+            "mlx.core",
+            device_info=MagicMock(return_value=device_info),
+            clear_cache=MagicMock(),
+            get_active_memory=MagicMock(return_value=active),
+            set_memory_limit=MagicMock(),
+            set_cache_limit=MagicMock(),
+        ), patch("mlx.core.metal.is_available", return_value=available)
+
+    def test_resolve_auto_success_installs_ratcheted_limit(self):
+        import mlx.core as mx
+
+        engine = self._bare_engine(requested=None)
+        core_patch, metal_patch = self._patched_mx(active=50 * GB)
+        with core_patch, metal_patch:
+            resolved = engine._resolve_and_set_metal_limits()
+            # 50GB weights + headroom on a 100GB budget needs < the floor,
+            # so auto resolves to the historical 0.90.
+            assert resolved == AUTO_UTILIZATION_FLOOR
+            mx.set_memory_limit.assert_called_once_with(int(100 * GB * 0.90))
+            mx.clear_cache.assert_called_once()
+            assert mx.set_cache_limit.called
+
+    def test_resolve_falls_back_when_metal_unavailable(self):
+        engine = self._bare_engine(requested=0.42)
+        core_patch, metal_patch = self._patched_mx(available=False)
+        with core_patch, metal_patch:
+            assert engine._resolve_and_set_metal_limits() == 0.42
+        engine = self._bare_engine(requested=None)
+        core_patch, metal_patch = self._patched_mx(available=False)
+        with core_patch, metal_patch:
+            assert engine._resolve_and_set_metal_limits() == AUTO_UTILIZATION_FLOOR
+
+    def test_resolve_falls_back_without_device_budget(self):
+        engine = self._bare_engine(requested=None)
+        core_patch, metal_patch = self._patched_mx(budget=0)
+        with core_patch, metal_patch:
+            assert engine._resolve_and_set_metal_limits() == AUTO_UTILIZATION_FLOOR
+
+    def test_resolve_treats_measurement_failure_as_no_measurement(self):
+        import mlx.core as mx
+
+        engine = self._bare_engine(requested=None)
+        core_patch, metal_patch = self._patched_mx()
+        with core_patch, metal_patch:
+            mx.get_active_memory.side_effect = RuntimeError("boom")
+            assert engine._resolve_and_set_metal_limits() == AUTO_UTILIZATION_FLOOR
+            mx.set_memory_limit.assert_called_once_with(int(100 * GB * 0.90))
+
+    def test_resolve_survives_setter_failure(self):
+        """Codex round 1 BLOCKING #2: a setter failure must not poison the
+        resolved utilization the admission cap enforces."""
+        import mlx.core as mx
+
+        engine = self._bare_engine(requested=0.95)
+        core_patch, metal_patch = self._patched_mx()
+        with core_patch, metal_patch:
+            mx.set_memory_limit.side_effect = RuntimeError("metal says no")
+            assert engine._resolve_and_set_metal_limits() == 0.95
+
+    def test_install_stores_resolved_value(self):
+        import concurrent.futures
+
+        engine = self._bare_engine(requested=None)
+        engine._model_load_executor = concurrent.futures.ThreadPoolExecutor(1)
+        try:
+            with patch.object(
+                type(engine), "_resolve_and_set_metal_limits", return_value=0.93
+            ):
+                engine._install_resolved_metal_budget()
+            assert engine._gpu_memory_utilization == 0.93
+        finally:
+            engine._model_load_executor.shutdown(wait=True)
+
+    def test_install_failure_falls_back_to_floor_only_when_unset(self):
+        import concurrent.futures
+
+        for requested, expected in ((None, AUTO_UTILIZATION_FLOOR), (0.5, 0.5)):
+            engine = self._bare_engine(requested=requested)
+            engine._model_load_executor = concurrent.futures.ThreadPoolExecutor(1)
+            try:
+                with patch.object(
+                    type(engine),
+                    "_resolve_and_set_metal_limits",
+                    side_effect=RuntimeError("worker died"),
+                ):
+                    engine._install_resolved_metal_budget()
+                assert engine._gpu_memory_utilization == expected
+            finally:
+                engine._model_load_executor.shutdown(wait=True)
+
+    def test_preflight_runs_on_worker_and_propagates(self):
+        import concurrent.futures
+        from types import SimpleNamespace
+
+        engine = self._bare_engine()
+        engine._model_load_executor = concurrent.futures.ThreadPoolExecutor(1)
+        preflight = MagicMock()
+        engine._engine = SimpleNamespace(
+            engine=SimpleNamespace(
+                scheduler=SimpleNamespace(preflight_metal_admission=preflight)
+            )
+        )
+        try:
+            engine._run_metal_admission_preflight()
+            preflight.assert_called_once()
+            preflight.side_effect = MetalPreflightError("impossible budget")
+            with pytest.raises(MetalPreflightError):
+                engine._run_metal_admission_preflight()
+        finally:
+            engine._model_load_executor.shutdown(wait=True)
