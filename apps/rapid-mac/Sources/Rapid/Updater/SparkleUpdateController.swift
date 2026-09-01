@@ -83,11 +83,13 @@ final class SparkleUpdateController {
     /// Foreground check used by menu and Settings commands. The standard
     /// Sparkle UI reports current/update/error states and, when an update was
     /// already downloaded in the background, offers the install action.
-    func checkForUpdates() {
-        guard isEnabled else { return }
+    @discardableResult
+    func checkForUpdates() -> Bool {
+        guard isEnabled else { return false }
         if !isStarted { start() }
-        guard canCheckForUpdates else { return }
-        standardController?.checkForUpdates(nil)
+        guard canCheckForUpdates, let standardController else { return false }
+        standardController.checkForUpdates(nil)
+        return true
     }
 
     func setAutomaticallyDownloadsUpdates(_ enabled: Bool) {

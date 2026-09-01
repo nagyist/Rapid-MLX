@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Rapid
 
@@ -46,6 +47,43 @@ struct UpdateDiscoveryCardTests {
             blockingOverlayVisible: false,
             hasAction: true
         ))
+    }
+
+    @Test("Sparkle hand-off is recorded only after the check is accepted")
+    func handoffRequiresAcceptance() {
+        var handedOff: String?
+        #expect(!ContentView.handOffUpdate(
+            version: "0.13.4",
+            start: { false },
+            onAccepted: { handedOff = $0 }
+        ))
+        #expect(handedOff == nil)
+
+        #expect(ContentView.handOffUpdate(
+            version: "0.13.4",
+            start: { true },
+            onAccepted: { handedOff = $0 }
+        ))
+        #expect(handedOff == "0.13.4")
+    }
+
+    @Test("Manual download dismisses only after Launch Services accepts the URL")
+    func manualDownloadRequiresSuccessfulOpen() throws {
+        let url = try #require(URL(string: "https://example.com/releases/0.13.4"))
+        var dismissals = 0
+        #expect(!UpdateDiscoveryCard.openManualDownload(
+            url,
+            using: { _ in false },
+            onOpened: { dismissals += 1 }
+        ))
+        #expect(dismissals == 0)
+
+        #expect(UpdateDiscoveryCard.openManualDownload(
+            url,
+            using: { $0 == url },
+            onOpened: { dismissals += 1 }
+        ))
+        #expect(dismissals == 1)
     }
 
     @Test("Onboarding and blocking overlays defer presentation")

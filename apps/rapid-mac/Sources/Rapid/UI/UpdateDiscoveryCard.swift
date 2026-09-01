@@ -13,6 +13,17 @@ struct UpdateDiscoveryCard: View {
     let onUpdate: () -> Void
     let onDismiss: () -> Void
 
+    @discardableResult
+    static func openManualDownload(
+        _ url: URL,
+        using opener: (URL) -> Bool,
+        onOpened: () -> Void
+    ) -> Bool {
+        guard opener(url) else { return false }
+        onOpened()
+        return true
+    }
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -73,8 +84,11 @@ struct UpdateDiscoveryCard: View {
                 .accessibilityIdentifier("UpdateCard.Update")
             } else if let releaseURL {
                 Button {
-                    NSWorkspace.shared.open(releaseURL)
-                    onDismiss()
+                    Self.openManualDownload(
+                        releaseURL,
+                        using: NSWorkspace.shared.open,
+                        onOpened: onDismiss
+                    )
                 } label: {
                     Label("Download from release page", systemImage: "arrow.up.right.square")
                         .frame(maxWidth: .infinity)

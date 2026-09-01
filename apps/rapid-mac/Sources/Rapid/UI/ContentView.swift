@@ -174,6 +174,20 @@ struct ContentView: View {
             && handedOffVersion != releaseVersion
     }
 
+    /// Record the visual ownership transfer only after Sparkle accepts the
+    /// foreground check. Its KVO state can change after SwiftUI renders an
+    /// enabled button but before the action executes.
+    @discardableResult
+    static func handOffUpdate(
+        version: String,
+        start: () -> Bool,
+        onAccepted: (String) -> Void
+    ) -> Bool {
+        guard start() else { return false }
+        onAccepted(version)
+        return true
+    }
+
     private var presentedUpdateRelease: UpdateChecker.Release? {
         guard let release = updater.availableUpdate else { return nil }
         let releaseURL = Self.missingOverlayDownloadURL(for: release)
@@ -236,10 +250,10 @@ struct ContentView: View {
                     sparkleCanCheck: sparkleUpdater.canCheckForUpdates,
                     releaseURL: Self.missingOverlayDownloadURL(for: release),
                     onUpdate: {
-                        // Hide first so the visual ownership transfer is
-                        // atomic even when Sparkle presents synchronously.
-                        updateHandedOffVersion = release.version
-                        sparkleUpdater.checkForUpdates()
+                        Self.handOffUpdate(
+                            version: release.version,
+                            start: sparkleUpdater.checkForUpdates
+                        ) { updateHandedOffVersion = $0 }
                     },
                     onDismiss: {
                         dismissedUpdateVersion = release.version

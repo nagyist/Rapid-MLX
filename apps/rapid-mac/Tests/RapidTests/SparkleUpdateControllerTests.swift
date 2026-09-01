@@ -73,5 +73,17 @@ struct SparkleUpdateControllerTests {
         controller.start()
         #expect(controller.isStarted)
         #expect(!controller.canCheckForUpdates)
+        #expect(!controller.checkForUpdates())
+    }
+
+    @MainActor
+    @Test("disabled controller rejects foreground update hand-off")
+    func disabledCheckIsRejected() {
+        let controller = SparkleUpdateController(
+            infoDictionary: [:],
+            checksEnabled: false
+        )
+        #expect(!controller.checkForUpdates())
+        #expect(!controller.isStarted)
     }
 }
