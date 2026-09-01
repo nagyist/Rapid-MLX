@@ -59,6 +59,23 @@ def test_atomic_policy_requires_strictly_increasing_ram_floors(monkeypatch) -> N
         recommendations.load_recommendation_tiers.cache_clear()
 
 
+def test_atomic_policy_requires_display_capability_score(monkeypatch) -> None:
+    from vllm_mlx import recommendations
+    from vllm_mlx.catalog import load_product_recommendation_policy
+
+    policy = deepcopy(load_product_recommendation_policy())
+    del policy["tiers"][0]["picks"][0]["capability_score_x100"]
+    monkeypatch.setattr(
+        recommendations, "load_product_recommendation_policy", lambda: policy
+    )
+    recommendations.load_recommendation_tiers.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="requires capability_score_x100"):
+            recommendations.load_recommendation_tiers()
+    finally:
+        recommendations.load_recommendation_tiers.cache_clear()
+
+
 def test_every_tier_has_exactly_smart_and_fast() -> None:
     tiers = load_recommendation_tiers()
     assert [tier.floor_gb for tier in tiers] == [8, 16, 18, 24, 32, 48, 64, 96]

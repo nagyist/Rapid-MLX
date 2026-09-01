@@ -330,6 +330,24 @@ struct RAMBucketedDefaultTests {
         )
         #expect(decoded[0].primary.capabilityPct == 0)
     }
+
+    @Test("Atomic policy rejects a score the current display requires but omits")
+    func atomicPolicyRequiresDisplayCapability() throws {
+        var policy = try #require(
+            JSONSerialization.jsonObject(with: policyData()) as? [String: Any]
+        )
+        var tiers = try #require(policy["tiers"] as? [[String: Any]])
+        var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
+        picks[0].removeValue(forKey: "capability_score_x100")
+        tiers[0]["picks"] = picks
+        policy["tiers"] = tiers
+
+        #expect(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try addressedPolicyData(policy)
+            ) == nil
+        )
+    }
 }
 
 // MARK: - SafeDefaultFallback (codex r2 BLOCKING on #165)

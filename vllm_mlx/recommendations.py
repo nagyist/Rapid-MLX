@@ -61,7 +61,12 @@ def load_recommendation_tiers() -> tuple[RecommendationTier, ...]:
                 raise ValueError(
                     "recommendation display supports at most one limitation ID"
                 )
-            score = int(raw["capability_score_x100"])
+            score_value = raw.get("capability_score_x100")
+            if score_value is None:
+                raise ValueError(
+                    "recommendation display requires capability_score_x100"
+                )
+            score = int(score_value)
             if score % 100:
                 raise ValueError(
                     "capability score cannot be represented as a whole percent"
