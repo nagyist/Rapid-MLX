@@ -2076,7 +2076,6 @@ def run_dflash_server(
     tool_call_parser: str | None = "hermes",
     reasoning_parser_name: str | None = "qwen3",
     experimental_opt_in: bool = False,
-    verified_pair: bool = False,
     expected_algorithm: str | None = None,
 ) -> None:
     """Load the model + DFlash drafter via mlx-vlm and start uvicorn.
@@ -2107,16 +2106,26 @@ def run_dflash_server(
             "for optional extras."
         )
 
-    from .eligibility import DFlashUnavailable, _looks_like_4bit
+    from .eligibility import (
+        DFlashUnavailable,
+        _looks_like_4bit,
+        is_registry_verified_pair,
+    )
+
+    registry_verified_pair = is_registry_verified_pair(
+        main_model_repo,
+        drafter_repo,
+        expected_algorithm,
+    )
 
     if _looks_like_4bit(main_model_repo):
-        if not (experimental_opt_in or verified_pair):
+        if not (experimental_opt_in or registry_verified_pair):
             raise DFlashUnavailable(
                 "4-bit DFlash is unverified. Programmatic callers must pass "
                 "experimental_opt_in=True after accepting that it may provide "
                 "no speedup or may be slower than autoregressive decoding."
             )
-        if not verified_pair:
+        if not registry_verified_pair:
             logger.warning(
                 "Experimental DFlash: this 4-bit target/drafter pair has not "
                 "been performance-validated by Rapid-MLX and may be slower"

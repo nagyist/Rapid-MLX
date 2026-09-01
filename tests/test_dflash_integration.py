@@ -204,6 +204,27 @@ def test_programmatic_4bit_requires_explicit_experimental_opt_in(monkeypatch) ->
         )
 
 
+def test_programmatic_dflash2_identity_cannot_bypass_registry_qualification(
+    monkeypatch,
+) -> None:
+    from vllm_mlx.speculative.dflash.eligibility import DFlashUnavailable
+    from vllm_mlx.speculative.dflash.server import run_dflash_server
+
+    monkeypatch.setattr("vllm_mlx.speculative.dflash.server.have_runtime", lambda: True)
+    with pytest.raises(DFlashUnavailable, match="experimental_opt_in=True"):
+        run_dflash_server(
+            main_model_repo="user/target-4bit",
+            drafter_repo="user/dflash2",
+            expected_algorithm="dflash2",
+            host="127.0.0.1",
+            port=8000,
+            served_model_name="target",
+            default_max_tokens=32,
+            cors_origins=[],
+            uvicorn_log_level="error",
+        )
+
+
 def test_dflash_preflight_rejects_legacy_mtp_alias(capsys) -> None:
     from vllm_mlx.cli import _preflight_dflash_mutexes_or_exit
 

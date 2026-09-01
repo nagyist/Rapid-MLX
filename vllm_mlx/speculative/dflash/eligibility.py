@@ -144,6 +144,38 @@ def eligible_aliases() -> list[str]:
         return []
 
 
+def is_registry_verified_pair(
+    main_model_repo: str,
+    drafter_repo: str,
+    expected_algorithm: str | None,
+) -> bool:
+    """Return whether the exact runtime tuple is registry-qualified.
+
+    The server uses this instead of trusting a caller-supplied bypass boolean.
+    Every component must match one profile whose normal eligibility report is
+    verified; arbitrary programmatic callers therefore retain the explicit
+    experimental opt-in requirement.
+    """
+    if not main_model_repo or not drafter_repo or not expected_algorithm:
+        return False
+    try:
+        from vllm_mlx.model_aliases import list_profiles
+
+        for alias, profile in list_profiles().items():
+            if (
+                profile.hf_path == main_model_repo
+                and profile.dflash_draft_model == drafter_repo
+                and profile.dflash_algorithm == expected_algorithm
+            ):
+                assessment = report(profile, alias=alias)
+                return (
+                    not assessment.reasons and assessment.recommendation == "verified"
+                )
+    except Exception:  # noqa: BLE001 — qualification lookup must fail closed
+        return False
+    return False
+
+
 def check(
     profile: AliasProfile,
     alias: str | None = None,

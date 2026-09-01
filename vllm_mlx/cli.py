@@ -4109,7 +4109,6 @@ def serve_command(args):
             ),
             reasoning_parser_name=args.reasoning_parser,
             experimental_opt_in=getattr(args, "_dflash_experimental", False),
-            verified_pair=not getattr(args, "_dflash_experimental", False),
             expected_algorithm=(
                 _resolve_dflash_expected_algorithm(
                     _profile, getattr(args, "_dflash_drafter_repo", None)

@@ -15,6 +15,7 @@ from vllm_mlx.speculative.dflash.eligibility import (
     DFlashUnavailable,
     _looks_like_4bit,
     check,
+    is_registry_verified_pair,
     report,
 )
 
@@ -128,6 +129,25 @@ def test_legacy_dflash_4bit_cannot_become_curated_by_registry_flag_alone() -> No
     assert "explicit experimental opt-in" in " ".join(result.reasons)
     with pytest.raises(DFlashUnavailable, match="explicit experimental opt-in"):
         check(profile, alias="legacy-4bit")
+
+
+def test_registry_pair_receipt_requires_exact_verified_tuple(monkeypatch) -> None:
+    from vllm_mlx import model_aliases
+
+    profile = AliasProfile(
+        hf_path="user/target-4bit",
+        supports_dflash=True,
+        dflash_draft_model="user/dflash2",
+        dflash_algorithm="dflash2",
+    )
+    monkeypatch.setattr(model_aliases, "list_profiles", lambda: {"target": profile})
+
+    assert is_registry_verified_pair("user/target-4bit", "user/dflash2", "dflash2")
+    assert not is_registry_verified_pair("user/other-4bit", "user/dflash2", "dflash2")
+    assert not is_registry_verified_pair(
+        "user/target-4bit", "user/other-drafter", "dflash2"
+    )
+    assert not is_registry_verified_pair("user/target-4bit", "user/dflash2", "dflash")
 
 
 def test_check_message_lists_eligible_aliases() -> None:
