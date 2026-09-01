@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fail-closed contracts for the managed batch merge queue."""
 
+import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -163,7 +165,11 @@ def test_ready_authorization_is_bound_to_the_exact_head_commit():
     assert "head.repo.full_name == github.repository" in job["if"]
     assert "merge-ready" in job["if"]
     assert "merge-ready-mac" in job["if"]
-    assert job["permissions"] == {"issues": "write", "statuses": "write"}
+    assert job["permissions"] == {
+        "issues": "write",
+        "pull-requests": "read",
+        "statuses": "write",
+    }
 
     (step,) = job["steps"]
     assert step["uses"].startswith("actions/github-script@")
@@ -172,8 +178,130 @@ def test_ready_authorization_is_bound_to_the_exact_head_commit():
     assert "sha: context.payload.pull_request.head.sha" in script
     assert 'context: "merge-ready-head"' in script
     assert "present.length === 1" in script
+    assert "GITHUB_RUN_ATTEMPT" in script
+    assert "github.rest.pulls.get" in script
+    assert "livePull.head.sha === context.payload.pull_request.head.sha" in script
     assert 'currentLabels.has("dequeued")' in script
     assert 'name: "dequeued"' in script
     assert "authorized &&" in script
     assert "error.status !== 404" in script
     assert "checkout" not in script.lower()
+
+
+def _run_authorization_script(
+    *,
+    labels: list[str],
+    run_attempt: int = 1,
+    event_label: str = "merge-ready-mac",
+    live_head: str = "head-sha",
+    fail_status_call: int | None = None,
+) -> dict[str, object]:
+    """Execute the exact github-script body against deterministic API mocks."""
+
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/authorize-merge-ready.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+    script = workflow["jobs"]["authorize-ready-head"]["steps"][0]["with"]["script"]
+    scenario = json.dumps(
+        {
+            "labels": labels,
+            "runAttempt": run_attempt,
+            "eventLabel": event_label,
+            "liveHead": live_head,
+            "failStatusCall": fail_status_call,
+        }
+    )
+    harness = f"""
+const scenario = {scenario};
+const calls = [];
+let statusCalls = 0;
+process.env.GITHUB_RUN_ATTEMPT = String(scenario.runAttempt);
+const context = {{
+  repo: {{ owner: "owner", repo: "repo" }},
+  issue: {{ number: 42 }},
+  serverUrl: "https://github.example",
+  payload: {{
+    label: {{ name: scenario.eventLabel }},
+    pull_request: {{ head: {{ sha: "head-sha" }} }},
+  }},
+}};
+const github = {{ rest: {{
+  pulls: {{ get: async () => {{
+    calls.push(["get"]);
+    return {{ data: {{
+      head: {{ sha: scenario.liveHead }},
+      labels: scenario.labels.map((name) => ({{ name }})),
+    }} }};
+  }} }},
+  repos: {{ createCommitStatus: async (args) => {{
+    statusCalls += 1;
+    calls.push(["status", args.state]);
+    if (scenario.failStatusCall === statusCalls) throw Object.assign(new Error("status failure"), {{ status: 500 }});
+  }} }},
+  issues: {{ removeLabel: async () => {{ calls.push(["remove"]); }} }},
+}} }};
+const core = {{
+  setFailed: (message) => calls.push(["failed", message]),
+  notice: (message) => calls.push(["notice", message]),
+}};
+(async () => {{
+  try {{
+    await (async () => {{
+{script}
+    }})();
+  }} catch (error) {{
+    calls.push(["threw", error.message]);
+  }}
+  process.stdout.write(JSON.stringify(calls));
+}})();
+"""
+    completed = subprocess.run(
+        ["node", "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {"calls": json.loads(completed.stdout)}
+
+
+def test_dequeued_head_is_blocked_before_marker_removal_then_reauthorized():
+    result = _run_authorization_script(labels=["merge-ready-mac", "dequeued"])
+    operations = [call[0] for call in result["calls"]]
+
+    assert operations == ["get", "status", "remove", "notice", "status"]
+    assert [call[1] for call in result["calls"] if call[0] == "status"] == [
+        "pending",
+        "success",
+    ]
+
+
+def test_status_failure_cannot_remove_the_dequeue_circuit_breaker():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"], fail_status_call=1
+    )
+
+    assert result["calls"] == [
+        ["get"],
+        ["status", "pending"],
+        ["threw", "status failure"],
+    ]
+
+
+def test_historical_authorization_rerun_cannot_clear_a_newer_dequeue():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"], run_attempt=2
+    )
+
+    assert result["calls"][0][0] == "failed"
+    assert all(call[0] not in {"get", "status", "remove"} for call in result["calls"])
+
+
+def test_stale_head_or_double_ready_labels_cannot_clear_dequeue():
+    for labels, live_head in (
+        (["merge-ready-mac", "dequeued"], "new-head"),
+        (["merge-ready", "merge-ready-mac", "dequeued"], "head-sha"),
+    ):
+        result = _run_authorization_script(labels=labels, live_head=live_head)
+        assert [call[0] for call in result["calls"]] == ["get", "status", "failed"]
+        assert result["calls"][1] == ["status", "failure"]
