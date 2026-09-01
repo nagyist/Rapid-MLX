@@ -150,6 +150,32 @@ def test_registry_pair_receipt_requires_exact_verified_tuple(monkeypatch) -> Non
     assert not is_registry_verified_pair("user/target-4bit", "user/dflash2", "dflash")
 
 
+def test_registry_pair_searches_past_duplicate_experimental_alias(monkeypatch) -> None:
+    from vllm_mlx import model_aliases
+
+    experimental = AliasProfile(
+        hf_path="user/shared-target-4bit",
+        supports_dflash=False,
+        dflash_draft_model="user/shared-dflash2",
+        dflash_algorithm="dflash2",
+    )
+    verified = AliasProfile(
+        hf_path="user/shared-target-4bit",
+        supports_dflash=True,
+        dflash_draft_model="user/shared-dflash2",
+        dflash_algorithm="dflash2",
+    )
+    monkeypatch.setattr(
+        model_aliases,
+        "list_profiles",
+        lambda: {"experimental-first": experimental, "verified-second": verified},
+    )
+
+    assert is_registry_verified_pair(
+        "user/shared-target-4bit", "user/shared-dflash2", "dflash2"
+    )
+
+
 def test_check_message_lists_eligible_aliases() -> None:
     """Error messages must point users at a working alias — saves a
     docs round-trip."""

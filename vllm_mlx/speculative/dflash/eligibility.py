@@ -168,9 +168,8 @@ def is_registry_verified_pair(
                 and profile.dflash_algorithm == expected_algorithm
             ):
                 assessment = report(profile, alias=alias)
-                return (
-                    not assessment.reasons and assessment.recommendation == "verified"
-                )
+                if not assessment.reasons and assessment.recommendation == "verified":
+                    return True
     except Exception:  # noqa: BLE001 — qualification lookup must fail closed
         return False
     return False
