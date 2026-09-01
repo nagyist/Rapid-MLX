@@ -575,6 +575,7 @@ class TestHealthRoutes:
                 "prompt_lookup_drafted_tokens": 96.0,
                 "prompt_lookup_accepted_tokens": 91.0,
                 "prompt_lookup_rejections": 2.0,
+                "prompt_lookup_cache_fallthroughs": 3.0,
             },
         }
         orig = self._patch_config(engine=mock_engine, model_name="test-model")
@@ -582,6 +583,7 @@ class TestHealthRoutes:
             data = TestClient(self._make_app()).get("/v1/status").json()
             assert data["mtp_prompt_lookup"]["prompt_lookup_proposals"] == 12.0
             assert data["mtp_prompt_lookup"]["prompt_lookup_accepted_tokens"] == 91.0
+            assert data["mtp_prompt_lookup"]["prompt_lookup_cache_fallthroughs"] == 3.0
         finally:
             self._restore_config(orig)
 

@@ -2383,11 +2383,19 @@ class _CountingKVCache:
     def is_trimmable(self):
         return True
 
+    def can_trim(self, n):
+        return 0 <= n <= self.offset
+
+    def size(self):
+        return self.offset
+
     def trim(self, n):
         if n < 0:
             raise AssertionError(f"negative trim: {n}")
         self.trim_calls.append(n)
-        self.offset -= min(self.offset, n)
+        trimmed = min(self.offset, n)
+        self.offset -= trimmed
+        return trimmed
 
 
 class _CacheAdvancingQwen35Model(_MockedQwen35Model):

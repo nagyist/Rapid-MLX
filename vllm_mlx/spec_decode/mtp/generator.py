@@ -119,6 +119,25 @@ def _prompt_lookup_is_enabled(model, requested: bool | None = None) -> bool:
     }
 
 
+def _safe_prompt_lookup_draft_count(model_cache, desired: int) -> int:
+    """Return the largest proposal whose full rejection is recoverable."""
+    from vllm_mlx.cache_rollback import can_advance
+
+    def _can_recover(cache, count: int) -> bool:
+        # Qwen4 recurrent layers publish per-position snapshots during the
+        # verify forward and restore them through this amount-aware API. They
+        # do not implement trim(), so only trim-owned attention caches need
+        # the pre-forward can_advance check.
+        if callable(getattr(cache, "restore_rollback", None)):
+            return True
+        return can_advance(cache, count)
+
+    for count in range(desired, 0, -1):
+        if all(_can_recover(cache, count) for cache in model_cache):
+            return count
+    return 0
+
+
 patch_arrays_cache_rollback_state()
 
 logger = logging.getLogger(__name__)
@@ -526,10 +545,12 @@ def mtp_generate_step(
         Attention layers (KVCache): trim the last ``n_to_drop`` draft
         entries.
         """
+        trim_caches = []
+        snapshot_caches = []
         for c in model_cache:
             restore = getattr(c, "restore_rollback", None)
             if callable(restore) and getattr(c, "rollback_state", None) is not None:
-                restore(n_to_drop, verify_size)
+                snapshot_caches.append((c, restore, None))
             elif hasattr(c, "rollback_state") and c.rollback_state is not None:
                 snapshots = c.rollback_state
                 if isinstance(snapshots, list):
@@ -550,11 +571,26 @@ def mtp_generate_step(
                             "legacy SSM snapshot can only roll back one token"
                         )
                     conv_snap, ssm_snap = snapshots
-                c[0] = conv_snap
-                c[1] = ssm_snap
+                snapshot_caches.append((c, None, (conv_snap, ssm_snap)))
+            else:
+                trim_caches.append(c)
+
+        # Composite attention caches must agree on the complete amount before
+        # any leaf mutates. In particular, QSA may be able to trim one token
+        # while refusing a larger rollback across its retained raw-key group.
+        if trim_caches:
+            from vllm_mlx.cache_rollback import trim_all
+
+            if not trim_all(trim_caches, n_to_drop):
+                raise RuntimeError(
+                    "prompt/MTP target cache violated speculative rollback preflight"
+                )
+        for c, restore, snapshots in snapshot_caches:
+            if restore is not None:
+                restore(n_to_drop, verify_size)
+            else:
+                c[0], c[1] = snapshots
                 c.rollback_state = None
-            elif c.is_trimmable():
-                c.trim(n_to_drop)
 
     def _rollback_verify_round(n_to_drop: int, verify_size: int | None = None) -> None:
         """Roll back uncommitted target + MTP draft state for one verify round."""
@@ -928,6 +964,11 @@ def mtp_generate_step(
         confidence_ladder = (8, 12, 16, 24, 32)
         confidence_cap = confidence_ladder[min(extension, len(confidence_ladder) - 1)]
         proposed_tokens = match.tokens[:confidence_cap]
+        safe_count = _safe_prompt_lookup_draft_count(model_cache, len(proposed_tokens))
+        if safe_count == 0:
+            _timing_add("prompt_lookup_cache_fallthroughs", 1.0)
+            return None
+        proposed_tokens = proposed_tokens[:safe_count]
         _timing_add("prompt_lookup_proposals", 1.0)
         _timing_add("prompt_lookup_drafted_tokens", float(len(proposed_tokens)))
         _timing_add("prompt_lookup_matched_suffix_tokens", float(match.matched_suffix))

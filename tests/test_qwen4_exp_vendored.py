@@ -709,6 +709,30 @@ def test_scheduler_rollback_preflights_qsa_cachelist_for_full_rejection():
     assert kv.offset == qsa.offset == 8
 
 
+def test_prompt_lookup_clips_draft_to_qsa_recoverable_window():
+    """PLD never verifies more tokens than every Qwen4 cache can undo."""
+    from vllm_mlx.spec_decode.mtp.generator import (
+        _safe_prompt_lookup_draft_count,
+    )
+
+    kv = KVCache()
+    keys = mx.arange(9, dtype=mx.float32).reshape(1, 1, 9, 1)
+    kv.update_and_fetch(keys, -keys)
+    qsa = QSAIndexCache(compress_ratio=4)
+    qsa.update(
+        mx.arange(9, dtype=mx.float32).reshape(1, 9, 1),
+        lambda group, start: group + start,
+    )
+    cache = CacheList(kv, qsa)
+    recurrent = Qwen4ExpStateCache(size=2)
+
+    # At offset 9 the retained raw group can undo one token, not two. The
+    # proposal is shortened before target verification mutates either leaf;
+    # the recurrent layer is admitted through its snapshot-restore contract.
+    assert _safe_prompt_lookup_draft_count([recurrent, cache], 2) == 1
+    assert kv.offset == qsa.offset == 9
+
+
 def test_suffix_scheduler_falls_through_before_qsa_multitoken_verify():
     from vllm_mlx.scheduler import _install_suffix_decoding
 

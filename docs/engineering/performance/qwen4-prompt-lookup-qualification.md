@@ -12,7 +12,9 @@ Prompt-lookup drafting (PLD) is qualified for greedy native-MTP requests on
 
 The policy is captured with the immutable prompt at request start. Every
 proposal is verified by the target model, and only the accepted prefix is
-committed to the target and MTP caches.
+committed to the target and MTP caches. Before verification, the proposal is
+shortened to the largest amount every composite target cache can roll back;
+if no safe amount exists, that round uses ordinary MTP.
 
 The PLD adaptation and high-overlap optimization direction were contributed by
 Pierre Lamy in PR #2809. This qualification narrows that contribution to the
@@ -80,7 +82,8 @@ PLD run.
   and off for every measured run (15/15).
 - Model-free tests cover full acceptance, partial rejection, target/MTP cache
   alignment, request-scoped prompt history, explicit opt-out, sampled-request
-  exclusion, and cancellation during target verification.
+  exclusion, cancellation during target verification, and amount-aware QSA
+  rollback admission across a compression boundary.
 
 ## Why the old defaults were rejected
 
