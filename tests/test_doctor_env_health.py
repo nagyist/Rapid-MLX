@@ -1852,28 +1852,47 @@ def test_remote_probe_accepts_trusted_single_file_module(
 
 
 def test_remote_probe_does_not_report_unbound_spec_on_bad_finder(tmp_path):
-    source = """\
-import importlib.util
-import json
-import sys
-
-spec = None
-trusted_origin = spec is not None
-try:
-    spec = importlib.util.find_spec(sys.argv[1])
-    trusted_origin = spec is not None
-except Exception:
-    pass
-print(json.dumps({"spec": spec, "trusted_origin": trusted_origin}))
-"""
+    finder_path = tmp_path / "bad_finder.py"
+    finder_path.write_text(
+        "class BadFinder:\n"
+        "    def find_spec(self, _name, _path=None, _target=None):\n"
+        "        raise RuntimeError('malformed package finder')\n"
+        "\n"
+        "def install():\n"
+        "    import sys\n"
+        "    sys.meta_path.insert(0, BadFinder())\n"
+    )
+    wrapper = (
+        "import json\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "import importlib.metadata\n"
+        "import importlib.util\n"
+        "import bad_finder\n"
+        "bad_finder.install()\n"
+        f"exec(compile({eh._PROBE_SCRIPT!r}, '<probe>', 'exec'))\n"
+    )
     result = json.loads(
         subprocess.check_output(  # noqa: S603
-            [sys.executable, "-I", "-c", source, "probe_bad_finder"],
+            [
+                sys.executable,
+                "-c",
+                wrapper,
+                '{"bad-package": "probe_bad_finder"}',
+                '{"trusted": [], "context": []}',
+            ],
             text=True,
             cwd="/",
+            env={**os.environ, "PYTHONPATH": str(tmp_path)},
         )
     )
-    assert result == {"spec": None, "trusted_origin": False}
+    assert result["packages"]["bad-package"] == {
+        "importable": None,
+        "discoverable": False,
+        "trusted_origin": False,
+        "module": "probe_bad_finder",
+        "version": None,
+    }
 
 
 def test_context_module_without_metadata_is_visible_but_unverified(

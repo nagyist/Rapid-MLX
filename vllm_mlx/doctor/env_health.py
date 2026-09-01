@@ -674,9 +674,14 @@ for distribution, module_name in distributions.items():
         version = None
     except (Exception, SystemExit):
         version = None
-    spec = importlib.util.find_spec(module_name)
-    discoverable = spec is not None
-    trusted_origin = spec is not None and _module_path_is_trusted(spec)
+    try:
+        spec = importlib.util.find_spec(module_name)
+        discoverable = spec is not None
+        trusted_origin = spec is not None and _module_path_is_trusted(spec)
+    except (Exception, SystemExit):
+        spec = None
+        discoverable = False
+        trusted_origin = False
     packages[distribution] = {
         "importable": None,
         "discoverable": discoverable,
