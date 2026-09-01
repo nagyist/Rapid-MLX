@@ -151,19 +151,29 @@ def test_head_updates_revoke_both_merge_ready_authorizations():
     assert "merge-ready-mac" in job["if"]
     assert "merge-requeue-required" in job["if"]
     assert "merge-requeue-trigger" in job["if"]
-    assert job["permissions"] == {"pull-requests": "write"}
+    assert job["permissions"] == {"issues": "write", "pull-requests": "read"}
 
     (step,) = job["steps"]
     assert step["uses"].startswith("actions/github-script@")
     script = step["with"]["script"]
     assert '"merge-requeue-required"' in script
     assert '"merge-requeue-trigger"' in script
+    assert "github.rest.pulls.get" in script
+    assert "github.paginate" in script
+    assert "github.rest.issues.listEvents" in script
+    assert "context.payload.pull_request.updated_at" in script
     assert "github.rest.issues.removeLabel" in script
     assert "checkout" not in script.lower()
 
 
 def _run_revocation_script(
-    *, labels: list[str], remove_errors: dict[str, int] | None = None
+    *,
+    labels: list[str],
+    remove_errors: dict[str, int] | None = None,
+    sync_updated_at: str = "2026-09-01T04:00:00Z",
+    label_event_at: str = "2026-09-01T03:59:00Z",
+    event_head: str = "head-sha",
+    live_head: str = "head-sha",
 ) -> list[list[str]]:
     """Execute the exact revocation github-script against deterministic mocks."""
 
@@ -172,7 +182,16 @@ def _run_revocation_script(
         Loader=yaml.BaseLoader,
     )
     script = workflow["jobs"]["revoke-merge-ready"]["steps"][0]["with"]["script"]
-    scenario = json.dumps({"labels": labels, "removeErrors": remove_errors or {}})
+    scenario = json.dumps(
+        {
+            "labels": labels,
+            "removeErrors": remove_errors or {},
+            "syncUpdatedAt": sync_updated_at,
+            "labelEventAt": label_event_at,
+            "eventHead": event_head,
+            "liveHead": live_head,
+        }
+    )
     harness = f"""
 const scenario = {scenario};
 const calls = [];
@@ -180,14 +199,37 @@ const context = {{
   repo: {{ owner: "owner", repo: "repo" }},
   issue: {{ number: 42 }},
   payload: {{
-    pull_request: {{ labels: scenario.labels.map((name) => ({{ name }})) }},
+    pull_request: {{
+      labels: scenario.labels.map((name) => ({{ name }})),
+      head: {{ sha: scenario.eventHead }},
+      updated_at: scenario.syncUpdatedAt,
+    }},
   }},
 }};
-const github = {{ rest: {{ issues: {{ removeLabel: async (args) => {{
-  calls.push(["remove", args.name]);
-  const status = scenario.removeErrors[args.name];
-  if (status) throw Object.assign(new Error(`remove ${{args.name}} failure`), {{ status }});
-}} }} }} }};
+const github = {{
+  paginate: async () => {{
+    calls.push(["events"]);
+    return scenario.labels.map((name) => ({{
+      event: "labeled",
+      label: {{ name }},
+      created_at: scenario.labelEventAt,
+    }}));
+  }},
+  rest: {{
+    pulls: {{ get: async () => {{
+      calls.push(["get"]);
+      return {{ data: {{
+        head: {{ sha: scenario.liveHead }},
+        labels: scenario.labels.map((name) => ({{ name }})),
+      }} }};
+    }} }},
+    issues: {{ removeLabel: async (args) => {{
+      calls.push(["remove", args.name]);
+      const status = scenario.removeErrors[args.name];
+      if (status) throw Object.assign(new Error(`remove ${{args.name}} failure`), {{ status }});
+    }} }},
+  }},
+}};
 const core = {{ notice: (message) => calls.push(["notice", message]) }};
 (async () => {{
   try {{
@@ -234,8 +276,32 @@ def test_head_update_revocation_propagates_non_404_failure():
     )
 
     assert calls == [
+        ["get"],
+        ["events"],
         ["remove", "merge-ready-mac"],
         ["threw", "remove merge-ready-mac failure"],
+    ]
+
+
+def test_delayed_head_revocation_preserves_new_authorization():
+    calls = _run_revocation_script(
+        labels=["merge-ready-mac", "merge-requeue-required"],
+        label_event_at="2026-09-01T04:01:00Z",
+    )
+
+    assert [call[0] for call in calls] == ["get", "events", "notice", "notice"]
+    assert all(call[0] != "remove" for call in calls)
+
+
+def test_stale_synchronize_event_cannot_touch_a_newer_head():
+    calls = _run_revocation_script(
+        labels=["merge-ready-mac", "merge-requeue-required"],
+        live_head="newer-head",
+    )
+
+    assert calls == [
+        ["get"],
+        ["notice", "A newer head exists; this synchronize event is stale."],
     ]
 
 
@@ -291,6 +357,7 @@ def _run_authorization_script(
     remove_error_status: int | None = None,
     ready_event_at: str = "2026-09-01T04:01:00Z",
     dequeue_event_at: str = "2026-09-01T04:00:00Z",
+    late_dequeue_event_at: str | None = None,
     fail_events: bool = False,
 ) -> dict[str, object]:
     """Execute the exact github-script body against deterministic API mocks."""
@@ -312,6 +379,7 @@ def _run_authorization_script(
             "removeErrorStatus": remove_error_status,
             "readyEventAt": ready_event_at,
             "dequeueEventAt": dequeue_event_at,
+            "lateDequeueEventAt": late_dequeue_event_at,
             "failEvents": fail_events,
         }
     )
@@ -319,6 +387,7 @@ def _run_authorization_script(
 const scenario = {scenario};
 const calls = [];
 let statusCalls = 0;
+let eventCalls = 0;
 process.env.GITHUB_RUN_ATTEMPT = String(scenario.runAttempt);
 const context = {{
   repo: {{ owner: "owner", repo: "repo" }},
@@ -332,10 +401,14 @@ const context = {{
 const github = {{
   paginate: async () => {{
     calls.push(["events"]);
+    eventCalls += 1;
     if (scenario.failEvents) throw Object.assign(new Error("events failure"), {{ status: 500 }});
+    const dequeueAt = eventCalls > 1 && scenario.lateDequeueEventAt
+      ? scenario.lateDequeueEventAt
+      : scenario.dequeueEventAt;
     return [
       {{ event: "labeled", label: {{ name: scenario.eventLabel }}, created_at: scenario.readyEventAt }},
-      {{ event: "labeled", label: {{ name: "dequeued" }}, created_at: scenario.dequeueEventAt }},
+      {{ event: "labeled", label: {{ name: "dequeued" }}, created_at: dequeueAt }},
     ];
   }},
   rest: {{
@@ -398,6 +471,7 @@ def test_dequeued_head_is_blocked_before_marker_removal_then_reauthorized():
         "add",
         "remove",
         "notice",
+        "events",
         "status",
     ]
     assert [call[1] for call in result["calls"] if call[0] == "status"] == [
@@ -524,7 +598,31 @@ def test_concurrent_marker_removal_proceeds_to_final_authorization():
         ["events"],
         ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["remove"],
+        ["events"],
         ["status", "success"],
+    ]
+
+
+def test_new_dequeue_between_check_and_removal_restores_circuit_breaker():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"],
+        late_dequeue_event_at="2026-09-01T04:02:00Z",
+    )
+
+    assert result["calls"] == [
+        ["status", "pending"],
+        ["get"],
+        ["events"],
+        ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
+        ["remove"],
+        [
+            "notice",
+            "Cleared stale dequeued state before re-authorizing merge-ready-mac.",
+        ],
+        ["events"],
+        ["add", ["dequeued"]],
+        ["status", "failure"],
+        ["failed", "Re-apply merge-ready after the latest dequeue"],
     ]
 
 
@@ -551,6 +649,7 @@ def test_final_status_failure_leaves_trigger_blocked_and_retryable():
             "notice",
             "Cleared stale dequeued state before re-authorizing merge-ready-mac.",
         ],
+        ["events"],
         ["status", "success"],
         ["threw", "status failure"],
     ]

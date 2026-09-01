@@ -153,7 +153,10 @@ The queue contract lives in `.mergify.yml`:
   `merge-requeue-trigger`. The matching action consumes the trigger while
   queueing the head again. The persistent recovery marker allows another fresh
   authorization to mint a replacement if the provider only partially executes
-  its actions, and every head update removes it. Removing `dequeued` alone
+  its actions. After clearing `dequeued`, the workflow reads the event history
+  again; if a newer dequeue raced the removal, it restores the circuit breaker
+  and fails authorization instead of publishing success. Every head update
+  removes recovery state carried by the old head. Removing `dequeued` alone
   cannot reuse an earlier authorization. Do not manually manage either internal label, post a
   queue command, push an empty commit, or remove `dequeued` by itself. The
   provider does not expose a machine-readable dequeue-cause condition here, so
@@ -254,11 +257,13 @@ not a security boundary against a malicious maintainer.
    lanes. Then remove the applicable ready label from a queued test PR and
    verify it leaves the queue without merging.
 
-Every `synchronize` event removes either ready label before the updated head can
-be admitted. A new commit therefore requires fresh review and an explicit new
+Every `synchronize` event removes ready and recovery labels carried by the old
+head before the updated head can be admitted. A delayed revocation first checks
+that the webhook head is still live and compares label-event times with that
+push's `updated_at`; it preserves labels deliberately applied while reviewing
+the new head. A new commit therefore requires fresh review and an explicit new
 authorization after its own required checks pass. The revocation workflow uses
-`pull_request_target` without checking out or executing pull-request code, and
-holds only pull-request label write permission.
+`pull_request_target` without checking out or executing pull-request code.
 
 Do not enable batching while strict up-to-date protection remains on, and do
 not weaken or remove any required context to make a batch move. A missing,
