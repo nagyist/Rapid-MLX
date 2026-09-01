@@ -54,6 +54,7 @@ from .request import (  # noqa: E402
     RequestStatus,
     SamplingParams,
 )
+from .runtime.model_performance import ModelPerformanceLedger  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class MLLMRequest:
     video_fps: float | None = None
     video_max_frames: int | None = None
     arrival_time: float = field(default_factory=time.time)
+    first_token_time: float | None = None
 
     # Batch generator UID (assigned when scheduled)
     batch_uid: int | None = None
@@ -246,6 +248,7 @@ class MLLMScheduler:
         processor: Any,
         config: MLLMSchedulerConfig | None = None,
         step_executor: Any | None = None,
+        model_name: str | None = None,
     ):
         """
         Initialize MLLM scheduler.
@@ -385,6 +388,55 @@ class MLLMScheduler:
         # rationale. Observability only — abort semantics unchanged.
         self.num_requests_cancelled = 0
         self.num_requests_cancelled_via_disconnect = 0
+        self.performance = ModelPerformanceLedger(model_name)
+
+    def _request_timings(
+        self, request: MLLMRequest
+    ) -> tuple[float | None, float | None]:
+        """Return TTFT and inverse-TPOT decode speed for a terminal request."""
+        if request.first_token_time is None or request.num_output_tokens == 0:
+            return None, None
+        ttft = max(0.0, request.first_token_time - request.arrival_time)
+        decode_rate = None
+        if request.num_output_tokens >= 2:
+            elapsed = time.time() - request.first_token_time
+            if elapsed > 0:
+                decode_rate = (request.num_output_tokens - 1) / elapsed
+        return ttft, decode_rate
+
+    def _record_terminal_performance(self, request: MLLMRequest, outcome: str) -> None:
+        """Record one MLLM request lifetime without changing its lifecycle."""
+        try:
+            ttft, decode_rate = self._request_timings(request)
+            if outcome == "succeeded":
+                self.performance.record_success(
+                    request.request_id,
+                    prompt_tokens=request.num_prompt_tokens,
+                    completion_tokens=request.num_output_tokens,
+                    ttft_seconds=ttft,
+                    decode_tokens_per_second=decode_rate,
+                    request_lifetime=request.arrival_time,
+                )
+            elif outcome == "cancelled":
+                self.performance.record_cancelled(
+                    request.request_id,
+                    prompt_tokens=request.num_prompt_tokens,
+                    completion_tokens=request.num_output_tokens,
+                    ttft_seconds=ttft,
+                    decode_tokens_per_second=decode_rate,
+                    request_lifetime=request.arrival_time,
+                )
+            else:
+                self.performance.record_failure(
+                    request.request_id,
+                    prompt_tokens=request.num_prompt_tokens,
+                    completion_tokens=request.num_output_tokens,
+                    ttft_seconds=ttft,
+                    decode_tokens_per_second=decode_rate,
+                    request_lifetime=request.arrival_time,
+                )
+        except Exception:
+            logger.debug("Failed to record MLLM performance for %s", request.request_id)
 
     def _match_user_stop(
         self, text: str, new_text_start_len: int, stop_params: list[str]
@@ -836,6 +888,7 @@ class MLLMScheduler:
             self.total_prompt_tokens += request.num_prompt_tokens
             if request.num_output_tokens > 0:
                 self.total_completion_tokens += request.num_output_tokens
+            self._record_terminal_performance(request, "cancelled")
 
         # Mark as aborted
         if request is not None:
@@ -998,6 +1051,8 @@ class MLLMScheduler:
             if not token_is_control_stop_token:
                 request.output_tokens.append(response.token)
             request.num_output_tokens = len(request.output_tokens)
+            if request.num_output_tokens and request.first_token_time is None:
+                request.first_token_time = time.time()
 
             finish_reason = response.finish_reason
 
@@ -1209,6 +1264,7 @@ class MLLMScheduler:
                 self.total_prompt_tokens += request.num_prompt_tokens
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1
+                self._record_terminal_performance(request, "succeeded")
 
                 logger.debug(
                     f"Request {request_id} finished: {finish_reason}, "
@@ -1501,9 +1557,10 @@ class MLLMScheduler:
         )
 
         for request_id in request_ids:
-            request = self.requests.get(request_id)
+            request = self.requests.get(request_id) or self.running.get(request_id)
             if request is not None:
                 request.status = RequestStatus.FINISHED_ABORTED
+                self._record_terminal_performance(request, "failed")
         if self.batch_generator is not None:
             try:
                 self.batch_generator.close()
@@ -2103,6 +2160,7 @@ class MLLMScheduler:
             "num_requests_cancelled_via_disconnect": (
                 self.num_requests_cancelled_via_disconnect
             ),
+            "model_performance": self.performance.snapshot().__dict__,
         }
 
         if self.batch_generator is not None:
