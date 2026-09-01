@@ -1827,9 +1827,8 @@ class BatchedEngine(BaseEngine):
 
             from ..memory_budget import (
                 AUTO_UTILIZATION_FLOOR,
-                note_resolved_utilization,
                 plan_metal_limit,
-                process_utilization_floor,
+                ratchet_utilization_and_apply,
             )
 
             requested = self._gpu_memory_utilization
@@ -1844,6 +1843,14 @@ class BatchedEngine(BaseEngine):
             if max_recommended <= 0:
                 return fallback
             try:
+                # Drop reclaimable allocator cache first (codex round 4
+                # NIT): after a dynamic load/unload cycle
+                # ``get_active_memory`` routinely includes cached pages
+                # that are not resident weights — budgeting them would
+                # ratchet the process limit toward the ceiling on memory
+                # that is actually free. Active allocations from resident
+                # models are unaffected by ``clear_cache``.
+                mx.clear_cache()
                 weights_bytes = int(mx.get_active_memory())
             except Exception:
                 weights_bytes = 0
@@ -1852,48 +1859,52 @@ class BatchedEngine(BaseEngine):
                 device_budget_bytes=int(max_recommended),
                 requested_utilization=requested,
             )
+
             # Publish the resolved utilization into the process-wide
-            # ratchet BEFORE applying limits (codex round 2 BLOCKING #2):
-            # every already-resident engine's scheduler re-resolves its
-            # admission cap against this floor, so raising the process
-            # limit for a new model can never strand an existing model
-            # behind a stale lower cap while process-wide ``active`` has
-            # grown past it.
-            note_resolved_utilization(plan.resolved_utilization)
-            # The allocation limit itself follows the process-wide ratchet
-            # too (codex round 3 BLOCKING #1): applying THIS model's plan
-            # verbatim would LOWER the process limit when a later, smaller
-            # model resolves below an earlier model's budget, while every
-            # resident scheduler keeps enforcing the higher floor — the
-            # single-cap invariant requires both enforcement points to use
-            # the same, monotonically non-decreasing utilization.
-            effective_utilization, _generation = process_utilization_floor()
-            effective_limit = int(max_recommended * effective_utilization)
-            # Setter failures are contained HERE so the resolved
-            # utilization always propagates (codex round 1 BLOCKING #2):
-            # if ``mx.set_memory_limit`` succeeds but ``set_cache_limit``
-            # throws, falling back to the floor would leave the scheduler
-            # admission cap desynchronized from the allocation limit
-            # Metal is actually holding.
-            try:
-                mx.set_memory_limit(effective_limit)
-                cache_limit = _compute_metal_cache_limit(effective_limit)
-                mx.set_cache_limit(cache_limit)
-                logger.info(
-                    f"Metal memory limits set ({plan.mode}): "
-                    f"allocation_limit={effective_limit / 1e9:.1f}GB "
-                    f"({effective_utilization * 100:.0f}% of "
-                    f"{max_recommended / 1e9:.1f}GB, "
-                    f"weights={weights_bytes / 1e9:.1f}GB), "
-                    f"cache_limit={cache_limit / 1e9:.1f}GB"
-                )
-            except Exception as limit_exc:
-                logger.warning(
-                    f"Failed to apply Metal memory limits "
-                    f"(resolved {plan.mode} utilization "
-                    f"{effective_utilization:.2f} still governs the "
-                    f"admission cap): {limit_exc}"
-                )
+            # ratchet AND install the Metal limits under the same lock
+            # (codex rounds 2–4). One combined critical section gives the
+            # three invariants at once:
+            # - every already-resident engine's scheduler re-resolves its
+            #   admission cap against the raised floor, so a new model can
+            #   never strand an existing one behind a stale lower cap
+            #   (round 2 BLOCKING #2);
+            # - the allocation limit follows the ratchet, so a later,
+            #   smaller model can never LOWER the process limit below what
+            #   the schedulers enforce (round 3 BLOCKING #1);
+            # - concurrent loads apply their limits serialized in floor
+            #   order, so the LAST setter call always carries the highest
+            #   published utilization (round 4 BLOCKING #1).
+            def _apply_limits(effective_utilization: float) -> None:
+                effective_limit = int(max_recommended * effective_utilization)
+                # Setter failures are contained HERE so the resolved
+                # utilization always propagates (codex round 1 BLOCKING
+                # #2): if ``mx.set_memory_limit`` succeeds but
+                # ``set_cache_limit`` throws, falling back to the floor
+                # would leave the scheduler admission cap desynchronized
+                # from the allocation limit Metal is actually holding.
+                try:
+                    mx.set_memory_limit(effective_limit)
+                    cache_limit = _compute_metal_cache_limit(effective_limit)
+                    mx.set_cache_limit(cache_limit)
+                    logger.info(
+                        f"Metal memory limits set ({plan.mode}): "
+                        f"allocation_limit={effective_limit / 1e9:.1f}GB "
+                        f"({effective_utilization * 100:.0f}% of "
+                        f"{max_recommended / 1e9:.1f}GB, "
+                        f"weights={weights_bytes / 1e9:.1f}GB), "
+                        f"cache_limit={cache_limit / 1e9:.1f}GB"
+                    )
+                except Exception as limit_exc:
+                    logger.warning(
+                        f"Failed to apply Metal memory limits "
+                        f"(resolved {plan.mode} utilization "
+                        f"{effective_utilization:.2f} still governs the "
+                        f"admission cap): {limit_exc}"
+                    )
+
+            effective_utilization, _generation = ratchet_utilization_and_apply(
+                plan.resolved_utilization, _apply_limits
+            )
             return effective_utilization
 
         # The resolved utilization (== the value actually fed to

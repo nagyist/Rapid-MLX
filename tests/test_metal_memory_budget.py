@@ -307,6 +307,30 @@ class TestProcessUtilizationRatchet:
             note_resolved_utilization(0.97)
             assert sched._resolve_metal_cap_bytes() == 0
 
+    def test_ratchet_and_apply_is_atomic_and_serialized(self):
+        """Codex round 4 BLOCKING #1: the setter callback must run under
+        the floor lock with the post-ratchet effective value, so a stale
+        lower limit can never be installed after a newer higher one."""
+        import vllm_mlx.memory_budget as mb
+        from vllm_mlx.memory_budget import ratchet_utilization_and_apply
+
+        applied: list[float] = []
+
+        def _apply(effective: float) -> None:
+            # The lock is held across the callback — a concurrent ratchet
+            # cannot interleave between the floor read and this apply.
+            assert mb._process_floor_lock.locked()
+            applied.append(effective)
+
+        eff, gen1 = ratchet_utilization_and_apply(0.95, _apply)
+        assert eff == 0.95
+        # A later, LOWER resolution applies the ratcheted floor, not its
+        # own value — the last setter call carries the highest floor.
+        eff, gen2 = ratchet_utilization_and_apply(0.5, _apply)
+        assert eff == 0.95
+        assert gen2 == gen1  # no upward ratchet, no invalidation
+        assert applied == [0.95, 0.95]
+
 
 class TestActionableAdmission503:
     def test_backpressure_message_carries_remediation(self):

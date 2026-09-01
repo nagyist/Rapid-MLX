@@ -31,6 +31,7 @@ This module closes that loop with two pieces, both pure and unit-testable:
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # Auto-mode bounds. The floor matches the historical global default so any
@@ -83,6 +84,38 @@ def process_utilization_floor() -> tuple[float, int]:
     """Return ``(floor, generation)`` for cache-invalidating readers."""
     with _process_floor_lock:
         return _process_utilization_floor, _process_floor_generation
+
+
+def ratchet_utilization_and_apply(
+    utilization: float,
+    apply: Callable[[float], None] | None = None,
+) -> tuple[float, int]:
+    """Ratchet the floor and apply the effective value atomically.
+
+    Concurrent model loads each publish a resolved utilization and then
+    install the corresponding Metal allocation limit. Doing those as two
+    separate lock acquisitions leaves a window (codex round 4 BLOCKING #1)
+    where a loader holding an older, lower floor applies its limit LAST —
+    schedulers would then enforce the newer higher cap while Metal holds
+    the stale lower allocation limit. Holding the lock across both the
+    ratchet and the ``apply`` callback serializes the setter calls in
+    floor order, so the last limit installed always reflects the highest
+    published utilization.
+
+    ``apply`` receives the effective (post-ratchet) utilization —
+    ``max(utilization, floor)`` — and must contain its own failures if a
+    setter error should not propagate (the callers do; see codex round 1
+    BLOCKING #2). Returns ``(effective_utilization, generation)``.
+    """
+    global _process_utilization_floor, _process_floor_generation
+    with _process_floor_lock:
+        if utilization > _process_utilization_floor:
+            _process_utilization_floor = utilization
+            _process_floor_generation += 1
+        effective = max(utilization, _process_utilization_floor)
+        if apply is not None:
+            apply(effective)
+        return effective, _process_floor_generation
 
 
 class MetalPreflightError(RuntimeError):
