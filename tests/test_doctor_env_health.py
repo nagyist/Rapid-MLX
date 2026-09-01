@@ -45,6 +45,9 @@ from vllm_mlx.doctor import env_health as eh
 @pytest.fixture(autouse=True)
 def clean_runtime_probe_state(monkeypatch):
     monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(eh, "_SELECTED_SERVER_RUNTIME", False)
+    monkeypatch.setattr(eh, "_RUNTIME_SELECTION_DONE", False)
+    eh._RUNTIME_IMPORT_CACHE.clear()
     original_import_probe = eh._runtime_module_importable
 
     def import_from_probe_when_available(
@@ -69,6 +72,7 @@ def clean_runtime_probe_state(monkeypatch):
     eh._RUNTIME_IMPORT_CACHE.clear()
     eh._RUNTIME_DISTRIBUTION_CACHE.clear()
     eh._RUNTIME_CONTEXTS.clear()
+    eh._RUNTIME_SELECTION_DONE = False
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +398,11 @@ def test_metadata_missing_remote_module_is_not_claimed_importable(
     monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
     monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
     monkeypatch.setattr(eh, "_RUNTIME_IMPORT_CACHE", {})
+    monkeypatch.setattr(
+        eh,
+        "_module_visibility",
+        lambda dist, runtime=None: (True, False),
+    )
 
     section = eh.section_optional_packages()
 
@@ -1048,6 +1057,89 @@ def test_relative_module_server_uses_process_executable(
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
 
     assert eh._runtime_python_path() == server_runtime.resolve()
+
+
+def test_running_server_same_interpreter_is_still_server_context(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    server_context = tmp_path / "server-context"
+    server_context.mkdir()
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [
+                    str(doctor_exe),
+                    "-m",
+                    "vllm_mlx.cli",
+                    "serve",
+                    "test-model",
+                ],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(doctor_exe)
+
+        def environ(self):
+            return {"PYTHONPATH": str(server_context)}
+
+        def cwd(self):
+            return str(server_context)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    selected = eh._runtime_python_path()
+
+    assert selected == doctor_exe.absolute()
+    assert eh._SELECTED_SERVER_RUNTIME is True
+    assert eh._RUNTIME_CONTEXTS[selected] == (
+        server_context.resolve(),
+        {"PYTHONPATH": str(server_context)},
+    )
+
+
+def test_doctor_uses_one_cached_runtime_selection(monkeypatch, tmp_path):
+    runtime = tmp_path / "runtime" / "bin" / "python"
+    other_runtime = tmp_path / "changed" / "bin" / "python"
+    selections = []
+
+    def select_runtime():
+        selections.append("selected")
+        return runtime
+
+    def section():
+        section_section = eh.Section("Cached")
+        section_section.add("cached", eh.CheckStatus.OK)
+        return section_section
+
+    monkeypatch.setattr(eh, "_runtime_python_path", select_runtime)
+    monkeypatch.setattr(eh, "_SECTION_BUILDERS", (section,))
+    monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", None)
+    eh._RUNTIME_SELECTION_DONE = False
+    try:
+        eh.run_all()
+    finally:
+        eh._RUNTIME_SELECTION_DONE = False
+
+    assert selections == ["selected"]
+    assert eh._selected_runtime()[0] == runtime
+    assert other_runtime not in selections
 
 
 def test_running_server_runtime_preserves_venv_executable_symlink(
@@ -1981,6 +2073,11 @@ def test_remote_probe_reports_context_module_without_safe_import_verification(
     )
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
     monkeypatch.setenv("RAPID_MLX_RUNTIME_PYTHON", str(server_runtime))
+    monkeypatch.setattr(
+        eh,
+        "_module_visibility",
+        lambda dist, runtime=None: (True, False),
+    )
 
     section = eh.section_required_packages()
     row = next(c for c in section.checks if c.label.startswith("transformers"))
@@ -2190,6 +2287,11 @@ def test_remote_pillow_probe_accepts_a_successful_image_exercise(
         lambda distribution, runtime=None: (
             "0.6.17" if distribution == "mlx-vlm" else None
         ),
+    )
+    monkeypatch.setattr(
+        eh,
+        "_module_visibility",
+        lambda dist, runtime=None: (True, True),
     )
 
     try:

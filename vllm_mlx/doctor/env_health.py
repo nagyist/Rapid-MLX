@@ -244,6 +244,14 @@ _DOCTOR_DEADLINE: float | None = None
 _RUNTIME_CONTEXTS: dict[Path, tuple[Path, dict[str, str]]] = {}
 _RUNTIME_DISTRIBUTION_CACHE: dict[Path, bool] = {}
 _TRUSTED_SYS_PATH_ROOTS: tuple[Path, ...] = ()
+_SELECTED_RUNTIME: Path | None = None
+_SELECTED_SERVER_RUNTIME = False
+_RUNTIME_SELECTION_DONE = False
+
+
+def _runtime_uses_context(runtime: Path) -> bool:
+    """Whether a runtime requires its captured server context for probing."""
+    return runtime != Path(sys.executable).absolute() or runtime in _RUNTIME_CONTEXTS
 
 
 def _runtime_has_rapid_mlx_distribution(
@@ -312,7 +320,7 @@ def _runtime_environment(
         return "Rapid-MLX application environment"
     effective_prefix = prefix if prefix is not None else Path(sys.prefix).resolve()
     effective_base_prefix = Path(
-        base_prefix or getattr(sys, "base_prefix", sys.prefix)
+        str(base_prefix or getattr(sys, "base_prefix", sys.prefix))
     ).resolve()
     if exe == runtime_root / "bin" / "python3" or effective_prefix == runtime_root:
         return "Rapid-MLX runtime environment"
@@ -331,7 +339,7 @@ def _module_available(
     real_import: bool = False,
 ) -> bool:
     """Return whether *module* is discoverable, without importing it."""
-    if runtime is not None and runtime != Path(sys.executable).absolute():
+    if runtime is not None and _runtime_uses_context(runtime):
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
@@ -427,6 +435,8 @@ def _runtime_python_path() -> Path:
     production dependency set. An explicit override covers a stopped server;
     the CLI interpreter is the fallback for the common single-runtime setup.
     """
+    global _SELECTED_SERVER_RUNTIME
+    _SELECTED_SERVER_RUNTIME = False
     try:
         import psutil
 
@@ -626,6 +636,7 @@ def _runtime_python_path() -> Path:
                 candidates, key=lambda item: item[0]
             )
             _RUNTIME_CONTEXTS[selected] = (selected_cwd, selected_env)
+            _SELECTED_SERVER_RUNTIME = True
             return selected
     except (Exception, SystemExit):
         pass
@@ -637,6 +648,19 @@ def _runtime_python_path() -> Path:
             return candidate.absolute()
 
     return Path(sys.executable).absolute()
+
+
+def _selected_runtime() -> tuple[Path, bool]:
+    """Return the cached runtime selection for one doctor invocation."""
+    global _SELECTED_RUNTIME, _RUNTIME_SELECTION_DONE
+    if not _RUNTIME_SELECTION_DONE:
+        _SELECTED_RUNTIME = _runtime_python_path()
+        _RUNTIME_SELECTION_DONE = True
+    selected_runtime = _SELECTED_RUNTIME
+    if selected_runtime is None:
+        selected_runtime = _runtime_python_path()
+        _SELECTED_RUNTIME = selected_runtime
+    return selected_runtime, _SELECTED_SERVER_RUNTIME
 
 
 _PROBE_SCRIPT = """\
@@ -855,7 +879,7 @@ def _runtime_module_importable(
     importable = False
     try:
         command = [str(runtime)]
-        if isolated and runtime != Path(sys.executable).absolute():
+        if isolated and _runtime_uses_context(runtime):
             command.append("-I")
         command.extend(
             [
@@ -1351,8 +1375,8 @@ def section_python() -> Section:
             detail=f"executable={exe}; prefix={Path(sys.prefix).resolve()}",
         )
 
-    selected_runtime = _runtime_python_path()
-    server_differs = selected_runtime != exe
+    selected_runtime, server_runtime_selected = _selected_runtime()
+    server_differs = server_runtime_selected or selected_runtime != exe
     runtime_probe = (
         _probe_runtime(selected_runtime, _bundled_sidecar_root(selected_runtime))
         if server_differs
@@ -1424,7 +1448,7 @@ def _safe_version(
     runtime: Path | None = None,
 ) -> str | None:
     runtime = runtime or Path(sys.executable).absolute()
-    if runtime != Path(sys.executable).absolute():
+    if _runtime_uses_context(runtime):
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
@@ -1455,7 +1479,7 @@ def _visible_without_metadata(
     module = _DISTRIBUTION_MODULES.get(dist)
     if module is None:
         return False
-    if runtime != Path(sys.executable).absolute():
+    if _runtime_uses_context(runtime):
         return _module_visibility(dist, runtime)[0]
     return _module_available(module, real_import=True)
 
@@ -1471,7 +1495,7 @@ def _module_visibility(
     Such a module is reported as visible but unverified rather than missing.
     """
     runtime = runtime or Path(sys.executable).absolute()
-    if runtime != Path(sys.executable).absolute():
+    if _runtime_uses_context(runtime):
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
@@ -1541,7 +1565,7 @@ def _pil_importable(
     does NOT pull torch the way a real ``import mlx_vlm`` would, so it stays
     well within doctor's ≤5 s budget. ANY failure (missing, shadowed, broken
     native ext) ⇒ not importable."""
-    if runtime is not None and runtime != Path(sys.executable).absolute():
+    if runtime is not None and _runtime_uses_context(runtime):
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
@@ -1602,7 +1626,7 @@ def _version_at_least(ver: str, minimum: tuple[int, ...]) -> bool:
 
 def section_required_packages() -> Section:
     s = Section("Required Packages")
-    runtime = _runtime_python_path()
+    runtime = _selected_runtime()[0]
     sidecar_root = _bundled_sidecar_root(runtime)
     sidecar_hint = _sidecar_repair_hint(sidecar_root) if sidecar_root else None
     runtime_probe = (
@@ -1610,10 +1634,10 @@ def section_required_packages() -> Section:
             runtime,
             sidecar_root,
         )
-        if runtime != Path(sys.executable).absolute()
+        if _runtime_uses_context(runtime)
         else None
     )
-    if runtime != Path(sys.executable).absolute() and runtime_probe is None:
+    if _runtime_uses_context(runtime) and runtime_probe is None:
         s.add(
             "Could not inspect the active server runtime",
             CheckStatus.FAIL,
@@ -1627,7 +1651,7 @@ def section_required_packages() -> Section:
     for dist, label in REQUIRED_PACKAGES:
         ver = (
             _safe_version(dist, runtime)
-            if runtime != Path(sys.executable).absolute()
+            if _runtime_uses_context(runtime)
             else _safe_version(dist)
         )
         if ver and not _version_supported(dist, ver):
@@ -1659,7 +1683,7 @@ def section_required_packages() -> Section:
             repair = sidecar_hint or _runtime_pip_command("rapid-mlx", runtime=runtime)
             visible, import_verified = _module_visibility(
                 dist,
-                runtime if runtime != Path(sys.executable).absolute() else None,
+                runtime if _runtime_uses_context(runtime) else None,
             )
             if not visible:
                 s.add(
@@ -1694,7 +1718,7 @@ def section_required_packages() -> Section:
         else:
             visible, import_verified = _module_visibility(
                 dist,
-                runtime if runtime != Path(sys.executable).absolute() else None,
+                runtime if _runtime_uses_context(runtime) else None,
             )
             if not visible:
                 repair = sidecar_hint or _runtime_pip_command(
@@ -1802,7 +1826,7 @@ def section_updates(
 
 def section_optional_packages() -> Section:
     s = Section("Optional Packages")
-    runtime = _runtime_python_path()
+    runtime = _selected_runtime()[0]
     # RC 0.12.18: the signed desktop bundle installs the bounded
     # ``[audio-desktop]`` extra, but doctor graded it against the full
     # ``[audio]`` contract and reported a healthy build as "incomplete", then
@@ -1818,10 +1842,10 @@ def section_optional_packages() -> Section:
             runtime,
             sidecar_root,
         )
-        if runtime != Path(sys.executable).absolute()
+        if _runtime_uses_context(runtime)
         else None
     )
-    if runtime != Path(sys.executable).absolute() and runtime_probe is None:
+    if _runtime_uses_context(runtime) and runtime_probe is None:
         s.add(
             "Could not inspect the active server runtime",
             CheckStatus.FAIL,
@@ -1843,7 +1867,7 @@ def section_optional_packages() -> Section:
         )
         ver = (
             _safe_version(dist, runtime)
-            if runtime != Path(sys.executable).absolute()
+            if _runtime_uses_context(runtime)
             else _safe_version(dist)
         )
         if bundled and not ver and dist in _DESKTOP_EXCLUDED_DISTS:
@@ -1900,7 +1924,7 @@ def section_optional_packages() -> Section:
                     for distribution, module in audio_contract
                     if not _module_available(
                         module,
-                        runtime if runtime != Path(sys.executable).absolute() else None,
+                        runtime if _runtime_uses_context(runtime) else None,
                     )
                 ]
                 if missing:
@@ -1923,7 +1947,7 @@ def section_optional_packages() -> Section:
             # the FastAPI lifespan. Report it honestly and name the real
             # gap so the user fixes the right thing.
             if dist == "mlx-vlm" and not _pil_importable(
-                runtime if runtime != Path(sys.executable).absolute() else None,
+                runtime if _runtime_uses_context(runtime) else None,
             ):
                 s.add(
                     f"{label} {ver} present but Pillow (PIL) missing or "
@@ -1937,7 +1961,7 @@ def section_optional_packages() -> Section:
                 continue
             visible, import_verified = _module_visibility(
                 dist,
-                runtime if runtime != Path(sys.executable).absolute() else None,
+                runtime if _runtime_uses_context(runtime) else None,
             )
             if not visible or not import_verified:
                 s.add(
@@ -1959,7 +1983,7 @@ def section_optional_packages() -> Section:
         else:
             visible, import_verified = _module_visibility(
                 dist,
-                runtime if runtime != Path(sys.executable).absolute() else None,
+                runtime if _runtime_uses_context(runtime) else None,
             )
             if not visible:
                 s.add(
@@ -2011,7 +2035,7 @@ def section_optional_packages() -> Section:
     )
     vlm_ver = (
         _safe_version("mlx-vlm", runtime)
-        if runtime != Path(sys.executable).absolute()
+        if _runtime_uses_context(runtime)
         else _safe_version("mlx-vlm")
     )
     if (
@@ -2023,7 +2047,7 @@ def section_optional_packages() -> Section:
         # mlx-vlm whose Pillow dep is missing can't actually run the
         # dflash/vision runtime, so don't paint it green.
         if not _pil_importable(
-            runtime if runtime != Path(sys.executable).absolute() else None,
+            runtime if _runtime_uses_context(runtime) else None,
         ):
             s.add(
                 "mlx-vlm 0.5.0+ (dflash extras) present but Pillow (PIL) "
@@ -2037,7 +2061,7 @@ def section_optional_packages() -> Section:
         else:
             _, vlm_verified = _module_visibility(
                 "mlx-vlm",
-                runtime if runtime != Path(sys.executable).absolute() else None,
+                runtime if _runtime_uses_context(runtime) else None,
             )
             if not vlm_verified:
                 s.add(
@@ -2575,10 +2599,12 @@ def run_all() -> Report:
     report as a single ✗ row labelled with the exception class — that's
     still a useful signal ("doctor is broken, file a bug").
     """
-    global _DOCTOR_DEADLINE
+    global _DOCTOR_DEADLINE, _RUNTIME_SELECTION_DONE
     report = Report()
     try:
         _DOCTOR_DEADLINE = time.monotonic() + _DOCTOR_BUDGET_S
+        _RUNTIME_SELECTION_DONE = False
+        _selected_runtime()
         for builder in _SECTION_BUILDERS:
             try:
                 report.sections.append(builder())
