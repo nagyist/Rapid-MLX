@@ -5308,29 +5308,41 @@ class Scheduler:
         # historical ``per_tok × tokens``.
         return fixed_baseline + per_tok * tokens + sliding_bytes
 
-    # #2858 preflight: the smallest workload the server must be able to
-    # admit for the model to honestly count as "ready" — a short
-    # classification-style request. Big enough that a pass means real
-    # traffic can run; small enough that a config which genuinely serves
-    # short requests today is never refused.
+    # #2858 preflight: nominal short-request size used ONLY to make the
+    # failure message's "needs approximately" figure honest (weights plus
+    # room for one classification-style request). It does NOT gate the
+    # pass/fail decision — that is ``active >= cap`` alone, so a config
+    # that genuinely serves short requests today is never refused.
     PREFLIGHT_NOMINAL_TOKENS = 1024
 
     def preflight_metal_admission(self) -> None:
-        """Fail startup when the Metal cap can never admit even a modest request.
+        """Fail startup when the Metal cap can never admit ANY request.
 
         #2858 acceptance criterion: a model must not be reported healthy
         while every request deterministically returns HTTP 503 because the
         configured cap is below the model's resident footprint. This runs
         once at engine startup — after the weights are materialized and the
-        Metal limits are set, before the engine loop starts — and mirrors
-        the admission gate's own arithmetic
-        (``_enforce_metal_cap_at_admission``):
-        current Metal active plus the projected KV of one
-        ``PREFLIGHT_NOMINAL_TOKENS``-token request, against the same
-        resolved cap. If that sum already violates the gate, no real
-        request can ever admit, so raise :class:`MetalPreflightError`
-        with the actionable required-vs-available message instead of
-        letting the server come up 503-wedged.
+        Metal limits are set, before the engine loop starts.
+
+        Deliberately STRICTER-to-fail than the admission gate: it raises
+        only when ``active >= cap`` — the condition under which
+        ``_enforce_metal_cap_at_admission`` rejects EVERY request
+        regardless of size (codex round 1 BLOCKING #1: gating on a nominal
+        request's projected KV as well would refuse memory-tight
+        configurations that can still serve short requests today). The
+        nominal ``PREFLIGHT_NOMINAL_TOKENS`` KV term is still computed,
+        but only to make the error message's "needs approximately" figure
+        honest about serving at least short requests.
+
+        Before concluding impossibility the allocator cache is cleared and
+        active re-measured (codex round 1 BLOCKING #4): ``active`` at load
+        time includes reclaimable allocator-cache pages and transient KV
+        from other resident models' in-flight traffic. The cache clear
+        removes the reclaimable share; genuinely resident weights that
+        still exceed the cap after that are a deterministic wedge. A
+        dynamic ``/v1/models/load`` that fails here while other models are
+        busy is retryable by the caller once traffic drains — the error
+        message says so when the budget knob is exhausted.
 
         No-op when the cap is disabled (``gpu_memory_utilization=0``), the
         Metal probe failed, or active memory reads 0 (non-Metal CI hosts
@@ -5343,6 +5355,17 @@ class Scheduler:
         active = self._current_metal_active_bytes()
         if active <= 0:
             return
+        if active >= cap:
+            # Give reclaimable allocator-cache pages back before declaring
+            # the configuration impossible — post-load ``active`` routinely
+            # carries cache the allocator would drop under pressure anyway.
+            try:
+                mx.clear_cache()
+            except Exception:
+                pass
+            active = self._current_metal_active_bytes()
+        if active < cap:
+            return
         per_tok = self._resolve_kv_bytes_per_token()
         fixed_baseline = self._resolve_kv_fixed_baseline_bytes()
         tokens = self.PREFLIGHT_NOMINAL_TOKENS
@@ -5353,10 +5376,6 @@ class Scheduler:
             )
         min_kv = fixed_baseline + per_tok * tokens + sliding_bytes
         required = active + min_kv
-        # Same comparison shape as the admission gate: a request is
-        # rejected when active >= cap OR the projected sum reaches cap.
-        if active < cap and required < cap:
-            return
 
         from .memory_budget import MetalPreflightError, format_preflight_error
 

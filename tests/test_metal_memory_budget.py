@@ -131,6 +131,22 @@ class TestPreflightErrorMessage:
         assert "smaller model" in message  # remediation 2
         assert "close memory-heavy apps" in message.lower()  # remediation 3
 
+    def test_no_impossible_advice_at_the_ceiling(self):
+        """Codex round 1 NIT: at or above the auto ceiling, 'increase
+        --gpu-memory-utilization' is impossible advice — the message must
+        say the Mac lacks the memory instead."""
+        message = format_preflight_error(
+            required_bytes=15_000_000_000,
+            active_bytes=14_500_000_000,
+            min_kv_bytes=500_000_000,
+            cap_bytes=11_700_000_000,
+            utilization=0.97,
+            device_budget_bytes=12_100_000_000,
+        )
+        assert "Increase --gpu-memory-utilization" not in message
+        assert "does not have enough unified memory" in message
+        assert "smaller model" in message
+
 
 class TestSchedulerPreflight:
     def test_noop_when_cap_disabled(self):
@@ -172,9 +188,11 @@ class TestSchedulerPreflight:
         assert "9.1 GB" in message
         assert "--gpu-memory-utilization" in message
 
-    def test_fails_when_minimum_kv_cannot_fit(self):
-        """Weights just under the cap but no room for even a nominal
-        request's KV — still a deterministic 503 config, still refused."""
+    def test_passes_when_weights_just_under_cap(self):
+        """Codex round 1 BLOCKING #1: the gate is ``active >= cap`` ALONE.
+        A memory-tight config whose weights sit just under the cap can
+        still serve short requests, so preflight must NOT refuse it even
+        though a nominal request's projected KV would overflow."""
         sched = _make_scheduler()
         per_tok = 100_000  # bytes per token, via the operator override path
         sched.config.metal_cap_kv_bytes_per_token = per_tok
@@ -187,7 +205,23 @@ class TestSchedulerPreflight:
                 "_current_metal_active_bytes",
                 return_value=cap - min_kv // 2,
             ),
-            pytest.raises(MetalPreflightError),
+        ):
+            sched.preflight_metal_admission()
+
+    def test_recovers_when_cache_clear_frees_enough(self):
+        """Codex round 1 BLOCKING #4: reclaimable allocator cache must not
+        fail a load. When the post-clear re-measure drops below the cap,
+        preflight passes."""
+        sched = _make_scheduler()
+        cap = 10 * GB
+        readings = iter([cap + GB, cap - 2 * GB])  # over, then under
+        with (
+            patch.object(sched, "_resolve_metal_cap_bytes", return_value=cap),
+            patch.object(
+                sched,
+                "_current_metal_active_bytes",
+                side_effect=lambda: next(readings),
+            ),
         ):
             sched.preflight_metal_admission()
 

@@ -1815,7 +1815,13 @@ class BatchedEngine(BaseEngine):
         # (all resident models, in multi-model mode), so auto mode (#2858)
         # sizes the limit from a measurement instead of a disk heuristic —
         # and can only ratchet the process-wide limit upward as more models
-        # load, never below what is already resident.
+        # load, never below what is already resident. Loading under the
+        # PREVIOUS model's (lower) limit is safe: ``mx.set_memory_limit``
+        # is a documented guideline the allocator silently grows past
+        # while system RAM is available (the D-METAL-CAP root cause — see
+        # ``Scheduler._resolve_metal_cap_bytes``), so weight
+        # materialization cannot hard-fail on the soft limit; real
+        # enforcement is admission-time only.
         def _resolve_and_set_metal_limits() -> float:
             import mlx.core as mx
 
@@ -1841,17 +1847,31 @@ class BatchedEngine(BaseEngine):
                 device_budget_bytes=int(max_recommended),
                 requested_utilization=requested,
             )
-            mx.set_memory_limit(plan.limit_bytes)
-            cache_limit = _compute_metal_cache_limit(plan.limit_bytes)
-            mx.set_cache_limit(cache_limit)
-            logger.info(
-                f"Metal memory limits set ({plan.mode}): "
-                f"allocation_limit={plan.limit_bytes / 1e9:.1f}GB "
-                f"({plan.resolved_utilization * 100:.0f}% of "
-                f"{max_recommended / 1e9:.1f}GB, "
-                f"weights={weights_bytes / 1e9:.1f}GB), "
-                f"cache_limit={cache_limit / 1e9:.1f}GB"
-            )
+            # Setter failures are contained HERE so the resolved
+            # utilization always propagates (codex round 1 BLOCKING #2):
+            # if ``mx.set_memory_limit`` succeeds but ``set_cache_limit``
+            # throws, falling back to the floor would leave the scheduler
+            # admission cap desynchronized from the allocation limit
+            # Metal is actually holding.
+            try:
+                mx.set_memory_limit(plan.limit_bytes)
+                cache_limit = _compute_metal_cache_limit(plan.limit_bytes)
+                mx.set_cache_limit(cache_limit)
+                logger.info(
+                    f"Metal memory limits set ({plan.mode}): "
+                    f"allocation_limit={plan.limit_bytes / 1e9:.1f}GB "
+                    f"({plan.resolved_utilization * 100:.0f}% of "
+                    f"{max_recommended / 1e9:.1f}GB, "
+                    f"weights={weights_bytes / 1e9:.1f}GB), "
+                    f"cache_limit={cache_limit / 1e9:.1f}GB"
+                )
+            except Exception as limit_exc:
+                logger.warning(
+                    f"Failed to apply Metal memory limits "
+                    f"(resolved {plan.mode} utilization "
+                    f"{plan.resolved_utilization:.2f} still governs the "
+                    f"admission cap): {limit_exc}"
+                )
             return plan.resolved_utilization
 
         # The resolved utilization (== the value actually fed to
@@ -1897,9 +1917,14 @@ class BatchedEngine(BaseEngine):
         # scheduler exists as of AsyncEngineCore construction, so run its
         # admission preflight BEFORE the engine loop starts — an impossible
         # budget fails the load with one actionable message instead of
-        # letting the server come up 503-wedged. MetalPreflightError must
-        # propagate; it is the load failure.
-        self._engine.engine.scheduler.preflight_metal_admission()
+        # letting the server come up 503-wedged. Runs on the model-load
+        # worker because the preflight may call ``mx.clear_cache()`` and
+        # MLX allocator calls must stay on the thread that owns the model's
+        # stream (#170). MetalPreflightError must propagate; it is the
+        # load failure.
+        self._model_load_executor.submit(
+            self._engine.engine.scheduler.preflight_metal_admission
+        ).result()
 
         await self._engine.engine.start(executor=self._model_load_executor)
         self._engine_started = True

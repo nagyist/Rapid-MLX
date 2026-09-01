@@ -128,7 +128,27 @@ def format_preflight_error(
     utilization: float,
     device_budget_bytes: int,
 ) -> str:
-    """Build the actionable admission-impossible startup message (#2858)."""
+    """Build the actionable admission-impossible startup message (#2858).
+
+    The remediation list is tailored to what can still help (codex round 1
+    NIT): "increase --gpu-memory-utilization" is only suggested while the
+    configured value sits below the auto ceiling — at or above it the knob
+    is exhausted and the honest advice is that this Mac does not have the
+    memory for this configuration.
+    """
+    if utilization < AUTO_UTILIZATION_CEILING:
+        remediation = (
+            "Increase --gpu-memory-utilization, reduce context length or "
+            "concurrency, close memory-heavy apps, or choose a smaller model."
+        )
+    else:
+        remediation = (
+            "This Mac does not have enough unified memory for this "
+            "configuration at the maximum Metal budget — reduce context "
+            "length or concurrency, close memory-heavy apps, retry after "
+            "in-flight requests on other models finish, or choose a "
+            "smaller model."
+        )
     return (
         f"This model needs approximately {required_bytes / 1e9:.1f} GB of "
         f"Metal memory for the current configuration (weights and runtime "
@@ -137,6 +157,5 @@ def format_preflight_error(
         f"{cap_bytes / 1e9:.1f} GB "
         f"(gpu_memory_utilization={utilization:g} of the "
         f"{device_budget_bytes / 1e9:.1f} GB Metal working-set budget). "
-        f"Increase --gpu-memory-utilization, reduce context length or "
-        f"concurrency, close memory-heavy apps, or choose a smaller model."
+        f"{remediation}"
     )
