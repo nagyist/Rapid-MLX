@@ -245,6 +245,48 @@ struct GitHubStarPromptCoordinatorTests {
         #expect(clock.now - start < .seconds(3))
     }
 
+    @Test("Cancelling a gh star request terminates and reaps its child")
+    func ghStarCancellationKillsHungChild() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-star-cancel-\(UUID().uuidString)")
+        let executable = directory.appendingPathComponent("gh")
+        let pidFile = directory.appendingPathComponent("pid")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("#!/bin/sh\necho $$ > '\(pidFile.path)'\nsleep 30\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+
+        let request = Task {
+            try await GitHubStarCLI.star(
+                GitHubCommunity.repositoryURL,
+                executableURL: executable,
+                timeout: .seconds(30)
+            )
+        }
+        let clock = ContinuousClock()
+        let pidDeadline = clock.now.advanced(by: .seconds(3))
+        while !FileManager.default.fileExists(atPath: pidFile.path), clock.now < pidDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try #require(pid_t(pidText))
+
+        request.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await request.value
+        }
+
+        let reapDeadline = clock.now.advanced(by: .seconds(3))
+        while kill(pid, 0) == 0, clock.now < reapDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(kill(pid, 0) == -1 && errno == ESRCH)
+    }
+
     @Test("A second direct star cannot start while the first is in flight")
     func directStarReentryIsRejected() async {
         let defaults = isolatedDefaults()

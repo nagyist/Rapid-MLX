@@ -291,29 +291,35 @@ enum GitHubStarCLI {
 
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        let outcome = try await withThrowingTaskGroup(of: Outcome.self) { group in
-            group.addTask {
-                await Task.detached {
-                    process.waitUntilExit()
-                }.value
-                // Once the deadline has passed, timeout is authoritative even
-                // if SIGKILL makes the waiter observe a nonzero exit first.
-                guard clock.now < deadline else { return .timedOut }
-                return .exited(process.terminationStatus)
-            }
-            group.addTask {
-                try await clock.sleep(until: deadline)
-                if process.isRunning {
-                    kill(process.processIdentifier, SIGKILL)
+        let termination = GitHubStarProcessTermination(process)
+        let outcome = try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Outcome.self) { group in
+                group.addTask {
+                    await Task.detached {
+                        process.waitUntilExit()
+                    }.value
+                    // Once the deadline has passed, timeout is authoritative even
+                    // if SIGKILL makes the waiter observe a nonzero exit first.
+                    guard clock.now < deadline else { return .timedOut }
+                    return .exited(process.terminationStatus)
                 }
-                return .timedOut
-            }
+                group.addTask {
+                    try await clock.sleep(until: deadline)
+                    termination.killIfRunning()
+                    return .timedOut
+                }
 
-            guard let first = try await group.next() else {
-                throw GitHubStarCLIError.commandFailed
+                guard let first = try await group.next() else {
+                    throw GitHubStarCLIError.commandFailed
+                }
+                group.cancelAll()
+                return first
             }
-            group.cancelAll()
-            return first
+        } onCancel: {
+            // Cancelling the caller also cancels the timeout sleeper. Kill the
+            // child here so the detached waiter can reap it before the task
+            // group propagates CancellationError.
+            termination.killIfRunning()
         }
 
         switch outcome {
@@ -323,6 +329,20 @@ enum GitHubStarCLI {
             throw GitHubStarCLIError.commandFailed
         case .timedOut:
             throw GitHubStarCLIError.timedOut
+        }
+    }
+}
+
+private final class GitHubStarProcessTermination: @unchecked Sendable {
+    private let process: Process
+
+    init(_ process: Process) {
+        self.process = process
+    }
+
+    func killIfRunning() {
+        if process.isRunning {
+            _ = kill(process.processIdentifier, SIGKILL)
         }
     }
 }
