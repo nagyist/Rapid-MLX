@@ -575,3 +575,27 @@ def pytest_collection_modifyitems(config, items):
 def server_url(request):
     """Get server URL from command line."""
     return request.config.getoption("--server-url")
+
+
+@pytest.fixture
+def clean_doctor_runtime_state(monkeypatch):
+    """Reset every doctor runtime selection and probe cache around a test."""
+    from vllm_mlx.doctor import env_health
+
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(env_health, "_SELECTED_RUNTIME", None)
+    monkeypatch.setattr(env_health, "_SELECTED_SERVER_RUNTIME", False)
+    monkeypatch.setattr(env_health, "_RUNTIME_SELECTION_DONE", False)
+    env_health._RUNTIME_CONTEXTS.clear()
+    env_health._RUNTIME_DISTRIBUTION_CACHE.clear()
+    env_health._RUNTIME_PROBE_CACHE.clear()
+    env_health._RUNTIME_IMPORT_CACHE.clear()
+    env_health._RUNTIME_IMPORT_TIMEOUTS.clear()
+
+    yield
+
+    env_health._RUNTIME_CONTEXTS.clear()
+    env_health._RUNTIME_DISTRIBUTION_CACHE.clear()
+    env_health._RUNTIME_PROBE_CACHE.clear()
+    env_health._RUNTIME_IMPORT_CACHE.clear()
+    env_health._RUNTIME_IMPORT_TIMEOUTS.clear()

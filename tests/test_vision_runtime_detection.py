@@ -38,13 +38,9 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def clean_runtime_probe_state(monkeypatch):
+def clean_runtime_probe_state(clean_doctor_runtime_state):
     """Keep host server processes out of doctor's runtime selection."""
-    monkeypatch.setitem(sys.modules, "psutil", None)
     yield
-    from vllm_mlx.doctor import env_health
-
-    env_health._RUNTIME_PROBE_CACHE.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────

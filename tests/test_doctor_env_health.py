@@ -43,12 +43,7 @@ from vllm_mlx.doctor import env_health as eh
 
 
 @pytest.fixture(autouse=True)
-def clean_runtime_probe_state(monkeypatch):
-    monkeypatch.setitem(sys.modules, "psutil", None)
-    monkeypatch.setattr(eh, "_SELECTED_SERVER_RUNTIME", False)
-    monkeypatch.setattr(eh, "_RUNTIME_SELECTION_DONE", False)
-    eh._RUNTIME_IMPORT_CACHE.clear()
-    eh._RUNTIME_IMPORT_TIMEOUTS.clear()
+def clean_runtime_probe_state(clean_doctor_runtime_state, monkeypatch):
     original_import_probe = eh._runtime_module_importable
 
     def import_from_probe_when_available(
@@ -70,12 +65,6 @@ def clean_runtime_probe_state(monkeypatch):
         eh, "_runtime_module_importable", import_from_probe_when_available
     )
     yield
-    eh._RUNTIME_PROBE_CACHE.clear()
-    eh._RUNTIME_IMPORT_CACHE.clear()
-    eh._RUNTIME_IMPORT_TIMEOUTS.clear()
-    eh._RUNTIME_DISTRIBUTION_CACHE.clear()
-    eh._RUNTIME_CONTEXTS.clear()
-    eh._RUNTIME_SELECTION_DONE = False
 
 
 # ---------------------------------------------------------------------------
