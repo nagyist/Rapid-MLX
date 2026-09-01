@@ -2987,11 +2987,18 @@ def test_prompt_lookup_requires_an_audited_model_capability(monkeypatch):
     from types import SimpleNamespace
 
     from vllm_mlx.spec_decode.mtp.generator import _prompt_lookup_is_enabled
+    from vllm_mlx.spec_decode.mtp.prompt_lookup import PromptLookupPolicy
 
     monkeypatch.delenv("RAPID_MLX_MTP_PROMPT_LOOKUP", raising=False)
     assert not _prompt_lookup_is_enabled(
         SimpleNamespace(mtp_prompt_lookup_supported=True)
     )
+    qualified = SimpleNamespace(
+        mtp_prompt_lookup_supported=True,
+        mtp_prompt_lookup_policy=PromptLookupPolicy(enabled_by_default=True),
+    )
+    assert _prompt_lookup_is_enabled(qualified)
+    assert not _prompt_lookup_is_enabled(qualified, requested=False)
 
     monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP", "1")
     assert not _prompt_lookup_is_enabled(SimpleNamespace())
@@ -2999,11 +3006,13 @@ def test_prompt_lookup_requires_an_audited_model_capability(monkeypatch):
         SimpleNamespace(mtp_prompt_lookup_supported=False)
     )
     assert _prompt_lookup_is_enabled(SimpleNamespace(mtp_prompt_lookup_supported=True))
+    assert _prompt_lookup_is_enabled(qualified)
 
     monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP", "off")
     assert not _prompt_lookup_is_enabled(
         SimpleNamespace(mtp_prompt_lookup_supported=True)
     )
+    assert not _prompt_lookup_is_enabled(qualified)
 
 
 def test_generator_prompt_lookup_partial_reject_keeps_mtp_cache_aligned(
@@ -3055,6 +3064,55 @@ def test_generator_prompt_lookup_partial_reject_keeps_mtp_cache_aligned(
     assert mtp_cache.trim_calls == [1]
     assert mtp_cache.offset == 4
     assert model._mtp_cursor == 5
+
+
+def test_generator_prompt_lookup_rolls_back_on_verify_materialization_abort(
+    monkeypatch,
+):
+    """A cancelled PLD verify drops every uncommitted target position."""
+    import vllm_mlx.spec_decode.mtp.generator as generator_mod
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP", "1")
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP_MIN_NGRAM", "2")
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_NGRAM", "2")
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_TOKENS", "2")
+
+    model = _CacheAdvancingQwen35Model(
+        backbone_outputs=[0, 0, 0, 7, 8, 0, 20, 21, 22],
+        mtp_outputs=[0, 0, 0, 99],
+    )
+    model_cache = _CountingKVCache()
+    mtp_cache = _CountingKVCache()
+    gen = mtp_generate_step(
+        mx.array([7, 8, 20, 21], dtype=mx.uint32),
+        model,
+        max_tokens=5,
+        max_k=1,
+        disable_auto_k=True,
+        prompt_cache=[model_cache, mtp_cache],
+        accept_counter=MTPAcceptCounter(),
+    )
+
+    assert next(gen)[0] == 7
+    assert next(gen)[0] == 8
+    assert model_cache.trim_calls == [1]
+    assert mtp_cache.trim_calls == [1]
+
+    monkeypatch.setattr(
+        generator_mod.mx,
+        "eval",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("sentinel PLD verify abort")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="sentinel PLD verify abort"):
+        next(gen)
+
+    assert model_cache.trim_calls == [1, 2]
+    # PLD bypasses the MTP drafter, so its uncommitted cache never advanced.
+    assert mtp_cache.trim_calls == [1]
 
 
 def test_generator_runs_with_int4_quantized_kv_cache_kwargs():

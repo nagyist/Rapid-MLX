@@ -52,16 +52,66 @@ import mlx.core as mx
 from .accept_counter import get_global_counter
 from .cache_patch import patch_arrays_cache_rollback_state
 from .draft_k_controller_v2 import DepthController, get_or_create_controller
-from .prompt_lookup import PromptLookupIndex
+from .prompt_lookup import PromptLookupIndex, PromptLookupPolicy
+
+_LEGACY_PROMPT_LOOKUP_POLICY = PromptLookupPolicy()
 
 
-def _prompt_lookup_is_enabled(model) -> bool:
+def _prompt_lookup_policy(model) -> PromptLookupPolicy:
+    policy = getattr(model, "mtp_prompt_lookup_policy", None)
+    return (
+        policy
+        if isinstance(policy, PromptLookupPolicy)
+        else _LEGACY_PROMPT_LOOKUP_POLICY
+    )
+
+
+def _effective_prompt_lookup_policy(model) -> PromptLookupPolicy:
+    """Resolve process overrides once so a request cannot change mid-flight."""
+    policy = _prompt_lookup_policy(model)
+    min_ngram = max(
+        2,
+        int(
+            os.environ.get(
+                "RAPID_MLX_MTP_PROMPT_LOOKUP_MIN_NGRAM",
+                str(policy.min_ngram),
+            )
+        ),
+    )
+    return PromptLookupPolicy(
+        enabled_by_default=_prompt_lookup_is_enabled(model),
+        min_ngram=min_ngram,
+        max_ngram=max(
+            min_ngram,
+            int(
+                os.environ.get(
+                    "RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_NGRAM",
+                    str(policy.max_ngram),
+                )
+            ),
+        ),
+        max_tokens=max(
+            1,
+            int(
+                os.environ.get(
+                    "RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_TOKENS",
+                    str(policy.max_tokens),
+                )
+            ),
+        ),
+    )
+
+
+def _prompt_lookup_is_enabled(model, requested: bool | None = None) -> bool:
     """Return whether this model may use audited prompt-copy speculation."""
     if not getattr(model, "mtp_prompt_lookup_supported", False):
         return False
-    # Explicit opt-in until Qwen's hybrid SSM target path is proven
-    # token-lossless across the different verification chunk boundaries.
-    return os.environ.get("RAPID_MLX_MTP_PROMPT_LOOKUP", "0").strip().lower() not in {
+    if requested is not None:
+        return requested
+    override = os.environ.get("RAPID_MLX_MTP_PROMPT_LOOKUP")
+    if override is None:
+        return _prompt_lookup_policy(model).enabled_by_default
+    return override.strip().lower() not in {
         "0",
         "false",
         "off",
@@ -240,6 +290,9 @@ def mtp_generate_step(
     stop_tokens: set[int] | None = None,
     timing_stats: dict[str, float] | None = None,
     lane_rng: Any | None = None,
+    prompt_lookup_enabled: bool | None = None,
+    prompt_lookup_history: list[int] | mx.array | None = None,
+    prompt_lookup_policy: PromptLookupPolicy | None = None,
 ) -> Generator[tuple[int, mx.array, bool], None, None]:
     """Generator that uses the model's native MTP head for spec decode.
 
@@ -335,13 +388,32 @@ def mtp_generate_step(
     _mtp_supports_fused_greedy = callable(getattr(model, "mtp_greedy", None))
 
     y = prompt.astype(mx.uint32)
-    _prompt_lookup_enabled = _prompt_lookup_is_enabled(model)
+    _is_greedy = temp == 0
+    if prompt_lookup_policy is None:
+        prompt_lookup_policy = _effective_prompt_lookup_policy(model)
+    requested_prompt_lookup = (
+        prompt_lookup_policy.enabled_by_default
+        if prompt_lookup_enabled is None
+        else prompt_lookup_enabled
+    )
+    _prompt_lookup_enabled = _is_greedy and _prompt_lookup_is_enabled(
+        model, requested=requested_prompt_lookup
+    )
     # Avoid copying a potentially long prompt back to the CPU for every other
     # MTP backend. Prompt lookup is opt-in per model because its cache-history
     # synchronization contract must be audited for that architecture first.
-    prompt_token_ids = (
-        [int(token) for token in y.tolist()] if _prompt_lookup_enabled else []
-    )
+    if _prompt_lookup_enabled:
+        if prompt_lookup_history is None:
+            prompt_token_ids = [int(token) for token in y.tolist()]
+        else:
+            history = (
+                prompt_lookup_history.tolist()
+                if isinstance(prompt_lookup_history, mx.array)
+                else prompt_lookup_history
+            )
+            prompt_token_ids = [int(token) for token in history]
+    else:
+        prompt_token_ids = []
     generated_token_ids: list[int] = []
 
     def _remember_generated(token_id: int) -> None:
@@ -375,22 +447,11 @@ def mtp_generate_step(
         model_cache = prompt_cache[:n_main]
         mtp_cache = prompt_cache[n_main:] or model.make_mtp_cache()
 
-    _is_greedy = temp == 0
-    _prompt_lookup_max_tokens = max(
-        1, int(os.environ.get("RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_TOKENS", "24"))
-    )
-    _prompt_lookup_min_ngram = max(
-        2, int(os.environ.get("RAPID_MLX_MTP_PROMPT_LOOKUP_MIN_NGRAM", "8"))
-    )
-    _prompt_lookup_max_ngram = max(
-        _prompt_lookup_min_ngram,
-        int(os.environ.get("RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_NGRAM", "10")),
-    )
     _prompt_lookup_index = (
         PromptLookupIndex(
             prompt_token_ids,
-            min_ngram=_prompt_lookup_min_ngram,
-            max_ngram=_prompt_lookup_max_ngram,
+            min_ngram=prompt_lookup_policy.min_ngram,
+            max_ngram=prompt_lookup_policy.max_ngram,
         )
         if _prompt_lookup_enabled
         else None
@@ -859,7 +920,7 @@ def mtp_generate_step(
             return None
         match = _prompt_lookup_index.propose(
             generated_token_ids,
-            max_tokens=min(_prompt_lookup_max_tokens, remaining),
+            max_tokens=min(prompt_lookup_policy.max_tokens, remaining),
         )
         if match is None:
             return None

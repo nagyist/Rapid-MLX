@@ -1498,6 +1498,10 @@ def test_qwen4_mtp_inject_loads_complete_local_tensor_contract(tmp_path, monkeyp
 
     assert inject.inject_qwen4_exp_mtp_support(model, mtp_sidecar=checkpoint) is True
     assert inject.validate_qwen4_exp_mtp_support(model) is True
+    assert model.mtp_prompt_lookup_supported is True
+    policy = model.mtp_prompt_lookup_policy
+    assert policy.enabled_by_default is True
+    assert (policy.min_ngram, policy.max_ngram, policy.max_tokens) == (16, 64, 8)
 
 
 def test_qwen4_mtp_inject_fails_closed_on_guards_tensor_mismatch_and_exception(
