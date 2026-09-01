@@ -260,9 +260,10 @@ not a security boundary against a malicious maintainer.
 Every `synchronize` event removes ready and recovery labels carried by the old
 head before the updated head can be admitted. A delayed revocation first checks
 that the webhook head is still live and compares label-event times with that
-push's `updated_at`; it preserves labels deliberately applied while reviewing
-the new head. A new commit therefore requires fresh review and an explicit new
-authorization after its own required checks pass. The revocation workflow uses
+push's `updated_at` immediately before each individual deletion; it preserves
+labels deliberately applied while reviewing the new head. A new commit
+therefore requires fresh review and an explicit new authorization after its own
+required checks pass. The revocation workflow uses
 `pull_request_target` without checking out or executing pull-request code.
 
 Do not enable batching while strict up-to-date protection remains on, and do

@@ -172,6 +172,7 @@ def _run_revocation_script(
     remove_errors: dict[str, int] | None = None,
     sync_updated_at: str = "2026-09-01T04:00:00Z",
     label_event_at: str = "2026-09-01T03:59:00Z",
+    label_event_times: dict[str, str] | None = None,
     event_head: str = "head-sha",
     live_head: str = "head-sha",
 ) -> list[list[str]]:
@@ -188,6 +189,7 @@ def _run_revocation_script(
             "removeErrors": remove_errors or {},
             "syncUpdatedAt": sync_updated_at,
             "labelEventAt": label_event_at,
+            "labelEventTimes": label_event_times or {},
             "eventHead": event_head,
             "liveHead": live_head,
         }
@@ -212,7 +214,7 @@ const github = {{
     return scenario.labels.map((name) => ({{
       event: "labeled",
       label: {{ name }},
-      created_at: scenario.labelEventAt,
+      created_at: scenario.labelEventTimes[name] || scenario.labelEventAt,
     }}));
   }},
   rest: {{
@@ -283,14 +285,27 @@ def test_head_update_revocation_propagates_non_404_failure():
     ]
 
 
-def test_delayed_head_revocation_preserves_new_authorization():
+def test_revocation_refreshes_generation_before_each_label_delete():
     calls = _run_revocation_script(
         labels=["merge-ready-mac", "merge-requeue-required"],
-        label_event_at="2026-09-01T04:01:00Z",
+        label_event_times={
+            "merge-ready-mac": "2026-09-01T03:59:00Z",
+            "merge-requeue-required": "2026-09-01T04:01:00Z",
+        },
     )
 
-    assert [call[0] for call in calls] == ["get", "events", "notice", "notice"]
-    assert all(call[0] != "remove" for call in calls)
+    assert [call for call in calls if call[0] == "remove"] == [
+        ["remove", "merge-ready-mac"]
+    ]
+    assert [call[0] for call in calls].count("events") == 2
+    assert any(
+        call
+        == [
+            "notice",
+            "Preserved merge-requeue-required; it was applied after this head update.",
+        ]
+        for call in calls
+    )
 
 
 def test_stale_synchronize_event_cannot_touch_a_newer_head():
