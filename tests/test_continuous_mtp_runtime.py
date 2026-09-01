@@ -91,8 +91,31 @@ class _ArrayOpsStub:
     pass
 
 
+@pytest.fixture
+def ragged_install_stub(monkeypatch):
+    """Isolate runtime assembly from the separately tested mlx-lm adapter.
+
+    Assembly owns descriptor validation and seam wiring.  The adapter's
+    version and class-shape contracts live in ``test_mtp_ragged_cache.py``;
+    stubbing only that installation boundary keeps these contracts runnable
+    in the hosted no-MLX matrix without pretending a fake tensor runtime is
+    production MLX.
+    """
+    calls = []
+
+    def install(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "vllm_mlx.spec_decode.mtp.ragged_cache.install_ragged_cache_rollback",
+        install,
+    )
+    return calls
+
+
 def test_assembler_resolves_inner_model_and_wires_forward_and_cache_seams(
     monkeypatch,
+    ragged_install_stub,
 ):
     inner = _InjectedTextModel()
     outer = _OuterModel(inner)
@@ -139,9 +162,12 @@ def test_assembler_resolves_inner_model_and_wires_forward_and_cache_seams(
     assert runtime.compute.draft_cache_factory() == ["draft-cache"]
     assert runtime.caches._preflight is preflight_ragged_cache
     assert runtime.caches._trim is trim_ragged_cache
+    assert ragged_install_stub == [{"qwen4_state_cls": None, "qsa_cls": None}]
 
 
-def test_dynamic_membership_requires_policy_and_dense_attestation():
+def test_dynamic_membership_requires_policy_and_dense_attestation(
+    ragged_install_stub,
+):
     inner = _InjectedTextModel()
     enabled = runtime_module.assemble_continuous_self_mtp_runtime(
         inner,
@@ -154,6 +180,10 @@ def test_dynamic_membership_requires_policy_and_dense_attestation():
     )
     assert enabled.capabilities.dynamic_membership is True
     assert policy_off.capabilities.dynamic_membership is False
+    assert ragged_install_stub == [
+        {"qwen4_state_cls": None, "qsa_cls": None},
+        {"qwen4_state_cls": None, "qsa_cls": None},
+    ]
 
 
 def test_qwen4_is_not_attested_by_the_dense_adapter():

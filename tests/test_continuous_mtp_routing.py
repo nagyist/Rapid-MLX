@@ -326,7 +326,15 @@ def test_scheduler_wiring_diverts_next_and_refusal_precedes_mutation():
     assert router_call < vendored_call
 
 
+@pytest.mark.requires_mlx
 def test_live_installer_forms_fixed_initial_cohort_without_dynamic_join(monkeypatch):
+    """Exercise the real scheduler import and installer on the Apple lane.
+
+    The scheduler intentionally imports MLX and mlx-lm at module load so its
+    hardware compatibility hooks run before BatchGenerator is captured.  This
+    integration contract therefore belongs on the real-MLX lane; the pure
+    routing and AST contracts above remain in the hosted no-MLX matrix.
+    """
     from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
     from vllm_mlx.spec_decode.mtp import continuous_runtime
     from vllm_mlx.spec_decode.mtp.continuous_driver import ContinuousMTPDriver
