@@ -51,6 +51,18 @@ def _serve_cache_policy_context(cli, *, stop_at_scheduler: bool):
             "vllm_mlx.utils.tokenizer.load_model_with_fallback",
             return_value=(object(), object()),
         ),
+        mock.patch(
+            "vllm_mlx.server.configure_cors_from_env",
+            return_value=[],
+        ),
+        mock.patch(
+            "vllm_mlx.server.configure_trusted_hosts",
+            return_value=None,
+        ),
+        mock.patch(
+            "vllm_mlx.middleware.request_logging.install_request_logging_middleware",
+            return_value=None,
+        ),
         mock.patch.object(sys.stdin, "isatty", return_value=False),
     ]
     if stop_at_scheduler:
