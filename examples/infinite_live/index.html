@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Rapid Infinite Live</title>
+  <style>
+    :root { color-scheme: dark; --ink:#f6f4ee; --muted:#9d9b94; --line:#2b2b29; --acid:#d8ff3e; --red:#ff4b38; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#080808; color:var(--ink); font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; min-height:100vh; }
+    header { height:58px; padding:0 22px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
+    .brand { font-weight:900; letter-spacing:-1px; font-size:18px; } .brand i { color:var(--acid); font-style:normal; }
+    .live { display:flex; gap:9px; align-items:center; font-size:11px; letter-spacing:1.5px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--red); box-shadow:0 0 12px var(--red); }
+    main { display:grid; grid-template-columns:minmax(0,1fr) 360px; height:calc(100vh - 58px); }
+    .stage { min-width:0; position:relative; background:#000; overflow:hidden; display:grid; place-items:center; }
+    video { width:100%; height:100%; object-fit:contain; background:#000; }
+    .waiting { position:absolute; inset:0; display:grid; place-items:center; background:radial-gradient(circle at 50% 45%,#20251a,#080808 60%); text-align:center; }
+    .waiting.hide { display:none; } .waiting strong { display:block; font:900 clamp(28px,5vw,70px)/.9 system-ui,sans-serif; letter-spacing:-4px; }
+    .waiting span { display:block; color:var(--acid); margin-top:18px; letter-spacing:2px; }
+    .hud { position:absolute; left:18px; bottom:18px; max-width:min(620px,80%); background:rgba(8,8,8,.78); backdrop-filter:blur(12px); border:1px solid #3b3b36; padding:12px 14px; }
+    .eyebrow { color:var(--acid); font-size:10px; letter-spacing:1.8px; text-transform:uppercase; }
+    .now { font-family:system-ui,sans-serif; font-weight:700; margin-top:4px; }
+    aside { border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:#0c0c0b; }
+    .panel-title { padding:18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; }
+    .queue { flex:1; overflow:auto; padding:12px; }
+    .idea { border:1px solid var(--line); padding:12px; margin-bottom:9px; background:#111; }
+    .idea p { margin:5px 0 10px; font-family:system-ui,sans-serif; }
+    .meta { color:var(--muted); font-size:10px; display:flex; justify-content:space-between; }
+    .vote { background:none; border:1px solid #4b4b46; color:var(--ink); padding:5px 8px; cursor:pointer; }
+    .vote:hover { border-color:var(--acid); color:var(--acid); }
+    form { border-top:1px solid var(--line); padding:14px; }
+    textarea,input { width:100%; border:1px solid #383834; background:#080808; color:var(--ink); padding:10px; font:inherit; resize:none; outline:none; }
+    textarea:focus,input:focus { border-color:var(--acid); }
+    input { margin-bottom:8px; }
+    button[type=submit] { width:100%; margin-top:8px; background:var(--acid); color:#090909; border:0; font:900 12px/1 system-ui,sans-serif; letter-spacing:1px; padding:13px; cursor:pointer; }
+    .status { padding:10px 14px; color:var(--muted); border-top:1px solid var(--line); font-size:10px; }
+    .error { color:#ff806f; }
+    .enter { position:absolute; z-index:5; border:1px solid white; background:rgba(0,0,0,.8); color:white; padding:13px 18px; cursor:pointer; letter-spacing:1px; }
+    .enter.hide { display:none; }
+    @media (max-width:800px) { main { grid-template-columns:1fr; grid-template-rows:56vh auto; height:auto; } aside { min-height:44vh; border-left:0; border-top:1px solid var(--line); } }
+  </style>
+</head>
+<body>
+  <header><div class="brand">rapid<i>.live</i></div><div class="live"><span class="dot"></span> LOCAL GENERATION</div></header>
+  <main>
+    <section class="stage">
+      <video id="player" playsinline muted></video>
+      <div id="waiting" class="waiting"><div><strong>THE CHANNEL<br>IS DREAMING</strong><span id="waitText">BOOTING THE DIRECTOR</span></div></div>
+      <button id="enter" class="enter">ENTER WITH SOUND</button>
+      <div class="hud"><div class="eyebrow" id="eyebrow">UP NEXT</div><div class="now" id="now">Waiting for the first locally generated scene…</div></div>
+    </section>
+    <aside>
+      <div class="panel-title"><b>DIRECT THE NEXT SCENE</b><span id="ready">0 READY</span></div>
+      <div id="queue" class="queue"></div>
+      <form id="form">
+        <input id="author" maxlength="40" value="local viewer" aria-label="Your name">
+        <textarea id="prompt" rows="3" maxlength="600" placeholder="A spaceship races through a crystal canyon…" required></textarea>
+        <button type="submit">SEND TO THE DIRECTOR →</button>
+      </form>
+      <div id="status" class="status">CONNECTING TO LOCAL MODEL…</div>
+    </aside>
+  </main>
+  <script>
+    const player = document.querySelector('#player');
+    const waiting = document.querySelector('#waiting');
+    const enter = document.querySelector('#enter');
+    const now = document.querySelector('#now');
+    const eyebrow = document.querySelector('#eyebrow');
+    let clips = [], currentSequence = null, switching = false;
+
+    function esc(value) { const node=document.createElement('span'); node.textContent=value; return node.innerHTML; }
+    function playClip(clip) {
+      switching = true; currentSequence = clip.sequence; player.src = clip.url; player.load();
+      player.play().catch(() => {}); waiting.classList.add('hide');
+      eyebrow.textContent = clip.source === 'viewer' ? `DIRECTED BY ${clip.author}` : 'AUTO DIRECTOR';
+      now.textContent = clip.prompt; switching = false;
+    }
+    function advance() {
+      if (switching || !clips.length) return;
+      const next = clips.find(item => currentSequence === null || item.sequence > currentSequence);
+      playClip(next || clips[clips.length - 1]);
+    }
+    player.addEventListener('ended', advance);
+    player.addEventListener('error', () => setTimeout(advance, 1000));
+    enter.addEventListener('click', () => { player.muted=false; enter.classList.add('hide'); player.play().catch(()=>{}); });
+
+    async function refresh() {
+      try {
+        const response = await fetch('/api/state'); const state = await response.json();
+        clips = state.clips;
+        document.querySelector('#ready').textContent = `${clips.length} READY`;
+        if (currentSequence === null && clips.length) advance();
+        const queue = document.querySelector('#queue');
+        const making = state.generating ? `<div class="idea"><div class="eyebrow">MAKING NOW</div><p>${esc(state.generating.prompt)}</p><div class="meta"><span>${esc(state.generating.author)}</span><span>GENERATING</span></div></div>` : '';
+        queue.innerHTML = making + state.suggestions.map(item => `<div class="idea"><div class="eyebrow">VIEWER IDEA</div><p>${esc(item.prompt)}</p><div class="meta"><span>${esc(item.author)}</span><button class="vote" data-vote="${item.id}">▲ ${item.votes}</button></div></div>`).join('') || '<div class="meta">The Director will create filler until someone submits an idea.</div>';
+        document.querySelectorAll('[data-vote]').forEach(button => button.onclick = async () => { await fetch(`/api/suggestions/${button.dataset.vote}/vote`, {method:'POST'}); refresh(); });
+        const status = document.querySelector('#status');
+        status.className = state.last_error ? 'status error' : 'status';
+        status.textContent = state.last_error ? `MODEL RETRYING · ${state.last_error}` : `${state.model} · ${state.size} · ${state.frames} FRAMES`;
+        document.querySelector('#waitText').textContent = state.generating ? 'GENERATING THE FIRST SCENE' : 'WAITING FOR THE MODEL';
+      } catch (_) { document.querySelector('#status').textContent = 'RECONNECTING…'; }
+    }
+    document.querySelector('#form').addEventListener('submit', async event => {
+      event.preventDefault(); const prompt=document.querySelector('#prompt');
+      const response = await fetch('/api/suggestions', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({prompt:prompt.value, author:document.querySelector('#author').value})});
+      if (response.ok) { prompt.value=''; refresh(); }
+    });
+    refresh(); setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
