@@ -22,9 +22,11 @@ import json
 import os
 import plistlib
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 import pytest
@@ -133,6 +135,30 @@ def test_module_server_runtime_must_register_rapid_mlx_distribution(tmp_path):
     assert not eh._runtime_has_rapid_mlx_distribution(
         make_runtime("not-rapid-mlx"),
         tmp_path,
+        {"PATH": "/usr/bin:/bin"},
+    )
+
+
+def test_runtime_validation_rejects_fake_system_python_distribution(tmp_path):
+    server_cwd = tmp_path / "server-cwd"
+    server_cwd.mkdir()
+    fake_dist_info = server_cwd / "vllm_mlx-999.fake.dist-info" / "METADATA"
+    fake_dist_info.parent.mkdir(parents=True)
+    fake_dist_info.write_text(
+        "Metadata-Version: 2.1\nName: rapid-mlx\nVersion: 999.fake\n"
+    )
+
+    assert not eh._runtime_has_rapid_mlx_distribution(
+        Path("/usr/bin/python3"),
+        server_cwd,
+        {"PATH": "/usr/bin:/bin"},
+    )
+
+
+def test_runtime_validation_requires_system_python_to_register_distribution():
+    assert not eh._runtime_has_rapid_mlx_distribution(
+        Path("/usr/bin/python3"),
+        Path("/"),
         {"PATH": "/usr/bin:/bin"},
     )
 
@@ -1323,6 +1349,55 @@ def test_real_remote_probe_confirms_importable_package_without_metadata(
     assert "importability cannot be verified" in row.label
     assert "not installed" not in row.label
     assert str(server_runtime) in row.detail
+
+
+def test_remote_probe_accepts_trusted_single_file_module(
+    tmp_path,
+    monkeypatch,
+):
+    sidecar_root = tmp_path / "sidecar"
+    site_root = sidecar_root / "site-packages"
+    site_root.mkdir(parents=True)
+    (site_root / "probe_single_file.py").write_text("probe_loaded = True\n")
+    runtime = Path(sys.executable).resolve()
+    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+    probe = eh._probe_runtime(
+        runtime,
+        sidecar_root=sidecar_root,
+        packages={"transformers": "probe_single_file"},
+    )
+
+    assert probe is not None
+    package = cast("dict[str, object]", probe["packages"]["transformers"])
+    assert package["discoverable"] is True
+    assert package["trusted_origin"] is True
+    assert package["importable"] is True
+    assert package["version"] is None
+
+
+def test_remote_probe_does_not_report_unbound_spec_on_bad_finder(tmp_path):
+    source = """\
+import importlib.util
+import json
+import sys
+
+spec = None
+trusted_origin = spec is not None
+try:
+    spec = importlib.util.find_spec(sys.argv[1])
+    trusted_origin = spec is not None
+except Exception:
+    pass
+print(json.dumps({"spec": spec, "trusted_origin": trusted_origin}))
+"""
+    result = json.loads(
+        subprocess.check_output(  # noqa: S603
+            [sys.executable, "-I", "-c", source, "probe_bad_finder"],
+            text=True,
+            cwd="/",
+        )
+    )
+    assert result == {"spec": None, "trusted_origin": False}
 
 
 def test_failed_remote_runtime_probe_is_one_explicit_failure(tmp_path, monkeypatch):

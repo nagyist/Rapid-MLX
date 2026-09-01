@@ -276,6 +276,13 @@ def _runtime_has_rapid_mlx_distribution(
     cache_key = (runtime, tuple(context_roots))
     if cache_key in _RUNTIME_DISTRIBUTION_CACHE:
         return _RUNTIME_DISTRIBUTION_CACHE[cache_key]
+    if runtime == Path("/usr/bin/python3") and cwd != Path("/"):
+        if _runtime_has_rapid_mlx_distribution(
+            Path("/usr/bin/python3"),
+            Path("/"),
+            {"PATH": env.get("PATH", os.environ.get("PATH", "/usr/bin:/bin"))},
+        ):
+            return True
     try:
         result = subprocess.run(  # noqa: S603 — runtime path is resolved above
             [
@@ -594,10 +601,13 @@ baseline_roots = list(sys.path)
 for site_root in probe_paths["context"]:
     if site_root:
         sys.path.insert(0, site_root)
-trusted_roots = [str(Path(root).resolve()) for root in (
-    *trusted_roots,
-    *baseline_roots,
-)]
+trusted_roots = [
+    str(Path(root).resolve()) for root in [*trusted_roots, *baseline_roots]
+]
+
+def _path_is_trusted(path):
+    resolved = Path(path).resolve()
+    return any(resolved == Path(root) or resolved.is_relative_to(root) for root in trusted_roots)
 
 def _module_path_is_trusted(spec):
     locations = []
@@ -605,11 +615,7 @@ def _module_path_is_trusted(spec):
         locations.append(str(Path(spec.origin).parent))
     if spec.submodule_search_locations:
         locations.extend(spec.submodule_search_locations)
-    return any(
-        str(Path(location).resolve()).startswith(trusted + "/")
-        for location in locations
-        for trusted in trusted_roots
-    )
+    return any(_path_is_trusted(location) for location in locations)
 
 distributions = json.loads(sys.argv[1])
 
@@ -625,6 +631,7 @@ for distribution, module_name in distributions.items():
     version = None
     importable = False
     discoverable = False
+    spec = None
     try:
         version = distribution_version(distribution)
     except importlib.metadata.PackageNotFoundError:
@@ -644,10 +651,11 @@ for distribution, module_name in distributions.items():
                 importable = True
     except Exception:
         importable = False
+    trusted_origin = spec is not None and _module_path_is_trusted(spec)
     packages[distribution] = {
         "importable": importable,
         "discoverable": discoverable,
-        "trusted_origin": discoverable and _module_path_is_trusted(spec),
+        "trusted_origin": trusted_origin,
         "module": module_name,
         "version": version,
     }
