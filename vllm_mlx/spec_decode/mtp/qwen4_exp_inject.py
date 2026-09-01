@@ -202,7 +202,7 @@ def inject_qwen4_exp_mtp_support(
         original_class = type(inner)
 
         class _Qwen4ExpWithMTP(original_class):  # type: ignore[valid-type, misc]
-            mtp_prompt_lookup_supported = False
+            mtp_prompt_lookup_supported = True
 
             def mtp_forward(
                 self,
@@ -233,6 +233,8 @@ def inject_qwen4_exp_mtp_support(
         inner.mtp_max_speculative_tokens = 1
         model.mtp_max_speculative_tokens = 1
         inner.__class__ = _Qwen4ExpWithMTP
+        if model is not inner:
+            model.mtp_prompt_lookup_supported = True
         mx.eval(mtp.parameters())
         return True
     except Exception:

@@ -1767,6 +1767,11 @@ def _install_mtp_vendored(
             # is fine — mlx-lm's ``next()`` enforces the true max via
             # ``_num_tokens[i] >= self.max_tokens[i]``.
             gen_max = int(gb.max_tokens[0]) if gb.max_tokens else 4096
+            prompt_lookup_enabled = getattr(
+                mtp_model, "mtp_prompt_lookup_supported", False
+            ) and os.environ.get(
+                "RAPID_MLX_MTP_PROMPT_LOOKUP", "0"
+            ).strip().lower() not in {"0", "false", "off", "no"}
 
             # Codex round-A blocker #2: construct the generator BEFORE
             # mutating ``gb.tokens[0]``. Prior revision appended the
@@ -1837,6 +1842,13 @@ def _install_mtp_vendored(
                     # priming token. Both owners run on this generation
                     # thread; never re-derive from the public seed.
                     lane_rng=sampling_options["lane_rng"],
+                    timing_stats=_stats,
+                    prompt_lookup_enabled=prompt_lookup_enabled,
+                    prompt_lookup_history=(
+                        list(gb.tokens[0]) + [first_tok]
+                        if prompt_lookup_enabled
+                        else None
+                    ),
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(
@@ -9213,8 +9225,12 @@ class Scheduler:
             from .runtime import disk_kv_checkpoint as _dkc
 
             stats["kv_checkpoint"] = _dkc.get_stats()
-        except Exception:  # pragma: no cover — defensive
+        except Exception:  # pragma: no cover - defensive
             pass
+        if self.batch_generator is not None:
+            mtp_vendored = getattr(self.batch_generator, "_mtp_vendored_stats", None)
+            if isinstance(mtp_vendored, dict):
+                stats["mtp_vendored"] = dict(mtp_vendored)
         # Include Metal memory stats
         try:
             if mx.metal.is_available():

@@ -3004,6 +3004,14 @@ def test_prompt_lookup_requires_an_audited_model_capability(monkeypatch):
     assert not _prompt_lookup_is_enabled(
         SimpleNamespace(mtp_prompt_lookup_supported=True)
     )
+    assert _prompt_lookup_is_enabled(
+        SimpleNamespace(mtp_prompt_lookup_supported=True), requested=True
+    )
+
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP", "1")
+    assert not _prompt_lookup_is_enabled(
+        SimpleNamespace(mtp_prompt_lookup_supported=True), requested=False
+    )
 
 
 def test_generator_prompt_lookup_partial_reject_keeps_mtp_cache_aligned(
