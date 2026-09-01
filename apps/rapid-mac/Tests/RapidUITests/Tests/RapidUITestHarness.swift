@@ -56,6 +56,17 @@ struct MemoryConfirmationRetryPolicy {
     }
 }
 
+enum FileDropRetryPolicy {
+    static func shouldRetry(
+        completedDrop: Bool,
+        attempt: Int,
+        maximumAttempts: Int,
+        remainingTime: TimeInterval
+    ) -> Bool {
+        !completedDrop && attempt < maximumAttempts && remainingTime > 0
+    }
+}
+
 @MainActor
 final class RapidUITestHarness {
     let app: XCUIApplication
@@ -331,9 +342,12 @@ final class RapidUITestHarness {
             if chip.exists && chip.isHittable { return }
 
             let observedPhase = try? String(contentsOf: dropEventFile, encoding: .utf8)
-            if observedPhase == nil, attempt < maximumAttempts,
-               settleDeadline.timeIntervalSinceNow > 0
-            {
+            if FileDropRetryPolicy.shouldRetry(
+                completedDrop: observedPhase != nil,
+                attempt: attempt,
+                maximumAttempts: maximumAttempts,
+                remainingTime: settleDeadline.timeIntervalSinceNow
+            ) {
                 continue
             }
 

@@ -120,7 +120,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     )
     assert 'matching(identifier: "RapidUITests.FileDragSource")' in harness
     assert "let maximumAttempts = 2" in harness
-    assert "if observedPhase == nil, attempt < maximumAttempts" in harness
+    assert "FileDropRetryPolicy.shouldRetry(" in harness
+    assert "func testFileDropRetryPolicyIsBoundedAndCompletionAware()" in chat_source
     assert "Date().addingTimeInterval(dropSettleTimeout)" in harness
     assert '"RAPID_XCUI_DROP_EVENT_FILE": dropEventFile.path' in harness
     assert 'recordUITestFileDrop("entered")' not in chat_view

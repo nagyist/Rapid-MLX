@@ -13,6 +13,41 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         executionTimeAllowance = 120
     }
 
+    func testFileDropRetryPolicyIsBoundedAndCompletionAware() {
+        XCTAssertTrue(
+            FileDropRetryPolicy.shouldRetry(
+                completedDrop: false,
+                attempt: 1,
+                maximumAttempts: 2,
+                remainingTime: 1
+            )
+        )
+        XCTAssertFalse(
+            FileDropRetryPolicy.shouldRetry(
+                completedDrop: false,
+                attempt: 2,
+                maximumAttempts: 2,
+                remainingTime: 1
+            )
+        )
+        XCTAssertFalse(
+            FileDropRetryPolicy.shouldRetry(
+                completedDrop: true,
+                attempt: 1,
+                maximumAttempts: 2,
+                remainingTime: 1
+            )
+        )
+        XCTAssertFalse(
+            FileDropRetryPolicy.shouldRetry(
+                completedDrop: false,
+                attempt: 1,
+                maximumAttempts: 2,
+                remainingTime: 0
+            )
+        )
+    }
+
     func testPickerAttachmentsStayWithTheirConversationAndWirePayload() throws {
         continueAfterFailure = false
         let harness = try RapidUITestHarness(
