@@ -909,7 +909,7 @@ def test_static_refusals_preserve_plain_fallback_without_legacy_mtp():
     assert decision.admitted is False
     assert decision.fallback is ContinuousMTPIntegrationRoute.PLAIN_DECODE
     joined = " ".join(decision.reasons)
-    assert "unsupported model family" in joined
+    assert "capability descriptor mismatch: max_exact_fixed_lanes" in joined
     assert "windowed cache" in joined
     assert "dynamic membership" in joined
 
