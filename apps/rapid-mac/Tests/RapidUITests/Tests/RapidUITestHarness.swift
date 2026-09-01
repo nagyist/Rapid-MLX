@@ -273,13 +273,14 @@ final class RapidUITestHarness {
     /// ``expectedChip`` is the remove control the drop must produce, fetched at
     /// the call site via ``element(_:)`` (which keeps the query literal in the
     /// test source for the xcui workflow contract). A landed drop is treated as
-    /// one whose chip settles (exists and is hittable); the helper waits
-    /// ``dropSettleTimeout`` for that and asserts if it never appears. The chip
-    /// element is polled directly (``exists``/``isHittable``) — never
-    /// dereferenced before it exists, so a not-yet-matched ``firstMatch``
-    /// cannot throw. There is deliberately NO silent re-issue of the synthetic
-    /// drag: a first drop that does not land despite the hittable gate is a
-    /// real product defect the test should surface, not retry over (#2481).
+    /// one whose chip settles (exists and is hittable). The helper host reports
+    /// the AppKit drag-session outcome through its accessibility value. A
+    /// gesture that AppKit explicitly reports as ``none`` never reached the
+    /// product, so the harness may retry that transport failure once within the
+    /// original settle budget. A reported ``copy`` is never retried: if its chip
+    /// does not appear, the test still exposes the product/AX regression. The
+    /// chip is never dereferenced before it exists, so a not-yet-matched
+    /// ``firstMatch`` cannot throw (#2481).
     /// Callers without an expected chip (the unsupported-file negative case)
     /// keep the original single-drop behaviour.
     func dragFile(
@@ -310,9 +311,37 @@ final class RapidUITestHarness {
             source.click(forDuration: 1, thenDragTo: dropTarget)
             return
         }
-        source.click(forDuration: 1, thenDragTo: dropTarget)
-        XCTAssertTrue(waitUntil(timeout: dropSettleTimeout) { chip.exists && chip.isHittable },
-                      "dropped attachment chip did not settle within \(dropSettleTimeout)s")
+        let settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
+        let maximumAttempts = 2
+        for attempt in 1...maximumAttempts {
+            source.click(forDuration: 1, thenDragTo: dropTarget)
+
+            // The drag callback and the product render arrive independently.
+            // First wait briefly for either authoritative signal, then spend
+            // the rest of the original budget on a copied drop's chip.
+            _ = waitUntil(timeout: min(2, max(0, settleDeadline.timeIntervalSinceNow))) {
+                (chip.exists && chip.isHittable)
+                    || (source.value as? String ?? "pending") != "pending"
+            }
+            if chip.exists && chip.isHittable { return }
+
+            let dragOperation = source.value as? String ?? "unavailable"
+            if dragOperation == "none", attempt < maximumAttempts,
+               settleDeadline.timeIntervalSinceNow > 0
+            {
+                continue
+            }
+
+            let remaining = max(0, settleDeadline.timeIntervalSinceNow)
+            if waitUntil(timeout: remaining, condition: { chip.exists && chip.isHittable }) {
+                return
+            }
+            XCTFail(
+                "dropped attachment chip did not settle within \(dropSettleTimeout)s "
+                    + "(drag operation: \(dragOperation), attempts: \(attempt))"
+            )
+            return
+        }
     }
 
     func pasteImage(_ url: URL) throws {

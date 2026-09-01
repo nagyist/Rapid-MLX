@@ -80,6 +80,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     chat_source = (
         MAC / "Tests/RapidUITests/Tests/ChatAttachmentJourneyTests.swift"
     ).read_text()
+    drag_host = (MAC / "Tests/RapidUITests/Host/main.swift").read_text()
 
     assert "build/Rapid-MLX Desktop.app" in runner
     assert "lsregister" in runner
@@ -118,6 +119,11 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
         'XCUIApplication(bundleIdentifier: "com.rapidmlx.rapid-uitest-host")' in harness
     )
     assert 'matching(identifier: "RapidUITests.FileDragSource")' in harness
+    assert "let maximumAttempts = 2" in harness
+    assert 'dragOperation == "none"' in harness
+    assert "Date().addingTimeInterval(dropSettleTimeout)" in harness
+    assert "endedAt screenPoint: NSPoint" in drag_host
+    assert "operation.contains(.copy) ? .copy : .none" in drag_host
     assert 'let dropTarget = element("rapid.chat.compose")' in harness
     assert "click(forDuration: 1, thenDragTo: dropTarget)" in harness
     assert "func testDragPasteAndRemovalPreserveWireIdentity()" in chat_source
