@@ -197,6 +197,18 @@ def test_registry_pair_searches_past_duplicate_experimental_alias(monkeypatch) -
     )
 
 
+def test_registry_pair_lookup_fails_closed_on_registry_error(monkeypatch) -> None:
+    from vllm_mlx import model_aliases
+
+    def _raise():
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(model_aliases, "list_profiles", _raise)
+    assert not is_registry_verified_pair(
+        "user/target", "a" * 40, "user/drafter", "b" * 40, "dflash"
+    )
+
+
 def test_check_message_lists_eligible_aliases() -> None:
     """Error messages must point users at a working alias — saves a
     docs round-trip."""

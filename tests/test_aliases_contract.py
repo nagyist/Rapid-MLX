@@ -711,6 +711,40 @@ def test_negative_control_dflash_missing_algorithm_is_caught() -> None:
         )
 
 
+def test_negative_control_dflash_algorithm_without_drafter_is_caught() -> None:
+    from vllm_mlx.model_aliases import _coerce
+
+    with pytest.raises(ValueError, match="requires dflash_draft_model"):
+        _coerce(
+            "fake-alias",
+            {"hf_path": "fake/Model", "dflash_algorithm": "dflash2"},
+        )
+
+
+def test_negative_control_unknown_dflash_algorithm_is_caught() -> None:
+    from vllm_mlx.model_aliases import _coerce
+
+    with pytest.raises(ValueError, match="not in"):
+        _coerce(
+            "fake-alias",
+            {
+                "hf_path": "fake/Model",
+                "dflash_draft_model": "fake/DFlash",
+                "dflash_algorithm": "unknown",
+            },
+        )
+
+
+def test_negative_control_dflash_revision_without_drafter_is_caught() -> None:
+    from vllm_mlx.model_aliases import _coerce
+
+    with pytest.raises(ValueError, match="revision pins require"):
+        _coerce(
+            "fake-alias",
+            {"hf_path": "fake/Model", "dflash_target_revision": "a" * 40},
+        )
+
+
 @pytest.mark.parametrize(
     "target_revision,draft_revision",
     [

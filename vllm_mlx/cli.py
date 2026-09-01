@@ -9392,7 +9392,12 @@ def _print_dflash_status(alias: str, profile) -> None:
     quantized_target = _looks_like_4bit(profile.hf_path)
     if not quantized_target:
         precision_status = "✓ 8-bit or higher"
-    elif profile.supports_dflash and profile.dflash_algorithm == "dflash2":
+    elif (
+        profile.supports_dflash
+        and profile.dflash_algorithm == "dflash2"
+        and profile.dflash_target_revision
+        and profile.dflash_draft_revision
+    ):
         precision_status = "✓ 4-bit (exact pair qualified)"
     else:
         precision_status = "⚠ 4-bit (experimental pair)"

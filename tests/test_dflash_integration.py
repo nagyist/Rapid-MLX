@@ -184,6 +184,8 @@ def test_expected_algorithm_only_applies_to_exact_registry_pair() -> None:
         == "dflash2"
     )
     assert _resolve_dflash_expected_algorithm(profile, "operator/override") is None
+    assert _resolve_dflash_expected_algorithm(None, "operator/override") is None
+    assert _resolve_dflash_expected_algorithm(profile, None) is None
 
 
 def test_dflash_revision_pins_only_apply_to_exact_registry_pair() -> None:
@@ -201,6 +203,8 @@ def test_dflash_revision_pins_only_apply_to_exact_registry_pair() -> None:
         "b" * 40,
     )
     assert _resolve_dflash_revisions(profile, "operator/override") == ("a" * 40, None)
+    assert _resolve_dflash_revisions(None, "operator/override") == (None, None)
+    assert _resolve_dflash_revisions(profile, None) == (None, None)
 
 
 def test_programmatic_4bit_requires_explicit_experimental_opt_in(monkeypatch) -> None:
@@ -240,6 +244,44 @@ def test_programmatic_dflash2_identity_cannot_bypass_registry_qualification(
             cors_origins=[],
             uvicorn_log_level="error",
         )
+
+
+def test_programmatic_experimental_4bit_logs_unverified_pair(
+    monkeypatch, caplog
+) -> None:
+    import sys
+    import types
+
+    from vllm_mlx.speculative.dflash import server as srv
+    from vllm_mlx.speculative.dflash.runtime import DFlashRuntime
+
+    runtime = DFlashRuntime(
+        drafter=MagicMock(), kind="dflash", drafter_repo="user/drafter"
+    )
+    monkeypatch.setattr(srv, "have_runtime", lambda: True)
+    monkeypatch.setattr(srv, "load_runtime", lambda _repo, **_kwargs: runtime)
+    fake_mlx_vlm = types.ModuleType("mlx_vlm")
+    fake_mlx_vlm.load = lambda _repo, **_kwargs: (MagicMock(), MagicMock())
+    monkeypatch.setitem(sys.modules, "mlx_vlm", fake_mlx_vlm)
+
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: None)
+    with caplog.at_level("WARNING"):
+        srv.run_dflash_server(
+            main_model_repo="user/target-4bit",
+            drafter_repo="user/drafter",
+            expected_algorithm="dflash",
+            experimental_opt_in=True,
+            host="127.0.0.1",
+            port=58996,
+            served_model_name="target",
+            default_max_tokens=32,
+            cors_origins=[],
+            uvicorn_log_level="error",
+        )
+
+    assert "has not been performance-validated" in caplog.text
 
 
 def test_dflash_preflight_rejects_legacy_mtp_alias(capsys) -> None:
@@ -327,6 +369,23 @@ def test_info_dflash_marks_4bit_alias_experimental(capsys) -> None:
     captured = capsys.readouterr()
     assert "DFlash eligibility" in captured.out
     assert "experimental" in captured.out
+
+
+def test_info_dflash_marks_pinned_4bit_dflash2_pair_qualified(capsys) -> None:
+    from vllm_mlx.cli import _print_dflash_status
+    from vllm_mlx.model_aliases import AliasProfile
+
+    profile = AliasProfile(
+        hf_path="user/target-4bit",
+        supports_dflash=True,
+        dflash_draft_model="user/dflash2",
+        dflash_target_revision="a" * 40,
+        dflash_draft_revision="b" * 40,
+        dflash_algorithm="dflash2",
+    )
+    _print_dflash_status("target", profile)
+
+    assert "4-bit (exact pair qualified)" in capsys.readouterr().out
 
 
 def test_info_qwen38_exposes_exact_dflash2_experiment_without_recommending_it(
