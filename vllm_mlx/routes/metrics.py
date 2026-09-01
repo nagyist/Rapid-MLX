@@ -11,9 +11,9 @@ Design choices
   well-specified (https://prometheus.io/docs/instrumenting/exposition_formats/).
   Hand-rolling ~40 LOC avoids pulling in ``prometheus_client`` (and its
   global default registry, which would fight with multi-engine tests).
-- **No new instrumentation sites.** Every metric maps onto a field that
-  ``engine.get_stats()`` already returns — no per-request hot-path cost,
-  no new counters scattered across the engine.
+- **No new runtime dependency.** Request outcome/token/timing series are
+  produced by the scheduler's small in-memory performance ledger and are
+  still exposed through ``engine.get_stats()``.
 - **Unauthenticated**, on ``probe_router`` rather than the auth-gated
   router, to match the standard Prometheus scrape model. Mirrors
   ``/healthz`` exactly.
@@ -169,6 +169,153 @@ def _coerce_number(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _render_model_performance(stats: dict[str, Any]) -> list[str]:
+    """Render model-labelled request outcomes and latency distributions."""
+    performance = stats.get("model_performance")
+    if not isinstance(performance, dict):
+        return []
+
+    model_name = str(performance.get("model_name") or "")
+    labels = {"model": model_name}
+    lines: list[str] = []
+
+    reported_total = performance.get("total_requests")
+    if reported_total is None:
+        reported_total = sum(
+            _coerce_number(performance.get(f"requests_{outcome}"), 0.0)
+            for outcome in ("succeeded", "cancelled", "failed")
+        )
+    requests_total = _coerce_number(reported_total, 0.0)
+    lines.extend(
+        _fmt_metric(
+            "rapid_mlx_model_requests_total",
+            "counter",
+            "Text-engine requests by terminal outcome and model.",
+            requests_total,
+            labels={**labels, "outcome": "total"},
+        )
+    )
+    for outcome in ("succeeded", "cancelled", "failed"):
+        lines.extend(
+            _fmt_metric(
+                "rapid_mlx_model_requests_total",
+                "counter",
+                "Text-engine requests by terminal outcome and model.",
+                int(_coerce_number(performance.get(f"requests_{outcome}"), 0.0)),
+                labels={**labels, "outcome": outcome},
+            )
+        )
+
+    for token_kind in ("prompt", "completion"):
+        lines.extend(
+            _fmt_metric(
+                f"rapid_mlx_model_{token_kind}_tokens_total",
+                "counter",
+                f"Cumulative {token_kind} tokens processed by the model.",
+                int(_coerce_number(performance.get(f"{token_kind}_tokens"), 0.0)),
+                labels=labels,
+            )
+        )
+
+    ttft_buckets = performance.get("ttft_bucket_counts")
+    if isinstance(ttft_buckets, dict):
+        for bucket, count in ttft_buckets.items():
+            lines.extend(
+                _fmt_metric(
+                    "rapid_mlx_model_ttft_seconds_bucket",
+                    "histogram",
+                    "Time to first token, in seconds, by model.",
+                    int(_coerce_number(count, 0.0)),
+                    labels={**labels, "le": str(bucket)},
+                )
+            )
+        lines.extend(
+            _fmt_metric(
+                "rapid_mlx_model_ttft_seconds_count",
+                "histogram",
+                "Time to first token, in seconds, by model.",
+                int(_coerce_number(performance.get("ttft_seconds_count"), 0.0)),
+                labels=labels,
+            )
+        )
+        lines.extend(
+            _fmt_metric(
+                "rapid_mlx_model_ttft_seconds_sum",
+                "histogram",
+                "Time to first token, in seconds, by model.",
+                round(_coerce_number(performance.get("ttft_seconds_sum"), 0.0), 6),
+                labels=labels,
+            )
+        )
+
+    decode_buckets = performance.get("decode_bucket_counts")
+    if isinstance(decode_buckets, dict):
+        for bucket, count in decode_buckets.items():
+            lines.extend(
+                _fmt_metric(
+                    "rapid_mlx_model_decode_tokens_per_second_bucket",
+                    "histogram",
+                    "Post-first-token decode speed in tokens per second by model.",
+                    int(_coerce_number(count, 0.0)),
+                    labels={**labels, "le": str(bucket)},
+                )
+            )
+        lines.extend(
+            _fmt_metric(
+                "rapid_mlx_model_decode_tokens_per_second_count",
+                "histogram",
+                "Post-first-token decode speed in tokens per second by model.",
+                int(_coerce_number(performance.get("decode_observations"), 0.0)),
+                labels=labels,
+            )
+        )
+        lines.extend(
+            _fmt_metric(
+                "rapid_mlx_model_decode_tokens_per_second_sum",
+                "histogram",
+                "Post-first-token decode speed in tokens per second by model.",
+                round(
+                    _coerce_number(
+                        performance.get("decode_tokens_per_second_sum"), 0.0
+                    ),
+                    6,
+                ),
+                labels=labels,
+            )
+        )
+
+    for metric_name, value_key, help_text in (
+        (
+            "rapid_mlx_model_ttft_seconds_max",
+            "ttft_seconds_max",
+            "Largest observed time to first token, in seconds, since start.",
+        ),
+        (
+            "rapid_mlx_model_decode_tokens_per_second_max",
+            "decode_tokens_per_second_max",
+            "Largest observed post-first-token decode speed since start.",
+        ),
+        (
+            "rapid_mlx_model_decode_tokens_per_second_last",
+            "last_decode_tokens_per_second",
+            "Most recent terminal request's post-first-token decode speed.",
+        ),
+    ):
+        value = performance.get(value_key)
+        if value is not None:
+            lines.extend(
+                _fmt_metric(
+                    metric_name,
+                    "gauge",
+                    help_text,
+                    round(_coerce_number(value), 6),
+                    labels=labels,
+                )
+            )
+
+    return lines
 
 
 def _render_kv_cache_dtype_gauge(cfg: Any) -> list[str]:
@@ -1156,6 +1303,7 @@ def _render_prometheus(cfg: Any) -> str:
         return "\n".join(lines) + "\n"
 
     # ---- Scheduler counters & gauges -----------------------------------
+    lines.extend(_render_model_performance(stats))
     lines.extend(
         _fmt_metric(
             "rapid_mlx_requests_processed_total",

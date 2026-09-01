@@ -131,6 +131,7 @@ from .repetition_guard import (
     detect_repeated_token_suffix,
 )
 from .request import Request, RequestOutput, RequestStatus, SamplingParams
+from .runtime.model_performance import ModelPerformanceLedger
 from .utils.decode import IncrementalDecoder
 from .utils.mamba_cache import ensure_mamba_support
 
@@ -3515,6 +3516,9 @@ class Scheduler:
         self.config = config or SchedulerConfig()
         self._tool_logits_processor_factory = tool_logits_processor_factory
         self.model_config = model_config
+        self.performance = ModelPerformanceLedger(
+            model_name=getattr(self.config, "model_name", None)
+        )
         if os.environ.get("RAPID_DUMP_SCHED_CONFIG"):
             import dataclasses as _dc
 
@@ -7315,6 +7319,7 @@ class Scheduler:
             self.total_prompt_tokens += request.num_prompt_tokens
 
         if request is not None:
+            self._record_cancelled_performance(request)
             request.set_finished(RequestStatus.FINISHED_CANCELLED)
             # Release cache references so Metal buffers can be freed
             request.prompt_cache = None
@@ -8245,6 +8250,7 @@ class Scheduler:
 
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1
+                self._record_finished_performance(request)
 
                 logger.debug(
                     f"Request {request_id} finished: {response.finish_reason}, "
@@ -8256,6 +8262,46 @@ class Scheduler:
         if prompt_tps_this_batch > 0:
             self._last_prompt_tps = prompt_tps_this_batch
         return outputs, finished_ids
+
+    def _decode_rate_for_request(self, request: Request) -> float | None:
+        """Return inverse-TPOT decode speed, or None when not measurable."""
+        if request.first_token_time is None or request.num_output_tokens < 2:
+            return None
+        decode_seconds = time.time() - request.first_token_time
+        if decode_seconds <= 0:
+            return None
+        return (request.num_output_tokens - 1) / decode_seconds
+
+    def _ttft_for_request(self, request: Request) -> float | None:
+        if request.first_token_time is None or request.num_output_tokens == 0:
+            return None
+        return max(0.0, request.first_token_time - request.arrival_time)
+
+    def _record_finished_performance(self, request: Request) -> None:
+        """Best-effort performance accounting for a terminal response."""
+        try:
+            self.performance.record_success(
+                request.request_id,
+                prompt_tokens=request.num_prompt_tokens,
+                completion_tokens=request.num_output_tokens,
+                ttft_seconds=self._ttft_for_request(request),
+                decode_tokens_per_second=self._decode_rate_for_request(request),
+            )
+        except Exception:
+            logger.debug("Failed to record performance for %s", request.request_id)
+
+    def _record_cancelled_performance(self, request: Request) -> None:
+        """Best-effort performance accounting for an aborted request."""
+        try:
+            self.performance.record_cancelled(
+                request.request_id,
+                prompt_tokens=request.num_prompt_tokens,
+                completion_tokens=request.num_output_tokens,
+                ttft_seconds=self._ttft_for_request(request),
+                decode_tokens_per_second=self._decode_rate_for_request(request),
+            )
+        except Exception:
+            logger.debug("Failed to record cancellation for %s", request.request_id)
 
     def _safe_disk_checkpoint(self, request: Request, response: Any) -> None:
         """Wrap ``_maybe_disk_checkpoint`` in a never-raise contract.
@@ -9183,6 +9229,7 @@ class Scheduler:
             "num_requests_cancelled_via_disconnect": (
                 self.num_requests_cancelled_via_disconnect
             ),
+            "model_performance": self.performance.snapshot().__dict__,
             # D-METAL-CAP / D-METAL-PFX observability — pre-fix, both
             # were silent: the cap was violated with no warning and the
             # prefix cache pinned slabs through one 32k prefill that

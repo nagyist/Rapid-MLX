@@ -1033,7 +1033,13 @@ class EngineCore:
                     if is_metal
                     else f"Engine loop error: {type(e).__name__}: {e}"
                 )
+                performance = getattr(self.scheduler, "performance", None)
                 for rid in list(self._finished_events.keys()):
+                    if performance is not None:
+                        try:
+                            performance.record_failure(rid)
+                        except Exception:
+                            logger.debug("Failed to record engine failure for %s", rid)
                     collector = self._output_collectors.get(rid)
                     if collector is not None:
                         try:
