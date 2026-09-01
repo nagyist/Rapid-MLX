@@ -717,6 +717,30 @@ def test_commit_merges_existing_pending_pairs_and_rejects_double_commit():
         )
 
 
+def test_commit_rejects_pending_tokens_without_their_hidden_pair():
+    runtime, _forward, _events = _runtime()
+    detached, _ = _prepare(runtime, 0, [1, 2])
+    batch = attach_self_mtp_lanes(None, [detached])
+    computation = runtime.compute.propose(batch.lanes, batch.caches, runtime.forwards)
+    lane = batch.lanes[0]
+
+    # Corruption can occur after proposal but before commit if an outer
+    # scheduler mutates lane state. Commit must reject the split pair before
+    # it publishes any accepted token or advances the proposal boundary.
+    lane.pending_tokens = [99]
+    lane.pending_hidden = None
+    with pytest.raises(RuntimeError, match="pending tokens have no pending hidden"):
+        runtime.compute.commit(
+            batch.lanes,
+            computation,
+            emitted_counts=(len(computation.outputs[0]),),
+            terminal=(False,),
+        )
+
+    lane.pending_tokens = []
+    runtime.compute.abort(batch.lanes, batch.caches, computation, None)
+
+
 def test_ragged_adapter_rejects_incomplete_cache_transaction_surfaces():
     adapter = RapidRaggedCacheAdapter(
         preflight=lambda *args, **kwargs: None,
