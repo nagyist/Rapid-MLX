@@ -247,23 +247,6 @@ _RUNTIME_CONTEXTS: dict[Path, tuple[Path, dict[str, str]]] = {}
 _RUNTIME_DISTRIBUTION_CACHE: dict[Path, bool] = {}
 
 
-def _context_root_paths(cwd: Path, env: dict[str, str]) -> list[Path]:
-    """Return absolute context paths from a server's cwd and PYTHONPATH."""
-    paths = [cwd.resolve()]
-    for entry in env.get("PYTHONPATH", "").split(os.pathsep):
-        if not entry:
-            continue
-        candidate = Path(entry).expanduser()
-        if not candidate.is_absolute():
-            candidate = cwd / candidate
-        paths.append(candidate.resolve())
-    unique_paths: list[Path] = []
-    for path in paths:
-        if path not in unique_paths:
-            unique_paths.append(path)
-    return unique_paths
-
-
 def _runtime_has_rapid_mlx_distribution(
     runtime: Path,
     cwd: Path,
@@ -297,7 +280,7 @@ def _runtime_has_rapid_mlx_distribution(
             ],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=_bounded_timeout(3),
             cwd=str(cwd),
             env={"PATH": env.get("PATH", os.environ.get("PATH", "/usr/bin:/bin"))},
             check=True,
@@ -575,6 +558,11 @@ def _runtime_python_path() -> Path:
         candidates: list[tuple[float, Path, Path, dict[str, str]]] = []
         for process in psutil.process_iter(["pid", "cmdline", "create_time"]):
             try:
+                if (
+                    _DOCTOR_DEADLINE is not None
+                    and time.monotonic() >= _DOCTOR_DEADLINE
+                ):
+                    break
                 cmdline = process.info.get("cmdline") or []
                 if process.info["pid"] == os.getpid():
                     continue

@@ -24,6 +24,7 @@ import plistlib
 import shlex
 import subprocess
 import sys
+import time
 
 try:
     import tomllib
@@ -1946,7 +1947,6 @@ def test_context_module_without_metadata_is_visible_but_unverified(
     runtime.chmod(0o755)
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
     monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
-    monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
 
     visible = eh._visible_without_metadata(
         "transformers",
@@ -2135,6 +2135,24 @@ def test_run_all_bounds_remote_probe_budget_and_clears_deadline(monkeypatch):
     assert len(seen_deadlines) == 1
     assert seen_deadlines[0] is not None
     assert eh._DOCTOR_DEADLINE is None
+
+
+def test_runtime_process_scan_stops_when_doctor_budget_expires(tmp_path, monkeypatch):
+    runtime_override = tmp_path / "override" / "python3"
+    runtime_override.parent.mkdir(parents=True)
+    runtime_override.write_text("")
+    monkeypatch.setenv("RAPID_MLX_RUNTIME_PYTHON", str(runtime_override))
+    monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", time.monotonic() - 1)
+
+    class FakeProcess:
+        info = {"pid": os.getpid() + 1, "cmdline": [], "create_time": 1.0}
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert eh._runtime_python_path() == runtime_override.absolute()
+    fake_psutil.process_iter.assert_called_once()
 
 
 def test_signed_sidecar_receives_no_pip_remediation(tmp_path):
