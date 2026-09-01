@@ -10,6 +10,7 @@ final class FileDragView: NSView, NSDraggingSource {
     private let dropsFirstGesture: Bool
     private var startedDragging = false
     private var gestureCount = 0
+    private var dropsCurrentGesture = false
 
     init(fileURL: URL, dropsFirstGesture: Bool) {
         self.fileURL = fileURL
@@ -37,13 +38,14 @@ final class FileDragView: NSView, NSDraggingSource {
 
     override func mouseDown(with event: NSEvent) {
         startedDragging = false
+        gestureCount += 1
+        dropsCurrentGesture = dropsFirstGesture && gestureCount == 1
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard !startedDragging else { return }
         startedDragging = true
-        gestureCount += 1
-        if dropsFirstGesture && gestureCount == 1 { return }
+        if dropsCurrentGesture { return }
         let item = NSDraggingItem(pasteboardWriter: fileURL as NSURL)
         item.setDraggingFrame(bounds, contents: NSWorkspace.shared.icon(forFile: fileURL.path))
         beginDraggingSession(with: [item], event: event, source: self)
