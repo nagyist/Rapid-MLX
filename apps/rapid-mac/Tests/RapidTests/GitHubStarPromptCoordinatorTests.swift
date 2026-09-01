@@ -253,7 +253,8 @@ struct GitHubStarPromptCoordinatorTests {
         let pidFile = directory.appendingPathComponent("pid")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        try Data("#!/bin/sh\necho $$ > '\(pidFile.path)'\nsleep 30\n".utf8).write(to: executable)
+        try Data("#!/bin/sh\nsleep 30 &\necho \"$$ $!\" > '\(pidFile.path)'\nwait\n".utf8)
+            .write(to: executable)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: executable.path
@@ -273,7 +274,10 @@ struct GitHubStarPromptCoordinatorTests {
         }
         let pidText = try String(contentsOf: pidFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let pid = try #require(pid_t(pidText))
+        let pids = try pidText.split(separator: " ").map {
+            try #require(pid_t($0))
+        }
+        #expect(pids.count == 2)
 
         request.cancel()
         await #expect(throws: CancellationError.self) {
@@ -281,10 +285,12 @@ struct GitHubStarPromptCoordinatorTests {
         }
 
         let reapDeadline = clock.now.advanced(by: .seconds(3))
-        while kill(pid, 0) == 0, clock.now < reapDeadline {
+        while pids.contains(where: { kill($0, 0) == 0 }), clock.now < reapDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(kill(pid, 0) == -1 && errno == ESRCH)
+        for pid in pids {
+            #expect(kill(pid, 0) == -1 && errno == ESRCH)
+        }
     }
 
     @Test("A second direct star cannot start while the first is in flight")

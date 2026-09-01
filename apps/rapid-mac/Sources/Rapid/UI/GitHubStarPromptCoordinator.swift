@@ -245,17 +245,13 @@ enum GitHubStarCLI {
             throw GitHubStarCLIError.executableNotFound
         }
 
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = apiArguments()
+        let child = try GitHubStarChild.spawn(
+            executableURL: executable,
+            arguments: apiArguments()
+        )
+        let terminationStatus = try await waitUntilExit(child, timeout: requestedTimeout)
 
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        try process.run()
-        try await waitUntilExit(process, timeout: requestedTimeout)
-
-        guard process.terminationStatus == 0 else {
+        guard terminationStatus == 0 else {
             throw GitHubStarCLIError.commandFailed
         }
     }
@@ -283,7 +279,7 @@ enum GitHubStarCLI {
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    private static func waitUntilExit(_ process: Process, timeout: Duration) async throws {
+    private static func waitUntilExit(_ child: GitHubStarChild, timeout: Duration) async throws -> Int32 {
         enum Outcome {
             case exited(Int32)
             case timedOut
@@ -291,21 +287,18 @@ enum GitHubStarCLI {
 
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        let termination = GitHubStarProcessTermination(process)
         let outcome = try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: Outcome.self) { group in
                 group.addTask {
-                    await Task.detached {
-                        process.waitUntilExit()
-                    }.value
+                    let status = await child.waitUntilExit()
                     // Once the deadline has passed, timeout is authoritative even
                     // if SIGKILL makes the waiter observe a nonzero exit first.
                     guard clock.now < deadline else { return .timedOut }
-                    return .exited(process.terminationStatus)
+                    return .exited(status)
                 }
                 group.addTask {
                     try await clock.sleep(until: deadline)
-                    termination.killIfRunning()
+                    child.killIfRunning()
                     return .timedOut
                 }
 
@@ -319,30 +312,210 @@ enum GitHubStarCLI {
             // Cancelling the caller also cancels the timeout sleeper. Kill the
             // child here so the detached waiter can reap it before the task
             // group propagates CancellationError.
-            termination.killIfRunning()
+            child.killIfRunning()
         }
 
         switch outcome {
-        case .exited(0):
-            return
-        case .exited:
-            throw GitHubStarCLIError.commandFailed
+        case let .exited(status):
+            return status
         case .timedOut:
             throw GitHubStarCLIError.timedOut
         }
     }
 }
 
-private final class GitHubStarProcessTermination: @unchecked Sendable {
-    private let process: Process
+/// Owns launch, signalling, and reaping for the short-lived `gh` child.
+/// Foundation `Process.waitUntilExit()` can race a raw PID signal after the
+/// process has been reaped. This owner serializes SIGKILL with the only
+/// `waitpid`, so an exited PID cannot be reused before signalling decides.
+private final class GitHubStarChild: @unchecked Sendable {
+    private static let exitQueue = DispatchQueue(
+        label: "com.rapidmlx.desktop.github-star-exit",
+        qos: .userInitiated
+    )
 
-    init(_ process: Process) {
-        self.process = process
+    private let processIdentifier: pid_t
+    private let lock = NSLock()
+    private let reapLock = NSLock()
+    private var running = true
+    private var terminationStatus: Int32?
+    private var waiters: [CheckedContinuation<Int32, Never>] = []
+    private var exitSource: (any DispatchSourceProcess)?
+
+    private init(processIdentifier: pid_t) {
+        self.processIdentifier = processIdentifier
     }
 
     func killIfRunning() {
-        if process.isRunning {
-            _ = kill(process.processIdentifier, SIGKILL)
+        reapLock.lock()
+        lock.lock()
+        let shouldSignal = running
+        lock.unlock()
+        if shouldSignal {
+            _ = kill(-processIdentifier, SIGKILL)
         }
+        reapLock.unlock()
+    }
+
+    func waitUntilExit() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let terminationStatus {
+                lock.unlock()
+                continuation.resume(returning: terminationStatus)
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    static func spawn(executableURL: URL, arguments: [String]) throws -> GitHubStarChild {
+        var fileActions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        guard posix_spawn_file_actions_init(&fileActions) == 0 else {
+            throw GitHubStarCLIError.commandFailed
+        }
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        guard posix_spawnattr_init(&attributes) == 0 else {
+            throw GitHubStarCLIError.commandFailed
+        }
+        defer { posix_spawnattr_destroy(&attributes) }
+        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)) == 0,
+            posix_spawnattr_setpgroup(&attributes, 0) == 0
+        else {
+            throw GitHubStarCLIError.commandFailed
+        }
+
+        guard posix_spawn_file_actions_addopen(
+            &fileActions,
+            STDIN_FILENO,
+            "/dev/null",
+            O_RDONLY,
+            0
+        ) == 0,
+            posix_spawn_file_actions_addopen(
+                &fileActions,
+                STDOUT_FILENO,
+                "/dev/null",
+                O_WRONLY,
+                0
+            ) == 0,
+            posix_spawn_file_actions_addopen(
+                &fileActions,
+                STDERR_FILENO,
+                "/dev/null",
+                O_WRONLY,
+                0
+            ) == 0
+        else {
+            throw GitHubStarCLIError.commandFailed
+        }
+
+        let argv = [executableURL.path] + arguments
+        let environment = ProcessInfo.processInfo.environment
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+        var pid: pid_t = 0
+        let spawnResult = argv.withGitHubStarCStringArray { argvPointer in
+            environment.withGitHubStarCStringArray { environmentPointer in
+                executableURL.path.withCString { executablePath in
+                    posix_spawn(
+                        &pid,
+                        executablePath,
+                        &fileActions,
+                        &attributes,
+                        argvPointer,
+                        environmentPointer
+                    )
+                }
+            }
+        }
+        guard spawnResult == 0 else {
+            throw GitHubStarCLIError.commandFailed
+        }
+
+        let child = GitHubStarChild(processIdentifier: pid)
+        child.startExitMonitor()
+        return child
+    }
+
+    private func startExitMonitor() {
+        let source = DispatchSource.makeProcessSource(
+            identifier: processIdentifier,
+            eventMask: .exit,
+            queue: Self.exitQueue
+        )
+        source.setEventHandler { [weak self] in
+            self?.reapExitedProcess(waitOptions: 0)
+        }
+        lock.lock()
+        exitSource = source
+        lock.unlock()
+        source.activate()
+
+        // Close the very-short-lived-child race before the source is armed.
+        _ = reapExitedProcess(waitOptions: WNOHANG)
+    }
+
+    @discardableResult
+    private func reapExitedProcess(waitOptions: Int32) -> Bool {
+        reapLock.lock()
+        lock.lock()
+        guard running else {
+            lock.unlock()
+            reapLock.unlock()
+            return true
+        }
+        lock.unlock()
+
+        var waitStatus: Int32 = 0
+        var waited: pid_t
+        repeat {
+            waited = waitpid(processIdentifier, &waitStatus, waitOptions)
+        } while waited == -1 && errno == EINTR
+        guard waited == processIdentifier else {
+            reapLock.unlock()
+            return false
+        }
+
+        let statusCode = waitStatus & 0x7f
+        let status = statusCode == 0 ? (waitStatus >> 8) & 0xff : statusCode
+        lock.lock()
+        running = false
+        terminationStatus = status
+        let continuations = waiters
+        waiters.removeAll()
+        let source = exitSource
+        exitSource = nil
+        lock.unlock()
+        reapLock.unlock()
+
+        source?.cancel()
+        for continuation in continuations {
+            continuation.resume(returning: status)
+        }
+        return true
+    }
+}
+
+private extension Array where Element == String {
+    func withGitHubStarCStringArray<Result>(
+        _ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) throws -> Result
+    ) rethrows -> Result {
+        let strings = map { strdup($0) }
+        defer {
+            for string in strings {
+                free(string)
+            }
+        }
+        let pointer = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+            .allocate(capacity: count + 1)
+        defer { pointer.deallocate() }
+        for index in indices {
+            pointer[index] = strings[index]
+        }
+        pointer[count] = nil
+        return try body(pointer)
     }
 }
