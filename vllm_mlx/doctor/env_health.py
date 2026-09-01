@@ -709,11 +709,21 @@ def _probe_runtime(
 ) -> dict[str, object] | None:
     """Inspect one interpreter without importing the server runtime."""
     selected_packages = packages or _RUNTIME_PACKAGES
+    sanitized_context = tuple(_server_import_paths(runtime))
     if packages is None:
-        cache_key = runtime
+        cache_key = (
+            runtime,
+            sidecar_root.resolve() if sidecar_root else None,
+            sanitized_context,
+        )
         cache = _RUNTIME_PROBE_CACHE
     else:
-        cache_key = (runtime, tuple(sorted(selected_packages.items())))
+        cache_key = (
+            runtime,
+            sidecar_root.resolve() if sidecar_root else None,
+            sanitized_context,
+            tuple(sorted(selected_packages.items())),
+        )
         cache = _SECTION_PROBE_CACHE
     if cache_key in cache:
         return cache[cache_key]
@@ -1268,13 +1278,7 @@ def _visible_without_metadata(
     if module is None:
         return False
     if runtime != Path(sys.executable).resolve():
-        probe = _probe_runtime(
-            runtime,
-            _bundled_sidecar_root(runtime),
-            packages=packages,
-        )
-        package = _probe_package(probe, dist) if probe else None
-        return package is not None and bool(package.get("importable"))
+        return _module_visibility(dist, runtime, packages)[0]
     return _module_available(module, real_import=True)
 
 

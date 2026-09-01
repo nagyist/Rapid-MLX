@@ -1400,6 +1400,46 @@ print(json.dumps({"spec": spec, "trusted_origin": trusted_origin}))
     assert result == {"spec": None, "trusted_origin": False}
 
 
+def test_context_module_without_metadata_is_visible_but_unverified(
+    tmp_path,
+    monkeypatch,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "runtime" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    context_root = tmp_path / "server-context"
+    context_root.mkdir()
+    (context_root / "probe_context_module.py").write_text("probe_loaded = True\n")
+    report = {
+        "executable": str(runtime),
+        "base_prefix": str(tmp_path),
+        "prefix": str(tmp_path),
+        "path": [str(context_root)],
+        "packages": {
+            "transformers": {
+                "importable": False,
+                "discoverable": True,
+                "trusted_origin": False,
+                "module": "probe_context_module",
+                "version": None,
+            }
+        },
+    }
+    runtime.write_text(f"#!/bin/sh\ncat <<'JSON'\n{json.dumps(report)}\nJSON\n")
+    runtime.chmod(0o755)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
+    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+
+    visible = eh._visible_without_metadata(
+        "transformers", runtime, {"transformers": "probe_context_module"}
+    )
+
+    assert visible is True
+
+
 def test_failed_remote_runtime_probe_is_one_explicit_failure(tmp_path, monkeypatch):
     doctor_exe = tmp_path / "doctor" / "bin" / "python"
     doctor_exe.parent.mkdir(parents=True)
