@@ -31,13 +31,23 @@ jobs:
               context.payload.pull_request.labels.map((label) => label.name),
             );
             for (const name of authorizationLabels.filter((label) => currentLabels.has(label))) {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                name,
-              });
-              core.notice(
-                `Removed ${name} from #${context.issue.number} after its head changed.`,
-              );
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  name,
+                });
+                core.notice(
+                  `Removed ${name} from #${context.issue.number} after its head changed.`,
+                );
+              } catch (error) {
+                // Label events race Mergify reconciliation. A missing label is
+                // already revoked, so continue cleaning the remaining state;
+                // every other API error must surface and fail the workflow.
+                if (error.status !== 404) {
+                  throw error;
+                }
+                core.notice(`${name} was already absent; continuing revocation.`);
+              }
             }

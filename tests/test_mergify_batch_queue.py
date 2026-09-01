@@ -162,6 +162,83 @@ def test_head_updates_revoke_both_merge_ready_authorizations():
     assert "checkout" not in script.lower()
 
 
+def _run_revocation_script(
+    *, labels: list[str], remove_errors: dict[str, int] | None = None
+) -> list[list[str]]:
+    """Execute the exact revocation github-script against deterministic mocks."""
+
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/revoke-merge-ready.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+    script = workflow["jobs"]["revoke-merge-ready"]["steps"][0]["with"]["script"]
+    scenario = json.dumps({"labels": labels, "removeErrors": remove_errors or {}})
+    harness = f"""
+const scenario = {scenario};
+const calls = [];
+const context = {{
+  repo: {{ owner: "owner", repo: "repo" }},
+  issue: {{ number: 42 }},
+  payload: {{
+    pull_request: {{ labels: scenario.labels.map((name) => ({{ name }})) }},
+  }},
+}};
+const github = {{ rest: {{ issues: {{ removeLabel: async (args) => {{
+  calls.push(["remove", args.name]);
+  const status = scenario.removeErrors[args.name];
+  if (status) throw Object.assign(new Error(`remove ${{args.name}} failure`), {{ status }});
+}} }} }} }};
+const core = {{ notice: (message) => calls.push(["notice", message]) }};
+(async () => {{
+  try {{
+    await (async () => {{
+{script}
+    }})();
+  }} catch (error) {{
+    calls.push(["threw", error.message]);
+  }}
+  process.stdout.write(JSON.stringify(calls));
+}})();
+"""
+    completed = subprocess.run(
+        ["node", "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_head_update_revocation_continues_after_concurrent_404():
+    labels = [
+        "merge-ready-mac",
+        "merge-requeue-required",
+        "merge-requeue-trigger",
+    ]
+    calls = _run_revocation_script(
+        labels=labels, remove_errors={"merge-ready-mac": 404}
+    )
+
+    assert [call for call in calls if call[0] == "remove"] == [
+        ["remove", "merge-ready-mac"],
+        ["remove", "merge-requeue-required"],
+        ["remove", "merge-requeue-trigger"],
+    ]
+    assert all(call[0] != "threw" for call in calls)
+
+
+def test_head_update_revocation_propagates_non_404_failure():
+    calls = _run_revocation_script(
+        labels=["merge-ready-mac", "merge-requeue-required"],
+        remove_errors={"merge-ready-mac": 500},
+    )
+
+    assert calls == [
+        ["remove", "merge-ready-mac"],
+        ["threw", "remove merge-ready-mac failure"],
+    ]
+
+
 def test_ready_authorization_is_bound_to_the_exact_head_commit():
     workflow = yaml.load(
         (ROOT / ".github/workflows/authorize-merge-ready.yml").read_text(),
