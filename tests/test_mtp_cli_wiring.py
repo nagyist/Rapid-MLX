@@ -3315,6 +3315,24 @@ def test_install_mtp_vendored_latches_prompt_lookup_and_complete_history(
     assert batch_gen._mtp_vendored_stats["prompt_lookup_proposals"] == 0.0
 
 
+def test_scheduler_stats_export_vendored_mtp_counters_by_value():
+    from unittest.mock import MagicMock
+
+    from vllm_mlx.scheduler import Scheduler, SchedulerConfig
+
+    tokenizer = MagicMock()
+    tokenizer.encode = lambda _text: [1]
+    scheduler = Scheduler(MagicMock(), tokenizer, SchedulerConfig(max_num_seqs=1))
+    counters = {"prompt_lookup_proposals": 3.0}
+    scheduler.batch_generator = MagicMock()
+    scheduler.batch_generator._mtp_vendored_stats = counters
+
+    stats = scheduler.get_stats()
+
+    assert stats["mtp_vendored"] == counters
+    assert stats["mtp_vendored"] is not counters
+
+
 def test_install_mtp_vendored_does_not_admit_sampled_prompt_lookup(monkeypatch):
     """Non-greedy requests stay on ordinary MTP pending separate qualification."""
     from types import SimpleNamespace
