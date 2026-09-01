@@ -20,7 +20,8 @@ Decision rule (SOP §6 / Model Onboarding SOP):
 
 Usage:
     python3.12 scripts/bench_dflash.py \\
-        --model qwen3.5-4b-8bit --runs 3 --max-tokens 256
+        --model qwen3.5-4b-8bit --expected-algorithm dflash \\
+        --runs 3 --max-tokens 256
 
 The script does NOT auto-edit aliases.json. It prints the patch the
 contributor can paste, and persists the raw bench data to
@@ -166,6 +167,7 @@ class ServerHandle:
     proc: subprocess.Popen
     base_url: str
     model: str
+    algorithm: str | None = None
     # File the child's stdout/stderr is piped into. Held for the
     # lifetime of the server so the OS keeps the descriptor open for
     # writes from the child; closed in stop() once the process exits.
@@ -191,6 +193,7 @@ def start_server(
     port: int,
     dflash: bool,
     draft_model: str | None = None,
+    expected_algorithm: str | None = None,
 ) -> ServerHandle:
     """Spin up ``rapid-mlx serve`` and wait for /v1/models to answer.
 
@@ -198,6 +201,10 @@ def start_server(
     entries from a prior session pinning TPS to bogus 1000+ tok/s.
     DFlash speedup measurement requires real decode work on every run.
     """
+    if dflash and expected_algorithm is None:
+        raise ValueError(
+            "DFlash qualification requires expected_algorithm='dflash' or 'dflash2'"
+        )
     log_path = f"/tmp/bench_dflash_{port}.log"
     cmd = [
         sys.executable,
@@ -246,18 +253,58 @@ def start_server(
                 raise RuntimeError("server died during startup")
             try:
                 r = httpx.get(f"{base_url}/models", timeout=2.0)
-                if r.status_code == 200:
-                    logger.info("  server up at %s", base_url)
-                    return ServerHandle(
-                        proc=proc, base_url=base_url, model=model, logf=logf
-                    )
-            except Exception:
-                pass
+            except httpx.HTTPError:
+                r = None
+            if r is not None and r.status_code == 200:
+                algorithm = None
+                if dflash:
+                    try:
+                        health = httpx.get(
+                            f"http://127.0.0.1:{port}/healthz", timeout=2.0
+                        )
+                    except httpx.HTTPError:
+                        time.sleep(2)
+                        continue
+                    if health.status_code != 200:
+                        raise RuntimeError(
+                            "DFlash server became ready without a healthy "
+                            f"runtime receipt (HTTP {health.status_code})"
+                        )
+                    payload = health.json()
+                    algorithm = payload.get("algorithm")
+                    if algorithm not in {"dflash", "dflash2"}:
+                        raise RuntimeError(
+                            "DFlash /healthz did not report a recognized "
+                            f"algorithm: {algorithm!r}"
+                        )
+                    if algorithm != expected_algorithm:
+                        raise RuntimeError(
+                            "DFlash runtime algorithm mismatch: expected "
+                            f"{expected_algorithm!r}, got {algorithm!r}"
+                        )
+                logger.info(
+                    "  server up at %s%s",
+                    base_url,
+                    f" (algorithm={algorithm})" if algorithm else "",
+                )
+                return ServerHandle(
+                    proc=proc,
+                    base_url=base_url,
+                    model=model,
+                    algorithm=algorithm,
+                    logf=logf,
+                )
             time.sleep(2)
 
-        proc.kill()
         raise RuntimeError(f"server did not become ready within deadline (port={port})")
     except BaseException:
+        if proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGINT)
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
         logf.close()
         raise
 
@@ -383,6 +430,7 @@ def _classify_run(
 class ModeResult:
     median_tps: dict[str, float | None]
     raw_runs: dict[str, list[WorkloadRun]]
+    algorithm: str | None = None
 
 
 @dataclass(frozen=True)
@@ -445,8 +493,15 @@ def bench_one_mode(
     runs: int,
     max_tokens: int,
     draft_model: str | None = None,
+    expected_algorithm: str | None = None,
 ) -> ModeResult:
-    handle = start_server(model, port, dflash, draft_model=draft_model)
+    handle = start_server(
+        model,
+        port,
+        dflash,
+        draft_model=draft_model,
+        expected_algorithm=expected_algorithm,
+    )
     try:
         # Discard warmup: Metal JIT + cache population + drafter load.
         run_workload(handle, WORKLOADS["fibonacci"], max_tokens=32)
@@ -473,7 +528,11 @@ def bench_one_mode(
             valid = [r.tps for r in workload_runs if r.tps is not None]
             median_tps[name] = median(valid) if valid else None
             raw[name] = workload_runs
-        return ModeResult(median_tps=median_tps, raw_runs=raw)
+        return ModeResult(
+            median_tps=median_tps,
+            raw_runs=raw,
+            algorithm=handle.algorithm,
+        )
     finally:
         handle.stop()
 
@@ -491,6 +550,15 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Explicit DFlash drafter repo or local path. Omit to use the "
             "alias-qualified drafter."
+        ),
+    )
+    parser.add_argument(
+        "--expected-algorithm",
+        choices=("dflash", "dflash2"),
+        required=True,
+        help=(
+            "Require /healthz to report this concrete drafter algorithm. "
+            "Use this for publication/qualification runs."
         ),
     )
     parser.add_argument("--port", type=int, default=8765, help="ephemeral port")
@@ -541,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
         runs=args.runs,
         max_tokens=args.max_tokens,
         draft_model=args.draft_model,
+        expected_algorithm=args.expected_algorithm,
     )
 
     speedup: dict[str, float] = {}
@@ -588,6 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "model": args.model,
         "draft_model": args.draft_model,
+        "dflash_algorithm": dflash.algorithm,
         "max_tokens": args.max_tokens,
         "runs": args.runs,
         "gate": args.gate,

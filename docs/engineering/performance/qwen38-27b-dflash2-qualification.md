@@ -41,6 +41,7 @@ The paired benchmark command was:
 python scripts/bench_dflash.py \
   --model qwen3.8-27b-4bit \
   --draft-model /private/tmp/vector-qwen38-dflash2-4bit \
+  --expected-algorithm dflash2 \
   --runs 3 --max-tokens 256 --port 8765
 ```
 
