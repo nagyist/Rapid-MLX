@@ -128,6 +128,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert 'recordUITestFileDrop("performed")' in chat_view
     assert '"RAPID_XCUI_DROP_FIRST_GESTURE": simulateMissedFirstGesture ? "1" : "0"' in harness
     assert "XCTAssertEqual(recoveredAttempts, 2)" in chat_source
+    assert "XCTAssertEqual(delayedChipAttempts, 1)" in chat_source
     assert 'let dropTarget = element("rapid.chat.compose")' in harness
     assert "click(forDuration: 1, thenDragTo: dropTarget)" in harness
     assert "func testDragPasteAndRemovalPreserveWireIdentity()" in chat_source

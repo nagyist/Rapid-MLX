@@ -302,7 +302,8 @@ final class RapidUITestHarness {
         _ url: URL,
         expectedChip chip: XCUIElement? = nil,
         dropSettleTimeout: TimeInterval = 10,
-        simulateMissedFirstGesture: Bool = false
+        simulateMissedFirstGesture: Bool = false,
+        simulateChipVisibilityDelay: TimeInterval = 0
     ) -> Int {
         let dragSource = XCUIApplication(bundleIdentifier: "com.rapidmlx.rapid-uitest-host")
         dragSource.launchEnvironment = [
@@ -331,6 +332,10 @@ final class RapidUITestHarness {
             return 1
         }
         let settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
+        let chipObservationStart = Date().addingTimeInterval(simulateChipVisibilityDelay)
+        let chipIsSettled = {
+            Date() >= chipObservationStart && chip.exists && chip.isHittable
+        }
         let maximumAttempts = 2
         for attempt in 1...maximumAttempts {
             try? FileManager.default.removeItem(at: dropEventFile)
@@ -341,10 +346,10 @@ final class RapidUITestHarness {
             // signal, then spend the rest of the original budget on an
             // observed drop's chip.
             _ = waitUntil(timeout: min(2, max(0, settleDeadline.timeIntervalSinceNow))) {
-                (chip.exists && chip.isHittable)
+                chipIsSettled()
                     || FileManager.default.fileExists(atPath: self.dropEventFile.path)
             }
-            if chip.exists && chip.isHittable { return attempt }
+            if chipIsSettled() { return attempt }
 
             let observedPhase = try? String(contentsOf: dropEventFile, encoding: .utf8)
             if FileDropRetryPolicy.shouldRetry(
@@ -357,7 +362,7 @@ final class RapidUITestHarness {
             }
 
             let remaining = max(0, settleDeadline.timeIntervalSinceNow)
-            if waitUntil(timeout: remaining, condition: { chip.exists && chip.isHittable }) {
+            if waitUntil(timeout: remaining, condition: chipIsSettled) {
                 return attempt
             }
             XCTFail(

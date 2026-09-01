@@ -144,7 +144,12 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         harness.send("Dragged photo", expectedRequestCount: 1)
 
         let documentChip = harness.element("ChatView.Attachment.Remove.\(document.lastPathComponent)")
-        harness.dragFile(document, expectedChip: documentChip)
+        let delayedChipAttempts = harness.dragFile(
+            document,
+            expectedChip: documentChip,
+            simulateChipVisibilityDelay: 3
+        )
+        XCTAssertEqual(delayedChipAttempts, 1)
         harness.send("Dragged document", expectedRequestCount: 2)
 
         let pdfChip = harness.element("ChatView.Attachment.Remove.\(pdf.lastPathComponent)")
