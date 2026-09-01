@@ -16,6 +16,7 @@ REQUIRED_CHECKS = {
 }
 HEAD_AUTHORIZATION = "check-success = merge-ready-head"
 REQUEUE_TRIGGER = "label = merge-requeue-trigger"
+REQUEUE_REQUIRED = "label = merge-requeue-required"
 LANE_CHECKS = {
     "no-mac-batch": "check-success = @github-actions/merge-lane-no-mac",
     "mac-batch": "check-success = @github-actions/merge-lane-mac",
@@ -93,6 +94,7 @@ def test_ready_labels_autoqueue_without_enabling_blind_retries():
             "base = main",
             "-draft",
             "-from-fork",
+            REQUEUE_REQUIRED,
             REQUEUE_TRIGGER,
             "-label = dequeued",
             HEAD_AUTHORIZATION,
@@ -147,12 +149,15 @@ def test_head_updates_revoke_both_merge_ready_authorizations():
     job = workflow["jobs"]["revoke-merge-ready"]
     assert "merge-ready" in job["if"]
     assert "merge-ready-mac" in job["if"]
+    assert "merge-requeue-required" in job["if"]
+    assert "merge-requeue-trigger" in job["if"]
     assert job["permissions"] == {"pull-requests": "write"}
 
     (step,) = job["steps"]
     assert step["uses"].startswith("actions/github-script@")
     script = step["with"]["script"]
-    assert '["merge-ready", "merge-ready-mac"]' in script
+    assert '"merge-requeue-required"' in script
+    assert '"merge-requeue-trigger"' in script
     assert "github.rest.issues.removeLabel" in script
     assert "checkout" not in script.lower()
 
@@ -188,7 +193,7 @@ def test_ready_authorization_is_bound_to_the_exact_head_commit():
     assert "livePull.head.sha === context.payload.pull_request.head.sha" in script
     assert 'currentLabels.has("dequeued")' in script
     assert 'name: "dequeued"' in script
-    assert 'labels: ["merge-requeue-trigger"]' in script
+    assert 'labels: ["merge-requeue-required", "merge-requeue-trigger"]' in script
     assert "authorized &&" in script
     assert "error.status !== 404" in script
     assert "checkout" not in script.lower()
@@ -293,13 +298,29 @@ def test_dequeued_head_is_blocked_before_marker_removal_then_reauthorized():
         "pending",
         "success",
     ]
-    assert result["calls"][2] == ["add", ["merge-requeue-trigger"]]
+    assert result["calls"][2] == [
+        "add",
+        ["merge-requeue-required", "merge-requeue-trigger"],
+    ]
 
 
 def test_initial_authorization_does_not_issue_a_requeue_trigger():
     result = _run_authorization_script(labels=["merge-ready-mac"])
 
     assert result["calls"] == [["get"], ["status", "success"]]
+
+
+def test_consumed_trigger_can_be_reissued_from_persistent_recovery_marker():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "merge-requeue-required"]
+    )
+
+    assert result["calls"] == [
+        ["get"],
+        ["status", "pending"],
+        ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
+        ["status", "success"],
+    ]
 
 
 def test_status_failure_cannot_remove_the_dequeue_circuit_breaker():
@@ -322,7 +343,7 @@ def test_trigger_failure_keeps_both_queue_circuit_breakers():
     assert result["calls"] == [
         ["get"],
         ["status", "pending"],
-        ["add", ["merge-requeue-trigger"]],
+        ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["threw", "add failure"],
     ]
 
@@ -335,7 +356,7 @@ def test_marker_failure_leaves_trigger_blocked_and_retryable():
     assert result["calls"] == [
         ["get"],
         ["status", "pending"],
-        ["add", ["merge-requeue-trigger"]],
+        ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["remove"],
         ["threw", "remove failure"],
     ]
@@ -349,7 +370,7 @@ def test_concurrent_marker_removal_proceeds_to_final_authorization():
     assert result["calls"] == [
         ["get"],
         ["status", "pending"],
-        ["add", ["merge-requeue-trigger"]],
+        ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["remove"],
         ["status", "success"],
     ]
@@ -358,8 +379,8 @@ def test_concurrent_marker_removal_proceeds_to_final_authorization():
 def test_activation_docs_provision_the_internal_requeue_label():
     docs = (ROOT / "docs/engineering/operations/path-aware-merge-queue.md").read_text()
 
-    assert "Create the `merge-ready`, `merge-ready-mac`, and" in docs
-    assert "`merge-requeue-trigger` labels" in docs
+    assert "Create the `merge-ready`, `merge-ready-mac`," in docs
+    assert "`merge-requeue-required`, and `merge-requeue-trigger` labels" in docs
     assert "internal, bot-owned" in docs
 
 
@@ -371,7 +392,7 @@ def test_final_status_failure_leaves_trigger_blocked_and_retryable():
     assert result["calls"] == [
         ["get"],
         ["status", "pending"],
-        ["add", ["merge-requeue-trigger"]],
+        ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["remove"],
         [
             "notice",

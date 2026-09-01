@@ -145,11 +145,14 @@ The queue contract lives in `.mergify.yml`:
 - explicit, named queue actions provide the re-entry edge for a head left in a
   terminal `dequeued` state after a diagnosed batch outcome. The marker
   deliberately blocks automatic retry. To authorize one explicit retry of the
-  unchanged head, remove and re-apply its one ready label: the exact-head authorization
-  workflow clears the stale marker only on that fresh label event and issues a
-  bot-owned, one-shot `merge-requeue-trigger`; the matching action consumes the
-  trigger while queueing the head again. Removing `dequeued` alone cannot reuse
-  an earlier authorization. Do not manually manage the internal trigger, post a
+  unchanged head, remove and re-apply its one ready label: the exact-head
+  authorization workflow records a head-bound `merge-requeue-required` marker,
+  clears the stale provider marker, and issues a bot-owned, one-shot
+  `merge-requeue-trigger`. The matching action consumes the trigger while
+  queueing the head again. The persistent recovery marker allows another fresh
+  authorization to mint a replacement if the provider only partially executes
+  its actions, and every head update removes it. Removing `dequeued` alone
+  cannot reuse an earlier authorization. Do not manually manage either internal label, post a
   queue command, push an empty commit, or remove `dequeued` by itself. The
   provider does not expose a machine-readable dequeue-cause condition here, so
   this fresh maintainer action is the diagnosis and retry boundary;
@@ -217,9 +220,10 @@ Production activation is an owner operation and must happen in this order:
 2. Install the GitHub App for this repository only. Do not grant it access to
    unrelated repositories. Confirm its configuration check validates the
    default-branch policy.
-3. Create the `merge-ready`, `merge-ready-mac`, and
-   `merge-requeue-trigger` labels. The last label is an internal, bot-owned
-   one-shot token and must not be applied manually. Applying exactly one
+3. Create the `merge-ready`, `merge-ready-mac`,
+   `merge-requeue-required`, and `merge-requeue-trigger` labels. The last two
+   labels are internal, bot-owned recovery state and must not be applied
+   manually. Applying exactly one
    is the explicit authorization to enter the matching queue; removing it
    dequeues the pull request. Applying both fails closed and enters neither.
    Fork pull requests are deliberately ineligible because composing fork code

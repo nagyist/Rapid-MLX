@@ -56,12 +56,15 @@ jobs:
               ? `Authorized ${present[0]} on this exact head`
               : "Apply exactly one merge-ready label";
 
-            // Mergify records a batch member dropped untested by bisection as
-            // terminally dequeued for this exact head.  Only a fresh, valid
-            // ready-label event may clear that bot-owned marker.  The explicit
-            // queue action in .mergify.yml then re-enqueues the head; ordinary
-            // dequeue events keep the marker and cannot retry themselves.
-            if (authorized && currentLabels.has("dequeued")) {
+            // Mergify records a terminal dequeue for this exact head after a
+            // batch outcome. Only a fresh, valid ready-label event may start
+            // one diagnosed retry. A persistent recovery marker makes partial
+            // provider action failure recoverable, while the consumed trigger
+            // prevents either marker from retrying the head by itself.
+            const wasDequeued = currentLabels.has("dequeued");
+            const recoveryRequired =
+              wasDequeued || currentLabels.has("merge-requeue-required");
+            if (authorized && recoveryRequired) {
               // Invalidate any success left by an earlier authorization before
               // removing the retry circuit breaker. If any following API call
               // fails, the queue's check-success condition remains blocked.
@@ -74,33 +77,35 @@ jobs:
                 description: `Re-authorizing ${present[0]} on this exact head`,
                 target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/pull/${context.issue.number}`,
               });
-              // Mint the one-shot token while both the pending status and the
-              // dequeue marker still block Mergify. Every interruption point
-              // is then fail-closed and recoverable by another fresh label
-              // event: addLabels is idempotent, and a surviving token remains
-              // blocked until the final success status is written.
+              // Mint the one-shot token while the pending status blocks
+              // Mergify (and, on first recovery, the dequeue marker does too).
+              // Every interruption point is fail-closed and recoverable by a
+              // fresh label event: addLabels is idempotent, and a surviving
+              // token remains blocked until the final success status.
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                labels: ["merge-requeue-trigger"],
+                labels: ["merge-requeue-required", "merge-requeue-trigger"],
               });
-              try {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.issue.number,
-                  name: "dequeued",
-                });
-                core.notice(
-                  `Cleared stale dequeued state before re-authorizing ${present[0]}.`,
-                );
-              } catch (error) {
-                // A concurrent Mergify reconciliation may remove the label
-                // first.  Missing is the desired state; every other error must
-                // fail closed instead of claiming the head was re-authorized.
-                if (error.status !== 404) {
-                  throw error;
+              if (wasDequeued) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    name: "dequeued",
+                  });
+                  core.notice(
+                    `Cleared stale dequeued state before re-authorizing ${present[0]}.`,
+                  );
+                } catch (error) {
+                  // A concurrent Mergify reconciliation may remove the label
+                  // first. Missing is desired; every other error must fail
+                  // closed instead of claiming the head was re-authorized.
+                  if (error.status !== 404) {
+                    throw error;
+                  }
                 }
               }
             }

@@ -10,7 +10,9 @@ jobs:
   revoke-merge-ready:
     if: >-
       contains(github.event.pull_request.labels.*.name, 'merge-ready') ||
-      contains(github.event.pull_request.labels.*.name, 'merge-ready-mac')
+      contains(github.event.pull_request.labels.*.name, 'merge-ready-mac') ||
+      contains(github.event.pull_request.labels.*.name, 'merge-requeue-required') ||
+      contains(github.event.pull_request.labels.*.name, 'merge-requeue-trigger')
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -19,11 +21,16 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         with:
           script: |
-            const readyLabels = ["merge-ready", "merge-ready-mac"];
+            const authorizationLabels = [
+              "merge-ready",
+              "merge-ready-mac",
+              "merge-requeue-required",
+              "merge-requeue-trigger",
+            ];
             const currentLabels = new Set(
               context.payload.pull_request.labels.map((label) => label.name),
             );
-            for (const name of readyLabels.filter((label) => currentLabels.has(label))) {
+            for (const name of authorizationLabels.filter((label) => currentLabels.has(label))) {
               await github.rest.issues.removeLabel({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
