@@ -273,7 +273,9 @@ final class RapidUITestHarness {
     /// ``expectedChip`` is the remove control the drop must produce, fetched at
     /// the call site via ``element(_:)`` (which keeps the query literal in the
     /// test source for the xcui workflow contract). A landed drop is treated as
-    /// one whose chip settles (exists and is hittable); the helper waits
+    /// one whose chip settles (exists and is hittable); the helper holds the
+    /// single native gesture briefly at its destination so AppKit can finish
+    /// drop negotiation, then waits
     /// ``dropSettleTimeout`` for that and asserts if it never appears. The chip
     /// element is polled directly (``exists``/``isHittable``) — never
     /// dereferenced before it exists, so a not-yet-matched ``firstMatch``
@@ -306,11 +308,20 @@ final class RapidUITestHarness {
         XCTAssertTrue(waitUntil(timeout: 10) { dropTarget.isHittable },
                       "compose drop target never became hittable before drag")
 
+        let performDrag = {
+            source.click(
+                forDuration: 1,
+                thenDragTo: dropTarget,
+                withVelocity: .default,
+                thenHoldForDuration: 0.5
+            )
+        }
+
         guard let chip = chip else {
-            source.click(forDuration: 1, thenDragTo: dropTarget)
+            performDrag()
             return
         }
-        source.click(forDuration: 1, thenDragTo: dropTarget)
+        performDrag()
         XCTAssertTrue(waitUntil(timeout: dropSettleTimeout) { chip.exists && chip.isHittable },
                       "dropped attachment chip did not settle within \(dropSettleTimeout)s")
     }
