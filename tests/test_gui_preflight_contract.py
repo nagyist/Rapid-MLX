@@ -854,6 +854,101 @@ def test_start_model_waits_for_an_interactive_readiness_action():
     assert ".leftMouseDown" in click and ".leftMouseUp" in click
 
 
+def test_wait_send_idle_follows_an_intentionally_deferred_auto_start(tmp_path):
+    """A low-memory relaunch stays idle until the flow performs visible consent."""
+    source = HARNESS.read_text()
+    helper_body = source.split("wait_send_idle() {", 1)[1].split("\n}", 1)[0]
+    helper = f"wait_send_idle() {{{helper_body}\n}}"
+
+    assert 'identifier == "Readiness.Action"' in helper
+    assert 'and .description == "Start"' in helper
+    assert "and .enabled == true" in helper
+    assert '"$AX_DRIVER" click-center "$APP_PID" Readiness.Action' in helper
+    assert 'identifier == "MemoryWarning.Confirm"' in helper
+    assert '"$memory_confirmation_count" -lt 3' in helper
+    assert '"$AX_DRIVER" click-center "$APP_PID" MemoryWarning.Confirm' in helper
+    assert "deferred-start" in helper
+
+    fixtures = [
+        [
+            {
+                "identifier": "ChatView.SendOrStopButton",
+                "description": "Send message",
+                "enabled": False,
+                "help": "fake-alias is still starting",
+            },
+            {
+                "identifier": "Readiness.Action",
+                "description": "Start",
+                "enabled": True,
+            },
+        ],
+        [
+            {
+                "identifier": "ChatView.SendOrStopButton",
+                "description": "Send message",
+                "enabled": False,
+                "help": "fake-alias is still starting",
+            },
+            {"identifier": "MemoryWarning.Confirm", "enabled": True},
+        ],
+        [
+            {
+                "identifier": "ChatView.SendOrStopButton",
+                "description": "Send message",
+                "enabled": False,
+            }
+        ],
+        [
+            {
+                "identifier": "ChatView.SendOrStopButton",
+                "description": "Send message",
+                "enabled": False,
+            }
+        ],
+    ]
+    for index, elements in enumerate(fixtures):
+        (tmp_path / f"fixture-{index}.json").write_text(
+            json.dumps({"data": {"ui_elements": elements}})
+        )
+    driver = tmp_path / "driver.sh"
+    driver.write_text('#!/bin/bash\nprintf "%s\\n" "$3" >> "$CLICK_LOG"\n')
+    driver.chmod(0o755)
+    click_log = tmp_path / "clicks.txt"
+
+    script = textwrap.dedent(
+        f"""
+        set -euo pipefail
+        fixture_dir={str(tmp_path)!r}
+        AX_DRIVER={str(driver)!r}
+        CLICK_LOG={str(click_log)!r}
+        export CLICK_LOG
+        APP_PID=42
+        calls=0
+        see_main() {{
+            local destination="$1" index="$calls"
+            (( index > 3 )) && index=3
+            cp "$fixture_dir/fixture-$index.json" "$destination"
+            calls=$((calls + 1))
+        }}
+        log() {{ :; }}
+        die() {{ printf '%s\n' "$*" >&2; exit 97; }}
+        sleep() {{ :; }}
+        {helper}
+        wait_send_idle "$fixture_dir/current.json" 8
+        """
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, check=False, text=True
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert click_log.read_text().splitlines() == [
+        "Readiness.Action",
+        "MemoryWarning.Confirm",
+    ]
+
+
 def test_image_inflight_baseline_uses_an_event_backed_warmup_phase():
     flow = (
         HARNESS.read_text().split("flow_image_generation() {", 1)[1].split("\n}", 1)[0]

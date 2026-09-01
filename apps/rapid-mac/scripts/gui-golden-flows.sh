@@ -1811,6 +1811,8 @@ baseline() {
 # button, so a single dump can be a hybrid of two states.
 wait_send_idle() {
     local destination="$1" attempts="${2:-160}" stable=0
+    local deferred_start_attempted=0 memory_confirmation_count=0
+    local evidence_prefix="${destination%.json}"
     for ((i=0; i<attempts; i++)); do
         see_main "$destination"
         if jq -e '.data.ui_elements[]? | select(.identifier == "ChatView.SendOrStopButton"
@@ -1821,6 +1823,40 @@ wait_send_idle() {
             [[ "$stable" -ge 2 ]] && return
         else
             stable=0
+        fi
+
+        # Launch auto-start intentionally stays idle when live memory would
+        # require explicit consent; it must not surprise the user with a modal
+        # on app open. A journey that explicitly waits for a ready composer is
+        # acting as that user, so follow the visible Start path instead of
+        # timing out on the intentional idle state. Restrict this recovery to
+        # an enabled Start action: never turn a wait into a silent download.
+        if [[ "$deferred_start_attempted" == 0 ]] \
+           && jq -e '.data.ui_elements[]?
+                      | select(.identifier == "Readiness.Action"
+                               and .description == "Start"
+                               and .enabled == true)' \
+                "$destination" >/dev/null; then
+            "$AX_DRIVER" click-center "$APP_PID" Readiness.Action \
+                > "${evidence_prefix}-deferred-start.json"
+            deferred_start_attempted=1
+            log "  followed deferred auto-start through the visible Start action"
+        fi
+
+        # The explicit recovery above now owns the same production memory
+        # confirmation as a normal Start click. Hosted-runner pressure can
+        # refresh that warning while the process is still coming up, so keep
+        # the retry bounded and require a currently enabled action each time.
+        if [[ "$deferred_start_attempted" == 1 \
+              && "$memory_confirmation_count" -lt 3 ]] \
+           && jq -e '.data.ui_elements[]?
+                      | select(.identifier == "MemoryWarning.Confirm"
+                               and .enabled == true)' \
+                "$destination" >/dev/null; then
+            memory_confirmation_count=$((memory_confirmation_count + 1))
+            "$AX_DRIVER" click-center "$APP_PID" MemoryWarning.Confirm \
+                > "${evidence_prefix}-memory-confirm-${memory_confirmation_count}.json"
+            log "  confirmed hosted-runner memory warning after deferred auto-start"
         fi
         sleep 0.25
     done
