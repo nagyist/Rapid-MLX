@@ -430,20 +430,6 @@ def _is_diagnostic_python_override(candidate: Path) -> bool:
     return True
 
 
-def _is_trusted_runtime_executable(runtime: Path) -> bool:
-    """Allow automatic runtime following only from known Rapid-MLX layouts."""
-    if _bundled_sidecar_root(runtime) is not None:
-        return True
-    home = Path.home().resolve()
-    managed_roots = (
-        home / ".rapid-mlx",
-        home / ".rapid-mlx-python",
-        Path(__file__).resolve().parents[2],
-    )
-    runtime = runtime.absolute()
-    return any(runtime == root or root in runtime.parents for root in managed_roots)
-
-
 def _runtime_python_path() -> Path:
     """Return the authoritative Python executable for runtime checks.
 
@@ -619,7 +605,6 @@ def _runtime_python_path() -> Path:
                 not candidate.is_absolute()
                 or not candidate.is_file()
                 or not candidate.name.lower().startswith("python")
-                or not _is_trusted_runtime_executable(candidate)
             ):
                 return None
             if not _runtime_has_rapid_mlx_distribution(

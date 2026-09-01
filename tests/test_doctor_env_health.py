@@ -192,7 +192,6 @@ def allow_rapid_mlx_module_servers(monkeypatch):
         "_runtime_has_rapid_mlx_distribution",
         lambda runtime, cwd, env: True,
     )
-    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: True)
 
 
 def test_stopped_runtime_override_accepts_system_python_and_resolves_relative_path(
@@ -1155,7 +1154,7 @@ def test_module_command_accepts_python_value_flags_before_dash_m(
     assert eh._runtime_python_path() == doctor_exe.absolute()
 
 
-def test_untrusted_server_interpreter_is_not_selected(
+def test_arbitrary_installed_server_interpreter_is_selected(
     tmp_path,
     monkeypatch,
     allow_rapid_mlx_module_servers,
@@ -1163,17 +1162,16 @@ def test_untrusted_server_interpreter_is_not_selected(
     doctor_exe = tmp_path / "doctor" / "bin" / "python"
     doctor_exe.parent.mkdir(parents=True)
     doctor_exe.write_text("")
-    attacker_runtime = tmp_path / "attacker" / "bin" / "python"
-    attacker_runtime.parent.mkdir(parents=True)
-    attacker_runtime.write_text("")
-    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: False)
+    arbitrary_runtime = tmp_path / "uv" / "bin" / "python"
+    arbitrary_runtime.parent.mkdir(parents=True)
+    arbitrary_runtime.write_text("")
 
     class FakeProcess:
         def __init__(self):
             self.info = {
                 "pid": os.getpid() + 1,
                 "cmdline": [
-                    str(attacker_runtime),
+                    str(arbitrary_runtime),
                     "-m",
                     "vllm_mlx.cli",
                     "serve",
@@ -1183,10 +1181,10 @@ def test_untrusted_server_interpreter_is_not_selected(
             }
 
         def exe(self):
-            return str(attacker_runtime)
+            return str(arbitrary_runtime)
 
         def environ(self):
-            return {"PATH": str(attacker_runtime.parent)}
+            return {"PATH": str(arbitrary_runtime.parent)}
 
         def cwd(self):
             return str(tmp_path)
@@ -1202,8 +1200,8 @@ def test_untrusted_server_interpreter_is_not_selected(
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
 
-    assert eh._runtime_python_path() == doctor_exe.absolute()
-    assert eh._SELECTED_SERVER_RUNTIME is False
+    assert eh._runtime_python_path() == arbitrary_runtime.absolute()
+    assert eh._SELECTED_SERVER_RUNTIME is True
 
 
 def test_running_server_same_interpreter_is_still_server_context(
