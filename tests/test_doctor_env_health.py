@@ -1037,6 +1037,58 @@ def test_entrypoint_command_derives_venv_python_sibling(
     assert eh._runtime_python_path() == venv_python
 
 
+def test_entrypoint_direct_shebang_wins_over_sibling_python(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    venv_root = tmp_path / "server-venv"
+    shebang_python = venv_root / "bin" / "python"
+    sibling_python = venv_root / "bin" / "python3"
+    shebang_python.parent.mkdir(parents=True)
+    shebang_python.write_text("")
+    sibling_python.write_text("")
+    entrypoint = venv_root / "bin" / "rapid-mlx"
+    entrypoint.write_text(
+        f"#!{shebang_python}\nfrom vllm_mlx.cli import main\nmain()\n"
+    )
+    entrypoint.chmod(0o755)
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [str(entrypoint), "serve"],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(doctor_exe)
+
+        def environ(self):
+            return dict(os.environ)
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_python_path() == shebang_python
+    assert eh._runtime_python_path() != sibling_python
+
+
 def test_local_import_rejects_source_tree_shadow_module(
     tmp_path,
     monkeypatch,

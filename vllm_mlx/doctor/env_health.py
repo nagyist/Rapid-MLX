@@ -481,19 +481,18 @@ def _runtime_python_path() -> Path:
             return None
 
         def _python_from_entrypoint(entry: Path) -> Path | None:
-            sibling = _python_sibling(entry)
-            if sibling is not None:
-                return sibling
             try:
                 shebang = entry.read_text(encoding="utf-8").splitlines()[0]
             except (OSError, UnicodeDecodeError, IndexError):
                 return None
             if not shebang.startswith("#!"):
-                return None
+                return _python_sibling(entry)
             shebang_parts = shebang[2:].strip().split()
-            if len(shebang_parts) != 1 or Path(shebang_parts[0]).name.startswith("env"):
-                return None
-            return Path(shebang_parts[0]).absolute()
+            if len(shebang_parts) >= 1 and not Path(shebang_parts[0]).name.startswith(
+                "env"
+            ):
+                return Path(shebang_parts[0]).absolute()
+            return _python_sibling(entry)
 
         def _python_from_module_command(
             command: list[str], context_env: dict[str, str]
