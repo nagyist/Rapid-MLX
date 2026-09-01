@@ -12,12 +12,19 @@ struct MemoryConfirmationRetryPolicy {
 
     private(set) var attempts = 0
     private var pollsSinceAttempt = 0
+    private var presentationSignature: String?
 
-    mutating func shouldClick(isPresent: Bool, isEnabled: Bool) -> Bool {
-        guard isPresent else {
+    mutating func shouldClick(signature: String?, isEnabled: Bool) -> Bool {
+        guard let signature else {
             attempts = 0
             pollsSinceAttempt = 0
+            presentationSignature = nil
             return false
+        }
+        if signature != presentationSignature {
+            attempts = 0
+            pollsSinceAttempt = 0
+            presentationSignature = signature
         }
         pollsSinceAttempt += 1
         guard isEnabled,
@@ -33,8 +40,15 @@ struct MemoryConfirmationRetryPolicy {
     @MainActor
     mutating func follow(_ confirmation: XCUIElement) {
         let isPresent = confirmation.exists
+        let signature = isPresent
+            ? [
+                confirmation.identifier,
+                confirmation.label,
+                String(describing: confirmation.value),
+            ].joined(separator: "\u{1F}")
+            : nil
         if shouldClick(
-            isPresent: isPresent,
+            signature: signature,
             isEnabled: isPresent && confirmation.isEnabled
         ) {
             confirmation.click()

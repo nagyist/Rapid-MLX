@@ -7,22 +7,23 @@ final class ImageGenerationPixelTests: XCTestCase {
     func testMemoryConfirmationRetriesAreSpacedBoundedAndRearmed() {
         var policy = MemoryConfirmationRetryPolicy()
 
-        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
+        XCTAssertTrue(policy.shouldClick(signature: "load", isEnabled: true))
         for _ in 1..<MemoryConfirmationRetryPolicy.retryPollInterval {
-            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: true))
+            XCTAssertFalse(policy.shouldClick(signature: "load", isEnabled: true))
         }
-        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
+        XCTAssertTrue(policy.shouldClick(signature: "load", isEnabled: true))
         for _ in 1..<MemoryConfirmationRetryPolicy.retryPollInterval {
-            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: true))
+            XCTAssertFalse(policy.shouldClick(signature: "load", isEnabled: true))
         }
-        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
+        XCTAssertTrue(policy.shouldClick(signature: "load", isEnabled: true))
         for _ in 0..<(MemoryConfirmationRetryPolicy.retryPollInterval * 2) {
-            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: false))
-            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: true))
+            XCTAssertFalse(policy.shouldClick(signature: "load", isEnabled: false))
+            XCTAssertFalse(policy.shouldClick(signature: "load", isEnabled: true))
         }
 
-        XCTAssertFalse(policy.shouldClick(isPresent: false, isEnabled: false))
-        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
+        XCTAssertTrue(policy.shouldClick(signature: "load-anyway", isEnabled: true))
+        XCTAssertFalse(policy.shouldClick(signature: nil, isEnabled: false))
+        XCTAssertTrue(policy.shouldClick(signature: "load-anyway", isEnabled: true))
     }
 
     func testTwoImageRendersDrawDistinctThumbnailPixels() throws {
