@@ -7917,6 +7917,7 @@ class Scheduler:
         """
         outputs = []
         finished_ids = set()
+        terminal_performance_requests: list[Request] = []
         prompt_tps_this_batch = 0.0
 
         for response in responses:
@@ -8261,7 +8262,7 @@ class Scheduler:
 
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1
-                self.performance.record_finished_performance(request)
+                terminal_performance_requests.append(request)
 
                 logger.debug(
                     f"Request {request_id} finished: {response.finish_reason}, "
@@ -8272,6 +8273,12 @@ class Scheduler:
 
         if prompt_tps_this_batch > 0:
             self._last_prompt_tps = prompt_tps_this_batch
+        # Commit observability outcomes only after every response in the step
+        # has processed successfully. If a later response raises, EngineCore
+        # converts all pending clients to failures; recording an earlier
+        # success here would make lifetime deduplication reject that outcome.
+        for request in terminal_performance_requests:
+            self.performance.record_finished_performance(request)
         return outputs, finished_ids
 
     def _safe_disk_checkpoint(self, request: Request, response: Any) -> None:

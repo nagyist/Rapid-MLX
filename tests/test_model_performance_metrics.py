@@ -266,6 +266,24 @@ def test_scheduler_records_terminal_success_once():
     assert scheduler.performance.snapshot().requests_succeeded == 1
 
 
+def test_scheduler_does_not_commit_success_when_later_response_fails():
+    scheduler = _scheduler()
+    _running_request(scheduler, "first")
+    second = _running_request(scheduler, "second")
+    scheduler.uid_to_request_id[1] = "first"
+    scheduler.uid_to_request_id[2] = "second"
+    first_response = _terminal_response()
+    second_response = _terminal_response()
+    second_response.uid = 2
+    second.append_output_token = MagicMock(side_effect=RuntimeError("later failure"))
+
+    with pytest.raises(RuntimeError, match="later failure"):
+        scheduler._process_batch_responses([first_response, second_response])
+
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_succeeded == 0
+
+
 def test_scheduler_records_explicit_cancellation_once():
     pytest.importorskip("mlx")
 
