@@ -324,6 +324,10 @@ async def test_engine_loop_records_pending_failures():
         MagicMock(), MagicMock(), EngineConfig(model_name="model-under-test")
     )
 
+    from types import SimpleNamespace
+
+    failed_request = SimpleNamespace(request_id="failure", arrival_time=time.time())
+
     class _BoomScheduler:
         performance = ModelPerformanceLedger("model-under-test")
 
@@ -341,6 +345,9 @@ async def test_engine_loop_records_pending_failures():
 
         def remove_finished_request(self, *_args, **_kwargs):
             pass
+
+        def get_request(self, request_id):
+            return failed_request if request_id == failed_request.request_id else None
 
     engine.scheduler = _BoomScheduler()
     engine._output_collectors["failure"] = RequestOutputCollector(aggregate=True)
@@ -361,6 +368,57 @@ async def test_engine_loop_records_pending_failures():
     assert performance.requests_failed == 1
     final = engine._output_collectors["failure"].get_nowait()
     assert final is not None and final.finished and final.error
+
+
+@pytest.mark.asyncio
+async def test_engine_loop_does_not_count_failure_before_scheduler_admission():
+    pytest.importorskip("mlx")
+
+    from vllm_mlx.engine_core import EngineConfig, EngineCore
+
+    engine = EngineCore(
+        MagicMock(), MagicMock(), EngineConfig(model_name="model-under-test")
+    )
+
+    class _AdmissionRaceScheduler:
+        performance = ModelPerformanceLedger("model-under-test")
+
+        def has_requests(self):
+            return True
+
+        def step(self):
+            raise RuntimeError("Metal command buffer failure")
+
+        def get_request(self, _request_id):
+            return None
+
+        def add_request(self, *_args, **_kwargs):
+            pass
+
+        def abort_request(self, *_args, **_kwargs):
+            return True
+
+        def remove_finished_request(self, *_args, **_kwargs):
+            pass
+
+    engine.scheduler = _AdmissionRaceScheduler()
+    engine._output_collectors["not-admitted"] = RequestOutputCollector(aggregate=True)
+    engine._finished_events["not-admitted"] = asyncio.Event()
+    engine._running = True
+    loop_task = asyncio.create_task(engine._engine_loop())
+    try:
+        await asyncio.wait_for(
+            engine._finished_events["not-admitted"].wait(), timeout=1
+        )
+    finally:
+        engine._running = False
+        loop_task.cancel()
+        try:
+            await loop_task
+        except asyncio.CancelledError:
+            pass
+
+    assert engine.scheduler.performance.snapshot().total_requests == 0
 
 
 def test_metrics_renders_model_performance_series():

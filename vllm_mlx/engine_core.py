@@ -1043,8 +1043,6 @@ class EngineCore:
                             )
                             if request is not None:
                                 performance.record_failed_performance(request)
-                            else:
-                                performance.record_failure(rid)
                         except Exception:  # pragma: no cover — defensive
                             logger.debug("Failed to record engine failure for %s", rid)
                     collector = self._output_collectors.get(rid)
