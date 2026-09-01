@@ -131,6 +131,40 @@ def test_ledger_ignores_unusable_timing_observations():
     assert snapshot.decode_tokens_per_second_max is None
 
 
+def test_ledger_best_effort_helpers_ignore_unusable_timings_and_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import SimpleNamespace
+
+    request = SimpleNamespace(
+        arrival_time=time.time() - 0.2,
+        first_token_time=time.time() + 5.0,
+        num_output_tokens=2,
+        num_prompt_tokens=3,
+        request_id="future-first-token",
+    )
+    ledger = ModelPerformanceLedger("model-b")
+
+    assert ledger.decode_rate_for_request(request) is None
+
+    monkeypatch.setattr(
+        ledger,
+        "record_success",
+        MagicMock(side_effect=RuntimeError("accounting failure")),
+    )
+    monkeypatch.setattr(
+        ledger,
+        "record_cancelled",
+        MagicMock(side_effect=RuntimeError("accounting failure")),
+    )
+
+    ledger.record_finished_performance(request)
+    ledger.record_cancelled_performance(request)
+
+    snapshot = ledger.snapshot()
+    assert snapshot.total_requests == 0
+
+
 def test_ledger_histograms_are_cumulative_and_memory_bounded():
     ledger = ModelPerformanceLedger("model-a")
     for ttft, decode in ((0.05, 4.0), (0.3, 25.0), (1.2, 150.0)):
