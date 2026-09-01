@@ -7,21 +7,22 @@ final class ImageGenerationPixelTests: XCTestCase {
     func testMemoryConfirmationRetriesAreSpacedBoundedAndRearmed() {
         var policy = MemoryConfirmationRetryPolicy()
 
-        XCTAssertTrue(policy.shouldClick(isVisible: true))
+        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
         for _ in 1..<MemoryConfirmationRetryPolicy.retryPollInterval {
-            XCTAssertFalse(policy.shouldClick(isVisible: true))
+            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: true))
         }
-        XCTAssertTrue(policy.shouldClick(isVisible: true))
+        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
         for _ in 1..<MemoryConfirmationRetryPolicy.retryPollInterval {
-            XCTAssertFalse(policy.shouldClick(isVisible: true))
+            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: true))
         }
-        XCTAssertTrue(policy.shouldClick(isVisible: true))
+        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
         for _ in 0..<(MemoryConfirmationRetryPolicy.retryPollInterval * 2) {
-            XCTAssertFalse(policy.shouldClick(isVisible: true))
+            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: false))
+            XCTAssertFalse(policy.shouldClick(isPresent: true, isEnabled: true))
         }
 
-        XCTAssertFalse(policy.shouldClick(isVisible: false))
-        XCTAssertTrue(policy.shouldClick(isVisible: true))
+        XCTAssertFalse(policy.shouldClick(isPresent: false, isEnabled: false))
+        XCTAssertTrue(policy.shouldClick(isPresent: true, isEnabled: true))
     }
 
     func testTwoImageRendersDrawDistinctThumbnailPixels() throws {

@@ -1449,7 +1449,7 @@ memory_confirmation_signature() {
     local tree="$1" identifier="$2"
     jq -cS --arg id "$identifier" \
        '.data.ui_elements[]?
-        | select(.identifier == $id and .enabled == true)
+        | select(.identifier == $id)
         | {identifier, label, title, value, description, help}' \
        "$tree" | head -1
 }
@@ -1479,9 +1479,9 @@ follow_memory_confirmation_edge() {
     MEMORY_CONFIRMATION_ATTEMPTS="$previous_attempts"
     MEMORY_CONFIRMATION_VISIBLE=0
     MEMORY_CONFIRMATION_CLICKED=0
-    if memory_confirmation_enabled "$tree" "$identifier"; then
+    signature="$(memory_confirmation_signature "$tree" "$identifier")"
+    if [[ -n "$signature" ]]; then
         MEMORY_CONFIRMATION_VISIBLE=1
-        signature="$(memory_confirmation_signature "$tree" "$identifier")"
         if [[ "$signature" != "$previous_signature" ]]; then
             MEMORY_CONFIRMATION_POLLS=0
             MEMORY_CONFIRMATION_ATTEMPTS=0
@@ -1494,10 +1494,10 @@ follow_memory_confirmation_edge() {
         # Product-side confirmPendingMemoryLoad claims the warning synchronously
         # before async revalidation, so a repeated delivery while it is checking
         # cannot enqueue a duplicate launch.
-        if [[ -n "$signature" \
-              && "$MEMORY_CONFIRMATION_ATTEMPTS" -lt 3 \
-              && ( "$MEMORY_CONFIRMATION_ATTEMPTS" == 0 \
-                   || "$MEMORY_CONFIRMATION_POLLS" -ge 4 ) ]]; then
+        if memory_confirmation_enabled "$tree" "$identifier" \
+           && [[ "$MEMORY_CONFIRMATION_ATTEMPTS" -lt 3 \
+                 && ( "$MEMORY_CONFIRMATION_ATTEMPTS" == 0 \
+                      || "$MEMORY_CONFIRMATION_POLLS" -ge 4 ) ]]; then
             # Consume the budget before posting the click. Driver failures must
             # be spaced and capped just like successfully posted mouse events.
             MEMORY_CONFIRMATION_SIGNATURE="$signature"

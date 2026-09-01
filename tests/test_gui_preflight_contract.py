@@ -708,6 +708,22 @@ def test_memory_confirmation_helper_handles_quickstart_revalidation(tmp_path):
             }
         )
     )
+    main_unsafe_disabled = tmp_path / "main-unsafe-disabled.json"
+    main_unsafe_disabled.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "ui_elements": [
+                        {
+                            "identifier": "MemoryWarning.Confirm",
+                            "enabled": False,
+                            "label": "Load anyway (risky)",
+                        }
+                    ]
+                }
+            }
+        )
+    )
     failed_delivery = tmp_path / "failed-delivery.json"
     failed_delivery.write_text(
         json.dumps(
@@ -767,6 +783,10 @@ scan_main "$5"
 scan_main "$6"
 scan_main "$6"
 for _ in {{1..20}}; do scan_main "$6"; done
+# Disabling and re-enabling the same mounted semantic decision must not mint a
+# fresh delivery budget after the three-attempt cap has been consumed.
+scan_main "${{10}}"
+for _ in {{1..20}}; do scan_main "$6"; done
 fail_signature=""; fail_polls=0; fail_attempts=0
 scan_failure() {{
     follow_memory_confirmation_edge "$1" "$EVIDENCE" \\
@@ -792,6 +812,7 @@ for _ in {{1..20}}; do scan_failure "$8"; done
             str(evidence),
             str(failed_delivery),
             str(clicks),
+            str(main_unsafe_disabled),
         ],
         capture_output=True,
         text=True,
@@ -804,7 +825,8 @@ for _ in {{1..20}}; do scan_failure "$8"; done
         "Quickstart.Memory.LoadAnyway",
     ]
     # Tight is clicked once, then the semantically new unsafe presentation
-    # gets at most three spaced delivery attempts despite remaining visible.
+    # gets at most three spaced delivery attempts despite remaining visible or
+    # temporarily disabled before it becomes interactive again.
     assert recorded[2:6] == ["MemoryWarning.Confirm"] * 4
     # A failing driver consumes the same spaced budget instead of retrying on
     # every 250 ms poll forever.

@@ -13,14 +13,15 @@ struct MemoryConfirmationRetryPolicy {
     private(set) var attempts = 0
     private var pollsSinceAttempt = 0
 
-    mutating func shouldClick(isVisible: Bool) -> Bool {
-        guard isVisible else {
+    mutating func shouldClick(isPresent: Bool, isEnabled: Bool) -> Bool {
+        guard isPresent else {
             attempts = 0
             pollsSinceAttempt = 0
             return false
         }
         pollsSinceAttempt += 1
-        guard attempts < Self.maximumAttempts,
+        guard isEnabled,
+              attempts < Self.maximumAttempts,
               attempts == 0 || pollsSinceAttempt >= Self.retryPollInterval else {
             return false
         }
@@ -31,8 +32,11 @@ struct MemoryConfirmationRetryPolicy {
 
     @MainActor
     mutating func follow(_ confirmation: XCUIElement) {
-        let isVisible = confirmation.exists && confirmation.isEnabled
-        if shouldClick(isVisible: isVisible) {
+        let isPresent = confirmation.exists
+        if shouldClick(
+            isPresent: isPresent,
+            isEnabled: isPresent && confirmation.isEnabled
+        ) {
             confirmation.click()
         }
     }
