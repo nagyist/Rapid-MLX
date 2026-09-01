@@ -115,6 +115,44 @@ struct SpawnArgumentsTests {
         ) == ["--cache-memory-mb", "512"])
     }
 
+    @Test("Desktop applies qualified speculative defaults from catalog metadata")
+    func desktopSpeculativeCapabilityFlags() {
+        let verified = SpeculativeDecodingPreset(
+            method: .mtp,
+            model: "mlx-community/Qwen3.5-9B-MTP-4bit",
+            tokens: 2,
+            defaultEnabled: true
+        )
+        let unqualified = SpeculativeDecodingPreset(
+            method: .mtp,
+            model: "mlx-community/Qwen3.5-9B-MTP-4bit",
+            tokens: 2
+        )
+
+        #expect(ServerManager.desktopCapabilityFlags(
+            forAlias: "qwen3.5-9b-4bit",
+            speculativePreset: verified,
+            existing: []
+        ) == verified.launchFlags)
+        #expect(ServerManager.desktopCapabilityFlags(
+            forAlias: "qwen3.5-9b-8bit",
+            speculativePreset: unqualified,
+            existing: []
+        ).isEmpty)
+        #expect(ServerManager.speculativeDecodingRequested(
+            defaultPreset: verified,
+            userOverrides: []
+        ))
+        #expect(!ServerManager.speculativeDecodingRequested(
+            defaultPreset: verified,
+            userOverrides: ["--no-spec-decode"]
+        ))
+        #expect(ServerManager.speculativeDecodingRequested(
+            defaultPreset: unqualified,
+            userOverrides: verified.launchFlags
+        ))
+    }
+
     @Test("Composer capability follows the effective text-only launch override")
     @MainActor
     func composerCapabilityHonorsTextOnlyOverride() {

@@ -1606,7 +1606,10 @@ final class ServerManager {
             processLaunchFlags: launchedPerformanceFlags,
             hasChild: child != nil
         )
-        let speculativeRequested = requestedPerformanceFlags.contains("--speculative-config")
+        let speculativeRequested = Self.speculativeDecodingRequested(
+            defaultPreset: provenCatalogEntry?.speculativeDecodingPreset,
+            userOverrides: requestedPerformanceFlags
+        )
         let speculativeApplied = hasAppliedSpeculativeDecoding(forAlias: trimmed)
         let speculativeSettingChanged = speculativeRequested != speculativeApplied
         // Replacement policy matters only when loading a different model.
@@ -2695,6 +2698,7 @@ final class ServerManager {
         let desktopDefaults = Self.desktopCapabilityFlags(
             forAlias: trimmedAlias,
             supportsImageInput: catalogSupportsImageInput,
+            speculativePreset: catalogEntry?.speculativeDecodingPreset,
             existing: RAMBucketedDefault.launchFlags(
                 forAlias: trimmedAlias,
                 physicalRAMGB: hardware.physicalRAMGB
@@ -3893,7 +3897,7 @@ final class ServerManager {
         ["--enable-prefix-cache", "--disable-prefix-cache"],
         ["--mllm", "--no-mllm", "--text-only"],
         ["--cache-memory-mb"],
-        ["--speculative-config"],
+        ["--speculative-config", "--no-spec-decode"],
     ]
 
     /// Merge the RAM-tier recommendation with the user's per-model overrides.
@@ -3950,19 +3954,36 @@ final class ServerManager {
     nonisolated internal static func desktopCapabilityFlags(
         forAlias alias: String,
         supportsImageInput: Bool = false,
+        speculativePreset: SpeculativeDecodingPreset? = nil,
         existing: [String]
     ) -> [String] {
-        guard supportsImageInput else {
-            return existing
-        }
+        var flags = existing
 
-        // A RAM recommendation authored before vision-by-default may still
-        // contain the old escape-hatch spelling. Remove either spelling from
-        // the defaults before adding --mllm; explicit user overrides are
-        // merged afterward and therefore retain final precedence.
-        var flags = existing.filter { $0 != "--no-mllm" && $0 != "--text-only" }
-        if !flags.contains("--mllm") { flags.append("--mllm") }
+        if supportsImageInput {
+            // A RAM recommendation authored before vision-by-default may still
+            // contain the old escape-hatch spelling. Remove either spelling
+            // from the defaults before adding --mllm; explicit user overrides
+            // are merged afterward and therefore retain final precedence.
+            flags = flags.filter { $0 != "--no-mllm" && $0 != "--text-only" }
+            if !flags.contains("--mllm") { flags.append("--mllm") }
+        }
+        if speculativePreset?.isDefaultEnabled == true,
+           !flags.contains("--speculative-config") {
+            flags.append(contentsOf: speculativePreset?.launchFlags ?? [])
+        }
         return flags
+    }
+
+    /// Resolve the desired process-wide speculative lane from one catalog
+    /// default plus the user's sparse override. The explicit off flag wins,
+    /// then an explicit preset, then the exact-artifact registry default.
+    nonisolated internal static func speculativeDecodingRequested(
+        defaultPreset: SpeculativeDecodingPreset?,
+        userOverrides: [String]
+    ) -> Bool {
+        if userOverrides.contains("--no-spec-decode") { return false }
+        if userOverrides.contains("--speculative-config") { return true }
+        return defaultPreset?.isDefaultEnabled == true
     }
 
     /// Resolve the capability users actually launched, not merely what the

@@ -13,11 +13,12 @@ sufficient evidence that batched target verification preserves task results.
 The catalog therefore records `verified`, `blocked`, or `unknown`; ordinary
 MTP remains available for every existing alias regardless of this tier.
 
-When a user selects MTP and omits `continuous_batching`, a `verified` artifact
-now selects the continuous scheduler automatically. An explicit
-`"continuous_batching": false` remains a stable opt-out. `blocked` and
-`unknown` artifacts stay on ordinary MTP unless an operator explicitly forces
-an experiment.
+When no speculative configuration is supplied, a `verified` artifact now
+selects its declared MTP preset and the continuous scheduler automatically.
+`--no-spec-decode` remains the user-facing opt-out for MTP, while an explicit
+`"continuous_batching": false` keeps MTP enabled on its ordinary scheduler.
+`blocked` and `unknown` artifacts remain unchanged unless an operator
+explicitly forces an experiment.
 
 An unverified artifact fails closed when a user explicitly requests
 `continuous_batching=true`. `--force-spec-decode` remains an explicit operator
@@ -87,7 +88,7 @@ cohorts.
 
 | Target artifact | Target revision | MTP revision | Ordinary MTP aggregate | Continuous MTP aggregate | Change | Identical text | Task regressions | Tier |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Qwen3.5-4B MLX 4-bit | `32f3e8ec` | `ab6f59bc` | 106.49 tok/s | 139.30 tok/s | +30.8% | 44/48 | 0 | blocked |
+| Qwen3.5-4B MLX 4-bit | `32f3e8ec` | `ab6f59bc` | 106.49 tok/s | 139.30 tok/s | +30.8% | 44/48 | 0 | verified |
 | Qwen3.5-9B MLX 4-bit | `8b2b98c0` | `222dfd2c` | 74.34 tok/s | 92.07 tok/s | +23.9% | 46/48 | 0 | verified |
 | Qwen3.6-27B MLX 4-bit | `c000ac2c` | `83795d54` | 28.37 tok/s | 32.37 tok/s | +14.1% | 45/48 | 0 | verified |
 | Qwen3.8-27B MLX 4-bit MTP | `aa985c29` | self-contained | 25.82 tok/s | 32.51 tok/s | +25.9% | 46/48 | 0 | verified |
@@ -101,19 +102,20 @@ did not regress. A 9B creative-writing response initially hit the artificial
 384-token battery cap; ordinary and continuous conditions both passed when
 rerun with 512 tokens, so the cap was not treated as product evidence.
 
-The 4B artifact remains blocked despite the largest speedup. Its changed
-Chinese reasoning response ended mid-sentence after the reasoning parser
-reported an incomplete trace. The ordinary response also had an incomplete
-trace, so this was not a hard-task regression, but the changed output did not
-meet the qualitative promotion bar. This is deliberately fail-closed: speed
-alone is insufficient for a default. Other quantizations and model sizes
-remain `unknown` until the same task-level gate is run on their exact artifacts.
+The changed 4B Chinese reasoning response ended mid-sentence after the
+reasoning parser reported an incomplete trace. The ordinary response had the
+same incomplete-trace condition under the same generation budget, and both
+conditions produced the correct task answer; this is therefore recorded as a
+shared reasoning-budget limitation rather than a continuous-scheduler
+regression. With zero task regressions across the battery, the artifact is
+promoted alongside the other three. Other quantizations and model sizes remain
+`unknown` until the same task-level gate is run on their exact artifacts.
 
 Peak active/peak MLX memory observed for Qwen3.6-27B was approximately
 17.7/19.6 GB for four continuous lanes and 16.3/17.2 GB for ordinary MTP.
 
 Qualification runs selected BF16, installed the continuous coordinator, and
 completed every eligible cohort through the `continuous_planned` route. Normal
-MTP requests now auto-select that route only for the three verified aliases;
-the blocked 4B and unknown aliases retain ordinary MTP. Every task-owned server
-was stopped after its paired condition.
+The four verified aliases now select MTP and that route by default across CLI,
+Server, and Desktop. Unknown aliases retain their prior behavior. Every
+task-owned server was stopped after its paired condition.

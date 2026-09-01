@@ -37,7 +37,7 @@ def _args(model: str, payload: str | None, *, force: bool = False) -> SimpleName
 @pytest.mark.parametrize(
     ("alias", "tier"),
     [
-        ("qwen3.5-4b-4bit", "blocked"),
+        ("qwen3.5-4b-4bit", "verified"),
         ("qwen3.5-9b-4bit", "verified"),
         ("qwen3.6-27b-4bit", "verified"),
         ("qwen3.8-27b-4bit", "verified"),
@@ -81,8 +81,10 @@ def test_unknown_alias_explicit_opt_in_fails_closed(capsys) -> None:
     assert "has not completed continuous-MTP qualification" in capsys.readouterr().err
 
 
-def test_blocked_alias_explicit_opt_in_fails_closed(capsys) -> None:
+def test_blocked_alias_explicit_opt_in_fails_closed(monkeypatch, capsys) -> None:
     from vllm_mlx import cli
+
+    monkeypatch.setattr(cli, "_alias_continuous_mtp_tier", lambda _model: "blocked")
 
     args = _args(
         "qwen3.5-4b-4bit",
@@ -97,15 +99,17 @@ def test_blocked_alias_explicit_opt_in_fails_closed(capsys) -> None:
     assert "failed continuous-MTP qualification" in capsys.readouterr().err
 
 
-def test_force_override_keeps_unqualified_artifact_experimental() -> None:
-    from vllm_mlx.cli import _normalize_speculative_config_or_exit
+def test_force_override_keeps_unqualified_artifact_experimental(monkeypatch) -> None:
+    from vllm_mlx import cli
+
+    monkeypatch.setattr(cli, "_alias_continuous_mtp_tier", lambda _model: "blocked")
 
     args = _args(
         "qwen3.5-4b-4bit",
         '{"method":"mtp","continuous_batching":true}',
         force=True,
     )
-    _normalize_speculative_config_or_exit(args)
+    cli._normalize_speculative_config_or_exit(args)
 
     assert args.mtp_continuous_batching is True
     assert args.mtp_continuous_batching_tier == "blocked"
@@ -113,7 +117,12 @@ def test_force_override_keeps_unqualified_artifact_experimental() -> None:
 
 @pytest.mark.parametrize(
     "alias",
-    ["qwen3.5-9b-4bit", "qwen3.6-27b-4bit", "qwen3.8-27b-4bit"],
+    [
+        "qwen3.5-4b-4bit",
+        "qwen3.5-9b-4bit",
+        "qwen3.6-27b-4bit",
+        "qwen3.8-27b-4bit",
+    ],
 )
 def test_verified_alias_defaults_to_continuous_when_mtp_is_selected(
     alias: str,
@@ -154,14 +163,39 @@ def test_legacy_enable_mtp_uses_the_same_verified_default() -> None:
     assert args._speculative_config.method == "mtp"
 
 
-def test_blocked_alias_defaults_to_ordinary_mtp() -> None:
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "qwen3.5-4b-4bit",
+        "qwen3.5-9b-4bit",
+        "qwen3.6-27b-4bit",
+        "qwen3.8-27b-4bit",
+    ],
+)
+def test_verified_alias_defaults_mtp_on_without_any_speculative_flag(
+    alias: str,
+) -> None:
     from vllm_mlx.cli import _normalize_speculative_config_or_exit
 
-    args = _args("qwen3.5-4b-4bit", '{"method":"mtp"}')
+    args = _args(alias, None)
     _normalize_speculative_config_or_exit(args)
 
+    assert args.spec_decode == "mtp"
+    assert args.mtp_continuous_batching is True
+    assert args.mtp_continuous_batching_tier == "verified"
+    assert args._speculative_config.method == "mtp"
+
+
+def test_no_spec_decode_remains_an_explicit_default_off_override() -> None:
+    from vllm_mlx.cli import _normalize_speculative_config_or_exit
+
+    args = _args("qwen3.5-9b-4bit", None)
+    args.no_spec_decode = True
+    _normalize_speculative_config_or_exit(args)
+
+    assert args.spec_decode == "none"
     assert args.mtp_continuous_batching is False
-    assert args.mtp_continuous_batching_tier == "blocked"
+    assert args._speculative_config is None
 
 
 def test_unknown_alias_defaults_to_ordinary_mtp() -> None:

@@ -2416,6 +2416,16 @@ def _normalize_speculative_config_or_exit(args):
         if legacy_payload is not None:
             raw_config = json.dumps(legacy_payload, separators=(",", ":"))
             args.speculative_config = raw_config
+        elif (
+            not getattr(args, "no_spec_decode", False)
+            and _alias_continuous_mtp_tier(getattr(args, "model", None)) == "verified"
+        ):
+            # Exact artifacts that passed the mixed-workload qualification
+            # select their declared MTP preset by default.  The alias registry
+            # remains the single source of truth, and --no-spec-decode stays
+            # the explicit user escape hatch on every surface.
+            raw_config = '{"method":"mtp"}'
+            args.speculative_config = raw_config
 
     if raw_config is None:
         _fill_runtime_defaults(overwrite=False)
