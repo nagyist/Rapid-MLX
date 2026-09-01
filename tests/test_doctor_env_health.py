@@ -35,7 +35,6 @@ from typing import cast
 from unittest import mock
 
 import pytest
-import tomllib
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 
