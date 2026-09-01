@@ -20,7 +20,6 @@ Tests in ``tests/test_doctor_env_health.py`` cover each section's probe.
 
 from __future__ import annotations
 
-import importlib
 import importlib.metadata as _im
 import importlib.util as _iu
 import json
@@ -348,10 +347,12 @@ def _module_available(
         if real_import:
             if not _module_origin_is_trusted(module):
                 return False
-            if module == "PIL":
-                return _pil_importable()
-            importlib.import_module(module)
-            return True
+            return _runtime_module_importable(
+                Path(sys.executable).absolute(),
+                "PIL.Image" if module == "PIL" else module,
+                None,
+                exercise=module == "PIL",
+            )
         return _iu.find_spec(module) is not None
     except (ImportError, AttributeError, ValueError):
         return False
@@ -464,7 +465,7 @@ def _runtime_python_path() -> Path:
                     return candidate.absolute()
             return None
 
-        def _python_from_entrypoint(entry: Path) -> Path | None:
+        def _python_from_entrypoint(entry: Path, process: Any) -> Path | None:
             try:
                 shebang = entry.read_text(encoding="utf-8").splitlines()[0]
             except (OSError, UnicodeDecodeError, IndexError):
@@ -475,7 +476,11 @@ def _runtime_python_path() -> Path:
             if len(shebang_parts) >= 1 and not Path(shebang_parts[0]).name.startswith(
                 "env"
             ):
-                return Path(shebang_parts[0]).absolute()
+                interpreter = Path(shebang_parts[0]).absolute()
+                if interpreter.is_file() and interpreter.name.lower().startswith(
+                    "python"
+                ):
+                    return interpreter
             return _python_sibling(entry)
 
         def _python_from_module_command(
@@ -525,7 +530,7 @@ def _runtime_python_path() -> Path:
             if entry.name == "rapid-mlx":
                 if not _is_installed_rapid_mlx_entrypoint(entry):
                     return None
-                candidate = _python_from_entrypoint(entry)
+                candidate = _python_from_entrypoint(entry, process)
             elif (
                 len(command) >= 3
                 and command[1] == "-m"
@@ -731,8 +736,12 @@ else:
 
         Image.new("RGB", (1, 1))
     else:
-        importlib.import_module(module_name)
-    print(json.dumps({"importable": True, "trusted_origin": True}))
+        try:
+            importlib.import_module(module_name)
+        except (Exception, SystemExit):
+            print(json.dumps({"importable": False, "trusted_origin": True}))
+            sys.exit(0)
+        print(json.dumps({"importable": True, "trusted_origin": True}))
 """
 _RUNTIME_IMPORT_CACHE: dict[
     tuple[Path, str, str, bool],
@@ -744,7 +753,7 @@ def _bounded_timeout(default_s: float) -> float:
     """Return the remaining doctor budget without yielding a zero timeout."""
     if _DOCTOR_DEADLINE is None:
         return default_s
-    return max(0.05, _DOCTOR_DEADLINE - time.monotonic())
+    return max(0.05, min(default_s, _DOCTOR_DEADLINE - time.monotonic()))
 
 
 def _probe_package(
@@ -779,6 +788,7 @@ def _runtime_module_importable(
     sidecar_root: Path | None,
     *,
     exercise: bool = False,
+    isolated: bool = True,
 ) -> bool:
     """Import one trusted module in *runtime*, independently of other probes."""
     cache_key = (
@@ -791,10 +801,11 @@ def _runtime_module_importable(
         return _RUNTIME_IMPORT_CACHE[cache_key]
     importable = False
     try:
-        result = subprocess.run(  # noqa: S603 — runtime path is caller-validated
+        command = [str(runtime)]
+        if isolated and runtime != Path(sys.executable).absolute():
+            command.append("-I")
+        command.extend(
             [
-                str(runtime),
-                "-I",
                 "-c",
                 _RUNTIME_IMPORT_SCRIPT,
                 "PIL.Image" if exercise else module,
@@ -805,7 +816,10 @@ def _runtime_module_importable(
                         else [],
                     }
                 ),
-            ],
+            ]
+        )
+        result = subprocess.run(  # noqa: S603 — runtime path is caller-validated
+            command,
             capture_output=True,
             text=True,
             timeout=_bounded_timeout(10),

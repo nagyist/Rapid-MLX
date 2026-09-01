@@ -601,15 +601,14 @@ def test_local_import_health_check_ignores_untrusted_shadow_modules(
     assert not eh._module_available("doctor_untrusted_shadow_probe", real_import=True)
 
 
-def test_local_import_health_check_catches_system_exit(monkeypatch):
-    monkeypatch.setattr(eh, "_module_origin_is_trusted", lambda _module: True)
-    monkeypatch.setattr(
-        eh.importlib,
-        "import_module",
-        mock.Mock(side_effect=SystemExit(2)),
-    )
+def test_local_import_health_check_catches_system_exit(tmp_path):
+    site_root = tmp_path / "site-packages"
+    site_root.mkdir()
+    (site_root / "damaged_dependency.py").write_text("raise SystemExit(2)\n")
 
-    assert not eh._module_available("damaged_dependency", real_import=True)
+    assert not eh._runtime_module_importable(
+        Path(sys.executable).resolve(), "damaged_dependency", tmp_path
+    )
 
 
 def test_local_pillow_probe_catches_system_exit(monkeypatch):
@@ -1207,6 +1206,60 @@ def test_entrypoint_direct_shebang_wins_over_sibling_python(
     assert eh._runtime_python_path() != sibling_python
 
 
+def test_entrypoint_non_python_shebang_uses_process_executable(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    shell_target = tmp_path / "not-python.sh"
+    shell_target.write_text("#!/bin/sh\nexit 0\n")
+    shell_target.chmod(0o755)
+    entrypoint = tmp_path / "bin" / "rapid-mlx"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text(f"#!{shell_target}\nfrom vllm_mlx.cli import main\nmain()\n")
+    entrypoint.chmod(0o755)
+    dist_info = tmp_path / "dist" / "rapid_mlx-0.0.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "RECORD").write_text("rapid-mlx,,\n")
+    runtime = tmp_path / "server-runtime" / "bin" / "python3"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    (runtime.parent.parent / "pyvenv.cfg").write_text("")
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [str(entrypoint), "serve"],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(runtime)
+
+        def environ(self):
+            return {"PATH": str(runtime.parent)}
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_python_path() == runtime.absolute()
+
+
 def test_local_import_rejects_source_tree_shadow_module(
     tmp_path,
     monkeypatch,
@@ -1797,7 +1850,7 @@ def test_remote_importable_package_without_metadata_is_a_warning(tmp_path, monke
     assert str(server_runtime) in row.detail
 
 
-def test_real_remote_probe_confirms_importable_package_without_metadata(
+def test_remote_probe_reports_context_module_without_safe_import_verification(
     tmp_path,
     monkeypatch,
 ):
