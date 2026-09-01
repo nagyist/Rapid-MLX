@@ -142,15 +142,17 @@ The queue contract lives in `.mergify.yml`:
 
 - label-gated `auto_merge_conditions`, so a ready label automatically enqueues
   the pull request without a second command or checkbox;
-- explicit, named queue actions provide the re-entry edge for a head that batch
-  bisection dropped without testing. Mergify marks that exact head `dequeued`,
-  which deliberately blocks automatic retry. To re-authorize the unchanged
-  head, remove and re-apply its one ready label: the exact-head authorization
+- explicit, named queue actions provide the re-entry edge for a head left in a
+  terminal `dequeued` state after a diagnosed batch outcome. The marker
+  deliberately blocks automatic retry. To authorize one explicit retry of the
+  unchanged head, remove and re-apply its one ready label: the exact-head authorization
   workflow clears the stale marker only on that fresh label event and issues a
   bot-owned, one-shot `merge-requeue-trigger`; the matching action consumes the
   trigger while queueing the head again. Removing `dequeued` alone cannot reuse
   an earlier authorization. Do not manually manage the internal trigger, post a
-  queue command, push an empty commit, or remove `dequeued` by itself;
+  queue command, push an empty commit, or remove `dequeued` by itself. The
+  provider does not expose a machine-readable dequeue-cause condition here, so
+  this fresh maintainer action is the diagnosis and retry boundary;
 - an exact-head authorization status in both queue conditions, preventing a
   newly pushed head from racing asynchronous label revocation;
 - serial mode with one batch in flight, so speculative checks cannot multiply
@@ -215,13 +217,20 @@ Production activation is an owner operation and must happen in this order:
 2. Install the GitHub App for this repository only. Do not grant it access to
    unrelated repositories. Confirm its configuration check validates the
    default-branch policy.
-3. Create the `merge-ready` and `merge-ready-mac` labels. Applying exactly one
+3. Create the `merge-ready`, `merge-ready-mac`, and
+   `merge-requeue-trigger` labels. The last label is an internal, bot-owned
+   one-shot token and must not be applied manually. Applying exactly one
    is the explicit authorization to enter the matching queue; removing it
    dequeues the pull request. Applying both fails closed and enters neither.
    Fork pull requests are deliberately ineligible because composing fork code
    onto an internal queue branch changes GitHub's token and secret boundary.
    After review, bring an accepted external change onto a same-repository
    maintainer branch before authorizing it for the batch queue.
+
+Maintainers who can manage labels are part of the queue's trusted control
+plane: they can already authorize a head by removing and re-applying its ready
+label. Repository label changes remain auditable, but the internal trigger is
+not a security boundary against a malicious maintainer.
 4. In the existing `main` protection, retain required contexts `tests`,
    `desktop-tests`, and `version-bump-guard`, required conversation resolution,
    administrator enforcement, and linear history. Disable only **Require

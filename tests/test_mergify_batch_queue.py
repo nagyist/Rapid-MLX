@@ -202,7 +202,7 @@ def _run_authorization_script(
     live_head: str = "head-sha",
     fail_status_call: int | None = None,
     fail_add: bool = False,
-    fail_remove: bool = False,
+    remove_error_status: int | None = None,
 ) -> dict[str, object]:
     """Execute the exact github-script body against deterministic API mocks."""
 
@@ -219,7 +219,7 @@ def _run_authorization_script(
             "liveHead": live_head,
             "failStatusCall": fail_status_call,
             "failAdd": fail_add,
-            "failRemove": fail_remove,
+            "removeErrorStatus": remove_error_status,
         }
     )
     harness = f"""
@@ -252,7 +252,7 @@ const github = {{ rest: {{
   issues: {{
     removeLabel: async () => {{
       calls.push(["remove"]);
-      if (scenario.failRemove) throw Object.assign(new Error("remove failure"), {{ status: 500 }});
+      if (scenario.removeErrorStatus) throw Object.assign(new Error("remove failure"), {{ status: scenario.removeErrorStatus }});
     }},
     addLabels: async (args) => {{
       calls.push(["add", args.labels]);
@@ -329,7 +329,7 @@ def test_trigger_failure_keeps_both_queue_circuit_breakers():
 
 def test_marker_failure_leaves_trigger_blocked_and_retryable():
     result = _run_authorization_script(
-        labels=["merge-ready-mac", "dequeued"], fail_remove=True
+        labels=["merge-ready-mac", "dequeued"], remove_error_status=500
     )
 
     assert result["calls"] == [
@@ -339,6 +339,28 @@ def test_marker_failure_leaves_trigger_blocked_and_retryable():
         ["remove"],
         ["threw", "remove failure"],
     ]
+
+
+def test_concurrent_marker_removal_proceeds_to_final_authorization():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"], remove_error_status=404
+    )
+
+    assert result["calls"] == [
+        ["get"],
+        ["status", "pending"],
+        ["add", ["merge-requeue-trigger"]],
+        ["remove"],
+        ["status", "success"],
+    ]
+
+
+def test_activation_docs_provision_the_internal_requeue_label():
+    docs = (ROOT / "docs/engineering/operations/path-aware-merge-queue.md").read_text()
+
+    assert "Create the `merge-ready`, `merge-ready-mac`, and" in docs
+    assert "`merge-requeue-trigger` labels" in docs
+    assert "internal, bot-owned" in docs
 
 
 def test_final_status_failure_leaves_trigger_blocked_and_retryable():

@@ -11,8 +11,8 @@ merge_protections_settings:
         - label = merge-ready-mac
 
 # ``auto_merge_conditions`` admits a ready head initially, but Mergify keeps a
-# bisection member that was dropped untested in a terminal dequeued state.  The
-# explicit queue actions are the supported re-entry edge: re-applying the same
+# head in a terminal dequeued state after a batch outcome. The explicit queue
+# actions are the diagnosed re-entry edge: re-applying the same
 # ready label clears the bot-owned ``dequeued`` marker and issues the one-shot
 # ``merge-requeue-trigger`` label in authorize-merge-ready.yml.  These rules
 # consume that label while queueing the still-authorized exact head.  Removing
