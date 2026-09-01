@@ -126,7 +126,6 @@ enum ModelSelectionPurpose: Sendable, Hashable {
             case .textToSpeech:
                 return entry.taskTypes.contains(.speechSynthesis)
                     && entry.operationModes.contains(.presetVoice)
-                    && entry.audioFamily == "qwen3_tts"
             }
         }
         switch self {
@@ -904,9 +903,18 @@ enum ModelCatalog {
             } else {
                 size = nil
             }
+            let subfolder: String?
+            if source["subfolder"] is NSNull || source["subfolder"] == nil {
+                subfolder = nil
+            } else if let value = source["subfolder"] as? String,
+                      isSafeSubfolder(value) {
+                subfolder = value
+            } else {
+                return nil
+            }
             modelsByID[modelID] = (
                 repo,
-                source["subfolder"] as? String,
+                subfolder,
                 size,
                 resolution,
                 model["model_identity_digest"] as? String
