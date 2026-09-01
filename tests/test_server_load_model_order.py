@@ -602,6 +602,22 @@ def test_speculative_decode_skips_vision_runtime_preflight(monkeypatch):
     assert resolved.is_mllm is False
 
 
+def test_forced_mllm_preflight_checks_resolved_model_without_metadata(monkeypatch):
+    from vllm_mlx import server
+
+    checks = []
+    monkeypatch.setattr(
+        "vllm_mlx.model_aliases.resolve_model",
+        lambda _name: "publisher/resolved-vision-model",
+    )
+    monkeypatch.setattr("vllm_mlx.model_aliases.resolve_profile", lambda _name: None)
+    monkeypatch.setattr("vllm_mlx.models.mllm._require_mlx_vlm", checks.append)
+
+    server._preflight_vision_runtime("vision-alias", force_mllm=True)
+
+    assert checks == ["publisher/resolved-vision-model"]
+
+
 def test_load_model_threads_saved_cli_alias_into_checkpoint_resolution(monkeypatch):
     """CLI alias identity must survive its early alias-to-repo normalization."""
     from types import SimpleNamespace
