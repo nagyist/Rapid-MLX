@@ -54,8 +54,56 @@ bit-exact. Production work remains blocked on a real-model ladder that proves:
    back structurally; and
 5. the explicit hard-off escape hatch restores the stock graph.
 
-The only local Flash-Next 4-bit snapshot used by earlier qualification is no
-longer present in the HF cache. RTL-2T contains the 335 GB unquantized source
-artifact, which cannot be loaded on the 192 GB host. No product PR should be
-opened from this branch until the 4-bit artifact is restored and the real-model
-gate above passes.
+At the time of the isolated microbenchmark, the local 4-bit snapshot was
+missing and only a 335 GB unquantized source cache remained. That source cache
+was removed as a recoverable, unloadable artifact before the real-model stage;
+the exact 4-bit revision was then restored on RTL-2T.
+
+## Real-model qualification
+
+The immutable 4-bit artifact was restored to the standard Hub cache on
+RTL-2T and every file passed the artifact's `SHA256SUMS.txt`. The exact
+revision was `dcf657e4acda2aae72da99cde65b6c491cd96998` (28 safetensor shards,
+104,682,036,373 bytes). No other model process was resident.
+
+The baseline was exact current main `82b703adcb712beb80ee1b2d894444bb18eeec95`.
+The candidate was `1279709ebb23a8deb4c46691ae6cd80330151129` with
+`MLX_QWEN4_FUSED_EXPERT_KERNEL=auto`; it selects Pierre's `tile4` kernel for
+ordinary M=1 decode. Both variants used the same Python environment, checkpoint,
+server command, prefix-cache clearing, 256-token decode, and three-run median
+methodology from `.orca/flash-next-eval/benchmark.py`.
+
+| Target prompt | Stock TTFT | Fused TTFT | Stock decode | Fused decode | Decode delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 0.419 s | 0.425 s | 24.827 tok/s | 24.665 tok/s | -0.65% |
+| 2,048 | 2.426 s | 2.432 s | 23.458 tok/s | 22.430 tok/s | -4.38% |
+| 8,192 | 9.713 s | 9.702 s | 22.810 tok/s | 22.533 tok/s | -1.21% |
+| 32,768 | 46.510 s | 46.637 s | 20.984 tok/s | 21.015 tok/s | +0.15% |
+
+Peak RSS was unchanged at about 54.4 GiB. The two deterministic capture prompts
+remained coherent and task-equivalent, but their content hashes differed from
+stock (first token divergence at generated positions 5 and 64). Because the
+candidate does not provide a material end-to-end speedup, the full correctness
+battery is unnecessary: performance already fails the product gate.
+
+One first candidate reload hit a Metal command-buffer timeout inside
+`mlx_lm.utils.load_model`, before the candidate kernel compiled or executed.
+After the terminated process released all memory (96% system memory free), one
+bounded retry loaded and completed the full benchmark. This is retained as
+environment evidence, not attributed to fused-down execution.
+
+## Reference check and final verdict
+
+Private precedent inspection covered the primary serving engines' fused-MoE
+dispatch, configuration, native fallback, and per-shape tuning paths, plus the
+MLX-native switch-layer `gather_qmm` implementation. The pattern adopted for
+the experiment was narrow structural admission with a stock fallback and a
+shape-specific variant. The real model demonstrates the missing requirement:
+an isolated-kernel win is insufficient when the replacement introduces a graph
+boundary that prevents surrounding work from scheduling efficiently.
+
+**Final verdict: no-go.** The 7-17% isolated down-projection win becomes
+-4.38% to +0.15% end to end. Do not open a product PR and do not enable the
+kernel by default. Revisit only if a future fused-MoE primitive can compose the
+gate/up, activation, down projection, router weighting, and reduction without
+the extra scheduling boundary.
