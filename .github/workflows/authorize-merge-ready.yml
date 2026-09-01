@@ -106,4 +106,19 @@ jobs:
 
             if (!authorized) {
               core.setFailed(description);
+              return;
+            }
+
+            // Initial admission continues through auto_merge_conditions.  A
+            // terminally dequeued head additionally needs a one-shot token so
+            // merely removing Mergify's marker can never replay an old success
+            // status.  Mergify consumes this bot-owned label in the same rule
+            // that explicitly queues the head.
+            if (currentLabels.has("dequeued")) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ["merge-requeue-trigger"],
+              });
             }

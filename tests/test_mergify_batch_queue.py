@@ -15,6 +15,7 @@ REQUIRED_CHECKS = {
     "check-success = @github-actions/version-bump-guard",
 }
 HEAD_AUTHORIZATION = "check-success = merge-ready-head"
+REQUEUE_TRIGGER = "label = merge-requeue-trigger"
 LANE_CHECKS = {
     "no-mac-batch": "check-success = @github-actions/merge-lane-no-mac",
     "mac-batch": "check-success = @github-actions/merge-lane-mac",
@@ -92,10 +93,14 @@ def test_ready_labels_autoqueue_without_enabling_blind_retries():
             "base = main",
             "-draft",
             "-from-fork",
+            REQUEUE_TRIGGER,
             "-label = dequeued",
             HEAD_AUTHORIZATION,
         } <= conditions
-        assert rule["actions"] == {"queue": {"name": queue_name}}
+        assert rule["actions"] == {
+            "queue": {"name": queue_name},
+            "label": {"remove": ["merge-requeue-trigger"]},
+        }
 
     expected_labels = {
         "no-mac-batch": {"label = merge-ready", "-label = merge-ready-mac"},
@@ -183,6 +188,7 @@ def test_ready_authorization_is_bound_to_the_exact_head_commit():
     assert "livePull.head.sha === context.payload.pull_request.head.sha" in script
     assert 'currentLabels.has("dequeued")' in script
     assert 'name: "dequeued"' in script
+    assert 'labels: ["merge-requeue-trigger"]' in script
     assert "authorized &&" in script
     assert "error.status !== 404" in script
     assert "checkout" not in script.lower()
@@ -239,7 +245,10 @@ const github = {{ rest: {{
     calls.push(["status", args.state]);
     if (scenario.failStatusCall === statusCalls) throw Object.assign(new Error("status failure"), {{ status: 500 }});
   }} }},
-  issues: {{ removeLabel: async () => {{ calls.push(["remove"]); }} }},
+  issues: {{
+    removeLabel: async () => {{ calls.push(["remove"]); }},
+    addLabels: async (args) => {{ calls.push(["add", args.labels]); }},
+  }},
 }} }};
 const core = {{
   setFailed: (message) => calls.push(["failed", message]),
@@ -269,11 +278,18 @@ def test_dequeued_head_is_blocked_before_marker_removal_then_reauthorized():
     result = _run_authorization_script(labels=["merge-ready-mac", "dequeued"])
     operations = [call[0] for call in result["calls"]]
 
-    assert operations == ["get", "status", "remove", "notice", "status"]
+    assert operations == ["get", "status", "remove", "notice", "status", "add"]
     assert [call[1] for call in result["calls"] if call[0] == "status"] == [
         "pending",
         "success",
     ]
+    assert result["calls"][-1] == ["add", ["merge-requeue-trigger"]]
+
+
+def test_initial_authorization_does_not_issue_a_requeue_trigger():
+    result = _run_authorization_script(labels=["merge-ready-mac"])
+
+    assert result["calls"] == [["get"], ["status", "success"]]
 
 
 def test_status_failure_cannot_remove_the_dequeue_circuit_breaker():
@@ -294,7 +310,9 @@ def test_historical_authorization_rerun_cannot_clear_a_newer_dequeue():
     )
 
     assert result["calls"][0][0] == "failed"
-    assert all(call[0] not in {"get", "status", "remove"} for call in result["calls"])
+    assert all(
+        call[0] not in {"get", "status", "remove", "add"} for call in result["calls"]
+    )
 
 
 def test_stale_head_or_double_ready_labels_cannot_clear_dequeue():

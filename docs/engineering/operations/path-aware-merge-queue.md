@@ -146,9 +146,11 @@ The queue contract lives in `.mergify.yml`:
   bisection dropped without testing. Mergify marks that exact head `dequeued`,
   which deliberately blocks automatic retry. To re-authorize the unchanged
   head, remove and re-apply its one ready label: the exact-head authorization
-  workflow clears the stale marker only on that fresh label event, and the
-  matching action queues it again. Do not post a queue command, push an empty
-  commit, or remove `dequeued` by itself;
+  workflow clears the stale marker only on that fresh label event and issues a
+  bot-owned, one-shot `merge-requeue-trigger`; the matching action consumes the
+  trigger while queueing the head again. Removing `dequeued` alone cannot reuse
+  an earlier authorization. Do not manually manage the internal trigger, post a
+  queue command, push an empty commit, or remove `dequeued` by itself;
 - an exact-head authorization status in both queue conditions, preventing a
   newly pushed head from racing asynchronous label revocation;
 - serial mode with one batch in flight, so speculative checks cannot multiply
