@@ -217,20 +217,12 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
     labels = {"model": model_name}
     lines: list[str] = []
 
-    reported_total = performance.get("total_requests")
-    if reported_total is None:
-        reported_total = sum(
-            _coerce_number(performance.get(f"requests_{outcome}"), 0.0)
-            for outcome in ("succeeded", "cancelled", "failed")
-        )
-    requests_total = _coerce_number(reported_total, 0.0)
     lines.extend(
         _fmt_metric_family(
             "rapid_mlx_model_requests_total",
             "counter",
             "Text-engine requests by terminal outcome and model.",
             [
-                (requests_total, {**labels, "outcome": "total"}),
                 *[
                     (
                         int(

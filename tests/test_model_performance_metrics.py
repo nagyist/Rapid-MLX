@@ -491,6 +491,13 @@ def test_metrics_renders_model_performance_series():
     assert (
         'rapid_mlx_model_requests_total{model="gemma-4-12b",outcome="failed"} 1' in body
     )
+    assert 'outcome="total"' not in body
+    outcome_samples = [
+        float(line.rsplit(" ", 1)[1])
+        for line in body.splitlines()
+        if line.startswith("rapid_mlx_model_requests_total{")
+    ]
+    assert sum(outcome_samples) == 4
     assert 'rapid_mlx_model_prompt_tokens_total{model="gemma-4-12b"} 15' in body
     assert 'rapid_mlx_model_completion_tokens_total{model="gemma-4-12b"} 9' in body
     assert 'rapid_mlx_model_ttft_seconds_bucket{model="gemma-4-12b",le="0.1"} 1' in body
