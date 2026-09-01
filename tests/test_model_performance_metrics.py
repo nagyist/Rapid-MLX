@@ -282,6 +282,22 @@ def test_scheduler_records_explicit_cancellation_once():
     assert scheduler.performance.snapshot().requests_cancelled == 1
 
 
+def test_scheduler_records_reconciled_orphan_cancellation():
+    pytest.importorskip("mlx")
+
+    scheduler = _scheduler()
+    request = _running_request(scheduler, "disconnect-orphan")
+    scheduler.remove_finished_request(request.request_id)
+
+    scheduler.step()
+
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_cancelled == 1
+    assert performance.prompt_tokens == 5
+    assert performance.completion_tokens == 2
+    assert request.request_id not in scheduler.running
+
+
 def test_scheduler_records_generation_recovery_failures():
     pytest.importorskip("mlx")
 

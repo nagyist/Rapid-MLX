@@ -7251,9 +7251,17 @@ class Scheduler:
                 and request_id not in self.requests
             ):
                 return False
-            return self._do_abort_request_impl(request_id)
+            return self._do_abort_request_impl(
+                request_id,
+                orphan_request=expected_orphan,
+            )
 
-    def _do_abort_request_impl(self, request_id: str) -> bool:
+    def _do_abort_request_impl(
+        self,
+        request_id: str,
+        *,
+        orphan_request: Request | None = None,
+    ) -> bool:
         """
         Actually abort a request. Must be called from the executor thread.
 
@@ -7267,7 +7275,10 @@ class Scheduler:
         Returns:
             True if any cleanup was performed, False otherwise
         """
-        request = self.requests.get(request_id)
+        # Engine cleanup deliberately removes the canonical request before the
+        # orphan reconciler reaps its still-running batch slot. Preserve that
+        # exact, identity-validated lifetime for cancellation accounting.
+        request = orphan_request or self.requests.get(request_id)
         was_waiting = False
         was_running = False
         removed_from_batch = False
