@@ -385,6 +385,59 @@ class ModeResult:
     raw_runs: dict[str, list[WorkloadRun]]
 
 
+@dataclass(frozen=True)
+class QualificationResult:
+    code_median: float | None
+    non_code_speedups: dict[str, float]
+    median_speedup: float | None
+    ship: bool
+    decision: str
+
+
+def _qualify(
+    speedup: dict[str, float],
+    *,
+    gate: float,
+    non_code_floor: float,
+) -> QualificationResult:
+    """Apply the mixed-workload gate, failing closed on missing evidence."""
+    code_speedups = [v for k, v in speedup.items() if k in _CODE_WORKLOADS]
+    code_median = median(code_speedups) if code_speedups else None
+    non_code_speedups = {k: v for k, v in speedup.items() if k not in _CODE_WORKLOADS}
+    median_speedup = median(speedup.values()) if speedup else None
+    missing = [name for name in WORKLOADS if name not in speedup]
+    non_code_regress = {
+        key: value for key, value in non_code_speedups.items() if value < non_code_floor
+    }
+
+    if missing:
+        ship = False
+        decision = f"DO NOT SHIP (missing valid workloads: {', '.join(missing)})"
+    elif code_median is None:
+        ship = False
+        decision = "DO NOT SHIP (no valid code workloads)"
+    elif code_median < gate:
+        ship = False
+        decision = "DO NOT SHIP"
+    elif non_code_regress:
+        ship = False
+        regressed = ", ".join(
+            f"{key} {value:.2f}x" for key, value in non_code_regress.items()
+        )
+        decision = f"DO NOT SHIP (non-code regression: {regressed})"
+    else:
+        ship = True
+        decision = "SHIP (supports_dflash=true)"
+
+    return QualificationResult(
+        code_median=code_median,
+        non_code_speedups=non_code_speedups,
+        median_speedup=median_speedup,
+        ship=ship,
+        decision=decision,
+    )
+
+
 def bench_one_mode(
     model: str,
     port: int,
@@ -505,36 +558,17 @@ def main(argv: list[str] | None = None) -> int:
             continue
         speedup[name] = round(s / v, 3)
 
-    # Code median = the four code-gen workloads only. Chat is graded
-    # separately as a non-regression floor — prior bench rounds showed
-    # DFlash speedup is heavily code-biased and SHIPping a 1.3x code
-    # model that regresses to 0.8x on chat would be a bad user trade.
-    code_speedups = [v for k, v in speedup.items() if k in _CODE_WORKLOADS]
-    code_median = median(code_speedups) if code_speedups else None
-    non_code_speedups = {k: v for k, v in speedup.items() if k not in _CODE_WORKLOADS}
     non_code_floor = args.non_code_floor
-    non_code_regress = {
-        k: v for k, v in non_code_speedups.items() if v < non_code_floor
-    }
-
-    median_speedup = median(speedup.values()) if speedup else None
-
-    # Boolean ship/no-ship is the load-bearing signal; the human-readable
-    # ``decision`` string is just for the scorecard. Keeping them separate
-    # avoids string-shape coupling in callers / exit codes.
-    if code_median is None:
-        ship = False
-        decision = "DO NOT SHIP (no valid code workloads)"
-    elif code_median < args.gate:
-        ship = False
-        decision = "DO NOT SHIP"
-    elif non_code_regress:
-        ship = False
-        regressed = ", ".join(f"{k} {v:.2f}x" for k, v in non_code_regress.items())
-        decision = f"DO NOT SHIP (non-code regression: {regressed})"
-    else:
-        ship = True
-        decision = "SHIP (supports_dflash=true)"
+    qualification = _qualify(
+        speedup,
+        gate=args.gate,
+        non_code_floor=non_code_floor,
+    )
+    code_median = qualification.code_median
+    non_code_speedups = qualification.non_code_speedups
+    median_speedup = qualification.median_speedup
+    ship = qualification.ship
+    decision = qualification.decision
 
     def _serialize_runs(raw: dict[str, list[WorkloadRun]]) -> dict[str, list[dict]]:
         return {
