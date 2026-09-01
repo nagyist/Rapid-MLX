@@ -8,6 +8,7 @@ enum SidebarSection: Hashable {
     case images
     case audio
     case launch
+    case benchmark
 }
 
 /// The left sidebar — Ollama/ChatGPT layout: a "New Chat" action at the
@@ -181,6 +182,13 @@ struct SidebarView: View {
                 action: { selection = .launch }
             )
             .accessibilityIdentifier("Sidebar.Launch")
+            row(
+                title: "Community Benchmark",
+                systemImage: "gauge.with.dots.needle.50percent",
+                isSelected: selection == .benchmark,
+                action: { selection = .benchmark }
+            )
+            .accessibilityIdentifier("Sidebar.CommunityBenchmark")
 
             // Folders can exist before any conversation does (create one, then
             // file into it), so an empty history no longer means an empty rail.

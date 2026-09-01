@@ -938,6 +938,12 @@ struct ContentView: View {
                 readiness: readiness,
                 onReadinessAction: performReadinessAction
             )
+        case .benchmark:
+            CommunityBenchmarkView(
+                catalog: catalogEntries,
+                binary: server.binaryPath,
+                stopServer: { await server.stop() }
+            )
         }
     }
 
