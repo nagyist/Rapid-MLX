@@ -12,6 +12,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -140,8 +141,8 @@ def test_desktop_sidecar_uses_validated_mlx_vlm_bound():
 
     desktop_spec = matches[0]
     # Both surfaces deliberately pin one validated version. A range here caused
-    # fresh pip installs to backtrack to 0.6.3 while Desktop stayed on 0.6.16.
-    assert desktop_spec.specifier == Requirement("mlx-vlm==0.6.16").specifier
+    # fresh pip installs to backtrack to 0.6.3 while Desktop stayed on 0.6.17.
+    assert desktop_spec.specifier == Requirement("mlx-vlm==0.6.17").specifier
     assert vision_specs[0].specifier == desktop_spec.specifier
 
 
@@ -287,6 +288,83 @@ class TestAttestation:
 
     def test_label_match_is_case_insensitive_and_trimmed(self):
         assert guard._attestation_ok("", "  MLX-Coherence-Swept  ", False)
+
+
+class TestMergifyAttestationWorkflow:
+    """The queue may reuse only exact-head guard results from trusted batches."""
+
+    @staticmethod
+    def _job() -> dict:
+        workflow = yaml.load(
+            (_REPO_ROOT / ".github/workflows/ci.yml").read_text(),
+            Loader=yaml.BaseLoader,
+        )
+        return workflow["jobs"]["mlx-bound-guard"]
+
+    def test_candidate_resolver_is_limited_to_trusted_same_repo_mergify_prs(self):
+        job = self._job()
+        checkout = next(
+            step
+            for step in job["steps"]
+            if step.get("uses", "").startswith("actions/checkout@")
+        )
+        setup = next(
+            step
+            for step in job["steps"]
+            if step.get("name") == "Install Mergify CLI for trusted queue metadata"
+        )
+        queue_info = next(
+            step for step in job["steps"] if step.get("id") == "queue-info"
+        )
+        resolver = next(
+            step for step in job["steps"] if step.get("id") == "mergify-attestation"
+        )
+
+        condition = setup["if"]
+        assert "github.event.pull_request.user.login == 'mergify[bot]'" in condition
+        assert (
+            "github.event.pull_request.head.repo.full_name == github.repository"
+            in condition
+        )
+        assert "startsWith(github.head_ref, 'mergify/merge-queue/')" in condition
+        assert checkout["with"]["fetch-depth"] == "0"
+        assert checkout["with"]["ref"] == ("${{ github.event.pull_request.head.sha }}")
+        assert setup["uses"].startswith("Mergifyio/setup-cli@")
+        assert len(setup["uses"].split("@", 1)[1]) == 40
+        assert setup["with"]["mergify_cli_version"] == "2026.8.28.1"
+        assert queue_info["if"] == condition
+        assert queue_info["run"] == "mergify ci queue-info"
+        assert resolver["if"] == "steps.queue-info.outcome == 'success'"
+        assert (
+            resolver["env"]["QUEUE_METADATA"]
+            == "${{ steps.queue-info.outputs.queue_metadata }}"
+        )
+        assert resolver["env"]["REAL_BASE_SHA"] == (
+            "${{ github.event.pull_request.base.sha }}"
+        )
+        assert resolver["env"]["CANDIDATE_SHA"] == (
+            "${{ github.event.pull_request.head.sha }}"
+        )
+        assert resolver["run"] == "python scripts/check_mergify_mlx_attestation.py"
+        assert job["permissions"] == {
+            "contents": "read",
+            "pull-requests": "read",
+        }
+
+    def test_guard_uses_the_immutable_event_base_and_resolver_output(self):
+        job = self._job()
+        guard_step = next(
+            step
+            for step in job["steps"]
+            if step.get("name") == "Guard mlx/mlx-lm/mlx-vlm version bounds"
+        )
+        assert (
+            guard_step["env"]["MLX_BOUND_ATTESTED"]
+            == "${{ steps.mergify-attestation.outputs.attested }}"
+        )
+        assert guard_step["env"]["MLX_BOUND_BASE_REF"] == (
+            "${{ github.event.pull_request.base.sha }}"
+        )
 
 
 class TestDesktopManifestSynced:

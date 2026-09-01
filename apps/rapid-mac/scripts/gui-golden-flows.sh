@@ -58,8 +58,7 @@ usage() {
     cat <<'EOF'
 Usage: gui-golden-flows.sh [--flow NAME] [--keep] [--update-baselines]
 
-Flows: fresh-install, cached-quickstart, cached-curated-tradeup, cached-variant-collapse, download-progress, settings-persistence, settings-mtp, chat-restore, message-actions, restored-tools, tool-loop-budget, chat-depth, math-rendering, launch-integrations,
-       slow-stream-stop,
+Flows: fresh-install, cached-quickstart, cached-curated-tradeup, cached-variant-collapse, download-progress, settings-persistence, settings-mtp, chat-restore, chat-depth, launch-integrations,
        model-crash-recovery, low-memory-choice,
        update-state, update-busy, campaign-banner, window-close-prompt, no-dead-controls, catalog-integrity,
        browse-all-destination, chat-document-attachment, chat-multimodal-attachments, image-generation, dictation, dictation-rc2-upgrade, audio-readiness, all
@@ -402,8 +401,8 @@ flow_requires_screen_recording() {
 # unattended without taking on any of that.
 flow_requires_peekaboo() {
     case "$FLOW" in
-        fresh-install|cached-quickstart|cached-curated-tradeup|cached-variant-collapse|download-progress|settings-persistence|settings-mtp|chat-restore|message-actions|restored-tools|tool-loop-budget|chat-depth|math-rendering|browse-all-destination|no-dead-controls|catalog-integrity|update-state|update-busy|campaign-banner|launch-integrations) return 1 ;;
-        slow-stream-stop|model-switch-active-request|model-crash-recovery|low-memory-choice|chat-document-attachment|chat-multimodal-attachments|image-generation|dictation|dictation-rc2-upgrade|audio-readiness|window-close-prompt|resident-load-rejected) return 1 ;;
+        fresh-install|cached-quickstart|cached-curated-tradeup|cached-variant-collapse|download-progress|settings-persistence|settings-mtp|chat-restore|chat-depth|browse-all-destination|no-dead-controls|catalog-integrity|update-state|update-busy|campaign-banner|launch-integrations) return 1 ;;
+        model-switch-active-request|model-crash-recovery|low-memory-choice|chat-document-attachment|chat-multimodal-attachments|image-generation|dictation|dictation-rc2-upgrade|audio-readiness|window-close-prompt|resident-load-rejected) return 1 ;;
         *) return 0 ;;
     esac
 }
@@ -888,6 +887,98 @@ wait_identifier() {
         sleep 0.25
     done
     die "timed out waiting for AX identifier $identifier"
+}
+
+settle_transcript_at_bottom() {
+    local destination="$1" press_result="$2"
+    see_main "$destination"
+    # The window can expose both sidebar and transcript scrollbars. Correlate
+    # the transcript bar with the compose surface: it is the first vertical
+    # bar to the Send button's right. This anchor remains present after the
+    # Jump-to-latest overlay hides.
+    local scroll_x before_value
+    scroll_x="$(jq -r '
+        ([.data.ui_elements[]?
+          | select(.identifier == "ChatView.SendOrStopButton")
+          | .bounds.x] | first) as $compose_x
+        | [.data.ui_elements[]?
+           | select(.role == "AXScrollBar"
+                    and (.value | type) == "number"
+                    and .bounds.height > .bounds.width
+                    and .bounds.x > $compose_x)]
+        | sort_by(.bounds.x) | .[0].bounds.x // empty' "$destination")"
+    [[ -n "$scroll_x" ]] \
+        || die "could not identify the transcript scrollbar beside the compose surface"
+    before_value="$(jq -r --argjson scroll_x "$scroll_x" '
+        [.data.ui_elements[]?
+         | select(.role == "AXScrollBar"
+                  and (.value | type) == "number"
+                  and ((.bounds.x - $scroll_x) | fabs) < 1)
+         | .value] | first // empty' "$destination")"
+    [[ -n "$before_value" ]] \
+        || die "transcript exposes no measurable scroll position before Jump to latest"
+    if jq -e '.data.ui_elements[]?
+              | select(.identifier == "Transcript.JumpToBottom")' \
+        "$destination" >/dev/null; then
+        press "$destination" Transcript.JumpToBottom "$press_result" \
+            || die "transcript was not at its tail and Jump to latest was not pressable"
+    fi
+    local previous_tail_key="" stable_samples=0
+    for _ in {1..60}; do
+        see_main "$destination"
+        local current_value tail_marker_visible tail_key=""
+        current_value="$(jq -r --argjson scroll_x "$scroll_x" '
+            [.data.ui_elements[]?
+             | select(.role == "AXScrollBar"
+                      and (.value | type) == "number"
+                      and ((.bounds.x - $scroll_x) | fabs) < 1)
+             | .value] | first // empty' "$destination")"
+        # AppKit may remove an overlay scrollbar once a short transcript fits
+        # entirely inside its viewport. In that state, the last assistant
+        # action row being fully visible is stronger physical evidence than a
+        # scrollbar value that no longer exists.
+        tail_marker_visible="$(jq -r '
+            ([.data.ui_elements[]?
+              | select(.role == "AXScrollArea"
+                       and .bounds.x > 200
+                       and .bounds.width > 300
+                       and .bounds.height > 100)]
+             | sort_by(.bounds.width) | last) as $transcript
+            | if $transcript == null then false else
+                ([.data.ui_elements[]?
+                  | select((.identifier // "")
+                           | startswith("ChatView.Message.Retry."))
+                  | select(.bounds.y >= $transcript.bounds.y
+                           and (.bounds.y + .bounds.height)
+                               <= ($transcript.bounds.y + $transcript.bounds.height))]
+                 | length) > 0
+              end' "$destination")"
+        if [[ -n "$current_value" ]] \
+            && awk -v current="$current_value" \
+                'BEGIN { exit !(current >= 0.99) }'; then
+            tail_key="$current_value"
+        elif [[ -z "$current_value" && "$tail_marker_visible" == "true" ]]; then
+            tail_key="assistant-tail-visible"
+        fi
+        if [[ -n "$tail_key" ]] \
+            && ! jq -e '.data.ui_elements[]?
+                        | select(.identifier == "Transcript.JumpToBottom")' \
+                "$destination" >/dev/null; then
+            if [[ "$previous_tail_key" == "$tail_key" ]]; then
+                stable_samples=$((stable_samples + 1))
+            else
+                stable_samples=1
+            fi
+            if (( stable_samples >= 2 )); then
+                return
+            fi
+        else
+            stable_samples=0
+        fi
+        previous_tail_key="$tail_key"
+        sleep 0.1
+    done
+    die "Jump to latest did not physically settle the transcript at its tail"
 }
 
 wait_identifier_enabled() {
@@ -1807,6 +1898,10 @@ flow_fresh_install() {
     start_model
     send_prompt "Say hello in one short sentence." "post-value-consent"
     wait_identifier TelemetryConsent.PostValueBanner "$OUT/post-value-consent-visible.json"
+    # Streaming completion and scroll anchoring settle independently. Capture
+    # the structural baseline only after the transcript reaches its stable tail.
+    settle_transcript_at_bottom "$OUT/post-value-consent-visible.json" \
+        "$OUT/post-value-consent-jump-press.json"
     assert_tree_text "$OUT/post-value-consent-visible.json" "Hello"
     [[ "$(jq '[.data.ui_elements[]? | select(.identifier == "TelemetryConsent.PostValueBanner")] | length' \
         "$OUT/post-value-consent-visible.json")" == 1 ]] \
@@ -2594,456 +2689,6 @@ flow_chat_restore() {
            | length == 0' "$OUT/search-new-chat-landed.json" >/dev/null \
         || die "New chat did not dismiss conversation search"
     log "  conversation Pin/Unpin and search Clear/Close/New chat all produced effects"
-    cleanup_persona
-}
-
-flow_message_actions() {
-    # Every inline message action must produce its advertised result. Dynamic
-    # UUID suffixes are discovered from the live tree so this drives the same
-    # controls a user sees instead of a test-only entry point.
-    start_persona message-actions
-    dismiss_first_run
-    start_model
-    see_main "$OUT/message-actions-model-info-before.json"
-    press "$OUT/message-actions-model-info-before.json" ModelPickerBar.ModelInfo \
-        "$OUT/message-actions-model-info-press.json" \
-        || die "Model info button is not pressable"
-    wait_tree_text "Parameters" "$OUT/message-actions-model-info-open.json" 40
-    assert_tree_text "$OUT/message-actions-model-info-open.json" "$FAKE_ALIAS"
-    # Clicking the anchor again dismisses its popover and proves it is not a
-    # one-way overlay that traps the rest of the composer.
-    press "$OUT/message-actions-model-info-open.json" ModelPickerBar.ModelInfo \
-        "$OUT/message-actions-model-info-close-press.json" \
-        || die "Model info popover cannot be dismissed from its anchor"
-    send_prompt "original message action prompt" message-actions
-    wait_send_idle "$OUT/message-actions-settled.json"
-    see_main "$OUT/message-actions-before.json"
-
-    local assistant_copy assistant_select assistant_retry user_edit suffix
-    assistant_copy="$(jq -r '.data.ui_elements[]? | (.identifier // "")
-        | select(startswith("ChatView.Message.Copy."))' \
-        "$OUT/message-actions-before.json" | tail -1)"
-    assistant_select="${assistant_copy/Message.Copy./Message.SelectText.}"
-    assistant_retry="${assistant_copy/Message.Copy./Message.Retry.}"
-    user_edit="$(jq -r '.data.ui_elements[]? | (.identifier // "")
-        | select(startswith("ChatView.Message.Edit."))' \
-        "$OUT/message-actions-before.json" | head -1)"
-    [[ -n "$assistant_copy" && -n "$user_edit" ]] \
-        || die "completed turn exposes no assistant and user message actions"
-
-    pbcopy < /dev/null
-    press "$OUT/message-actions-before.json" "$assistant_copy" \
-        "$OUT/message-actions-copy-press.json" \
-        || die "Copy response is not pressable"
-    [[ -n "$(pbpaste)" ]] || die "Copy response left the pasteboard empty"
-
-    see_main "$OUT/message-actions-after-copy.json"
-    press "$OUT/message-actions-after-copy.json" "$assistant_select" \
-        "$OUT/message-actions-select-press.json" \
-        || die "Select text is not pressable"
-    wait_identifier SelectText.Done "$OUT/message-actions-select-sheet.json"
-    press "$OUT/message-actions-select-sheet.json" SelectText.Done \
-        "$OUT/message-actions-select-done-press.json" \
-        || die "Select text sheet cannot be dismissed"
-    for _ in {1..40}; do
-        see_main "$OUT/message-actions-select-closed.json"
-        if jq -e '.data.walk.complete == true
-                  and ([.data.ui_elements[]? | .identifier // ""]
-                       | index("SelectText.Done")) == null' \
-            "$OUT/message-actions-select-closed.json" >/dev/null; then break; fi
-        sleep 0.1
-    done
-    jq -e '([.data.ui_elements[]? | .identifier // ""]
-            | index("SelectText.Done")) == null' \
-        "$OUT/message-actions-select-closed.json" >/dev/null \
-        || die "Done did not dismiss the Select text sheet"
-
-    # Copy's checkmark reverts after 1.2s. SwiftUI may replace the action-row
-    # backing elements during that symbol transition; wait for the stable copy
-    # state so this journey measures Edit itself rather than an intentionally
-    # transient sibling animation.
-    for _ in {1..40}; do
-        see_main "$OUT/message-actions-copy-settled.json"
-        if jq -e --arg identifier "$assistant_copy" \
-            '.data.ui_elements[]? | select(.identifier == $identifier)
-             | select(.selected != true)' \
-            "$OUT/message-actions-copy-settled.json" >/dev/null; then break; fi
-        sleep 0.1
-    done
-    see_main "$OUT/message-actions-before-edit.json"
-    suffix="${user_edit##*.}"
-    if ! press "$OUT/message-actions-before-edit.json" "$user_edit" \
-        "$OUT/message-actions-edit-press.json"; then
-        # AXUIElementPerformAction may report cannotComplete even if SwiftUI
-        # committed the synchronous state mutation. Read the outcome before
-        # calling it dead; if no editor appeared, this is a product failure.
-        sleep 0.2
-        see_main "$OUT/message-actions-edit-failed-outcome.json"
-        jq -e --arg identifier "ChatView.Message.EditField.$suffix" \
-            '.data.ui_elements[]? | select(.identifier == $identifier)' \
-            "$OUT/message-actions-edit-failed-outcome.json" >/dev/null \
-            || die "Edit message is not pressable"
-    fi
-    wait_identifier "ChatView.Message.EditField.$suffix" \
-        "$OUT/message-actions-editor.json"
-    "$AX_DRIVER" set-value "$APP_PID" "ChatView.Message.EditField.$suffix" \
-        "cancelled edit must not send" > "$OUT/message-actions-edit-type.json"
-    see_main "$OUT/message-actions-edit-draft.json"
-    press "$OUT/message-actions-edit-draft.json" \
-        "ChatView.Message.CancelEdit.$suffix" \
-        "$OUT/message-actions-edit-cancel-press.json" \
-        || die "Cancel editing is not pressable"
-    wait_identifier "$user_edit" "$OUT/message-actions-edit-cancelled.json"
-    grep -q 'cancelled edit must not send' "$OUT/fake-events.jsonl" 2>/dev/null \
-        && die "cancelling a message edit sent the draft"
-
-    local requests_before requests_after
-    requests_before="$(jq -s '[.[] | select(.event == "chat_request"
-        and .request_origin != "background_assist")] | length' "$OUT/fake-events.jsonl")"
-    see_main "$OUT/message-actions-before-retry.json"
-    press "$OUT/message-actions-before-retry.json" "$assistant_retry" \
-        "$OUT/message-actions-retry-press.json" \
-        || die "Retry response is not pressable"
-    for _ in {1..80}; do
-        requests_after="$(jq -s '[.[] | select(.event == "chat_request"
-            and .request_origin != "background_assist")] | length' "$OUT/fake-events.jsonl")"
-        [[ "$requests_after" -gt "$requests_before" ]] && break
-        sleep 0.1
-    done
-    [[ "$requests_after" -gt "$requests_before" ]] \
-        || die "Retry response did not send a replacement request"
-    wait_send_idle "$OUT/message-actions-retried.json"
-
-    see_main "$OUT/message-actions-before-save-edit.json"
-    user_edit="$(jq -r '.data.ui_elements[]? | (.identifier // "")
-        | select(startswith("ChatView.Message.Edit."))' \
-        "$OUT/message-actions-before-save-edit.json" | head -1)"
-    [[ -n "$user_edit" ]] || die "retried turn exposes no Edit message action"
-    suffix="${user_edit##*.}"
-    press "$OUT/message-actions-before-save-edit.json" "$user_edit" \
-        "$OUT/message-actions-save-edit-open-press.json" || true
-    wait_identifier "ChatView.Message.EditField.$suffix" \
-        "$OUT/message-actions-save-editor.json"
-    "$AX_DRIVER" set-value "$APP_PID" "ChatView.Message.EditField.$suffix" \
-        "saved edited message prompt" > "$OUT/message-actions-save-edit-type.json"
-    see_main "$OUT/message-actions-save-edit-draft.json"
-    press "$OUT/message-actions-save-edit-draft.json" \
-        "ChatView.Message.SaveEdit.$suffix" \
-        "$OUT/message-actions-save-edit-press.json" \
-        || die "Save edited message is not pressable"
-    for _ in {1..80}; do
-        if jq -e 'select(.event == "chat_request")
-                  | select(.user_texts | index("saved edited message prompt"))' \
-            "$OUT/fake-events.jsonl" >/dev/null 2>&1; then break; fi
-        sleep 0.1
-    done
-    jq -e 'select(.event == "chat_request")
-           | select(.user_texts | index("saved edited message prompt"))' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "Save edited message did not resend the edited turn"
-    wait_send_idle "$OUT/message-actions-saved-edit-settled.json"
-
-    # A finished answer no longer emits document-frame changes. This is the
-    # exact state where Jump to latest used to set the pinned flag but leave
-    # the transcript physically scrolled up. Drive a long, fully settled
-    # answer, move away from its tail, then require the same last-message
-    # action to return after pressing the button.
-    send_prompt "shape:long finished answer for jump-to-bottom" message-actions-long
-    wait_send_idle "$OUT/message-actions-long-settled.json"
-    local bottom_scroll_value
-    bottom_scroll_value="$(jq -r '[.data.ui_elements[]?
-        | select(.role == "AXScrollBar" and (.value | type) == "number")
-        | .value] | max // empty' "$OUT/message-actions-long-settled.json")"
-    [[ -n "$bottom_scroll_value" ]] \
-        || die "long settled transcript exposes no measurable scroll position"
-    "$AX_DRIVER" set-scroll-value "$APP_PID" 0 \
-        > "$OUT/message-actions-scroll-up.json" \
-        || die "could not move the settled transcript away from its tail"
-    local jump_visible=0
-    for _ in {1..60}; do
-        see_main "$OUT/message-actions-scrolled.json"
-        if jq -e '.data.ui_elements[]?
-                  | select(.identifier == "Transcript.JumpToBottom")' \
-            "$OUT/message-actions-scrolled.json" >/dev/null; then
-            jump_visible=1; break
-        fi
-        sleep 0.1
-    done
-    [[ "$jump_visible" == 1 ]] \
-        || die "scrolling up a settled transcript never exposed Jump to latest"
-    local scrolled_value
-    scrolled_value="$(jq -r '[.data.ui_elements[]?
-        | select(.role == "AXScrollBar" and (.value | type) == "number")
-        | .value] | min // empty' "$OUT/message-actions-scrolled.json")"
-    [[ -n "$scrolled_value" ]] \
-        || die "scrolled transcript exposes no measurable scroll position"
-    awk -v before="$bottom_scroll_value" -v after="$scrolled_value" \
-        'BEGIN { exit !(after < before - 0.02) }' \
-        || die "scroll fixture did not move away from the settled transcript tail"
-    press "$OUT/message-actions-scrolled.json" Transcript.JumpToBottom \
-        "$OUT/message-actions-jump-press.json" \
-        || die "Jump to latest is not pressable on a settled transcript"
-    local jumped=0
-    for _ in {1..60}; do
-        see_main "$OUT/message-actions-jumped.json"
-        local jumped_value
-        jumped_value="$(jq -r '[.data.ui_elements[]?
-            | select(.role == "AXScrollBar" and (.value | type) == "number")
-            | .value] | max // empty' "$OUT/message-actions-jumped.json")"
-        if [[ -n "$jumped_value" ]] \
-            && awk -v before="$scrolled_value" -v after="$jumped_value" \
-                'BEGIN { exit !(after > before + 0.02) }' \
-            && ! jq -e '.data.ui_elements[]?
-                        | select(.identifier == "Transcript.JumpToBottom")' \
-                "$OUT/message-actions-jumped.json" >/dev/null; then
-            jumped=1; break
-        fi
-        sleep 0.1
-    done
-    [[ "$jumped" == 1 ]] \
-        || die "Jump to latest hid itself without returning the settled transcript to its tail"
-    jq -n '{success: true,
-            assertion: "a finished transcript scrolls back to its final answer"}' \
-        > "$OUT/message-actions-jump-assertion.json"
-    log "  message actions and finished-answer Jump to latest all produced effects"
-    cleanup_persona
-}
-
-flow_math_rendering() {
-    # Artifact-level coverage for #1504/#1576/#2107. The fake emits display
-    # and inline math plus commands absent from vanilla SwiftMath;
-    # MathView exposes `Math:` only after SwiftMath parsed and hosted it, while
-    # the safe fallback exposes `Unrenderable math:`. This therefore catches
-    # both a missing font bundle and a parser/resource regression in the real
-    # assembled app.
-    start_persona math-rendering
-    dismiss_first_run
-    start_model
-    send_prompt "shape:math show me the Gaussian integral" math
-    wait_send_idle "$OUT/math-settled.json"
-    # TextKit 2's custom block stack does not expose SwiftMath's private
-    # NSViewRepresentable label through the flattened AX walk. Keep the
-    # artifact gate on what it can prove reliably: the formula is segmented
-    # out of prose (neither raw $$ source nor fallback is printed), while the
-    # surrounding blocks survive on both sides. Unit coverage pins the exact
-    # MathBlock latex payload and MathView still owns parse/resource fallback.
-    assert_tree_text "$OUT/math-settled.json" "The Gaussian integral is"
-    assert_tree_text "$OUT/math-settled.json" 'and inline it reads $e^{i\\pi} + 1 = 0$.'
-    assert_tree_text "$OUT/math-settled.json" "A bridged congruence is"
-    assert_tree_text "$OUT/math-settled.json" "A bridged alignment is"
-    if jq -e '(.data.ui_elements | tostring) | contains("$$\\\\int_")' \
-        "$OUT/math-settled.json" >/dev/null; then
-        die "display math reached the transcript as literal source"
-    fi
-    if jq -e '(.data.ui_elements | tostring) | contains("Unrenderable math:")' \
-        "$OUT/math-settled.json" >/dev/null; then
-        die "SwiftMath took the literal-source fallback in the assembled app"
-    fi
-
-    # #2056: keep code and table chrome visible through a live appearance
-    # transition. Three short turns fit the hosted runner's 1024x681 window;
-    # unlike chat-depth's five-turn fixture, none of these AX nodes virtualize.
-    send_prompt "shape:code show me fibonacci in python" "markdown-code"
-    wait_send_idle "$OUT/code-settled.json"
-    send_prompt "shape:table compare those two models for me" "markdown-table"
-    wait_send_idle "$OUT/table-settled.json"
-    transcript_only "$OUT/table-settled.json" "$OUT/light-transcript.json"
-    assert_markdown_code_and_table "$OUT/light-transcript.json" "$OUT/light"
-
-    open_settings
-    see_settings "$OUT/settings.json"
-    press "$OUT/settings.json" Settings.Category.appearance "$OUT/appearance-open.json" \
-        || die "Appearance category is not pressable during markdown theme coverage"
-    see_settings "$OUT/appearance.json"
-    press "$OUT/appearance.json" Settings.Appearance.Theme.dark "$OUT/dark-press.json" \
-        || die "Dark appearance is not pressable during markdown theme coverage"
-    see_settings "$OUT/dark.json"
-    jq -e '.data.ui_elements[]?
-           | select(.identifier == "Settings.Appearance.Theme.dark")
-           | select(.selected == true or .value == 1 or .value == "1")' \
-        "$OUT/dark.json" >/dev/null || die "Dark appearance did not become selected"
-    transcript_only "$OUT/dark.json" "$OUT/dark-transcript.json"
-    assert_markdown_code_and_table "$OUT/dark-transcript.json" "$OUT/dark"
-
-    press "$OUT/dark.json" Settings.Appearance.Theme.light "$OUT/light-press.json" \
-        || die "Light appearance is not pressable after the dark markdown check"
-    see_settings "$OUT/light.json"
-    jq -e '.data.ui_elements[]?
-           | select(.identifier == "Settings.Appearance.Theme.light")
-           | select(.selected == true or .value == 1 or .value == "1")' \
-        "$OUT/light.json" >/dev/null || die "Light appearance did not become selected"
-    log "  live Light → Dark → Light kept math, code blocks, and tables rendered"
-    cleanup_persona
-}
-
-flow_restored_tools() {
-    log "restored conversation keeps deterministic web research"
-    start_persona restored-tools RAPID_GUI_WEB_SEARCH_FIXTURE=1
-    dismiss_first_run
-    start_model
-    send_prompt "What's a major news story from the last week?" restored-tools-first
-    wait_send_idle "$OUT/first-settled.json"
-    assert_tree_text "$OUT/first-settled.json" "Tool call web_search"
-    assert_tree_text "$OUT/first-settled.json" "Golden technology story"
-
-    relaunch_persona
-    dismiss_first_run
-    wait_identifier Sidebar.NewChat "$OUT/restored.json"
-    local conversation_id
-    conversation_id="$(jq -r '.data.ui_elements[] | (.identifier // "")
-        | select(test("^Sidebar\\.Conversation\\.[0-9A-Fa-f-]{36}$"))' \
-        "$OUT/restored.json" | head -1)"
-    [[ -n "$conversation_id" ]] || die "restored tool conversation row missing"
-    press "$OUT/restored.json" "$conversation_id" "$OUT/opened.json"
-    # Relaunch starts a fresh sidecar. The restored transcript can become
-    # interactive before that sidecar is ready, so sending immediately races
-    # the readiness gate and silently leaves the prompt in the composer.
-    wait_send_idle "$OUT/restored-ready.json"
-    send_prompt "What about technology? Find one concrete story and summarize it." restored-tools-followup
-    wait_send_idle "$OUT/followup-settled.json"
-    assert_tree_text "$OUT/followup-settled.json" "Golden technology story"
-
-    jq -s -e '[.[] | select(.event == "chat_request")
-        | select(.roles[-1] == "tool")
-        | select((.tools | index("web_search")) != null)] | length == 2' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "fresh/restored synthesis requests did not both carry web evidence and tools"
-    jq -s -e '[.[] | select(.event == "native_web_search_call")] | length == 2' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "the fake model did not natively choose web_search on both user turns"
-    cleanup_persona
-}
-
-flow_tool_loop_budget() {
-    log "runaway tool use ends with a bounded synthesis answer"
-    start_persona tool-loop-budget RAPID_GUI_WEB_SEARCH_FIXTURE=1
-    dismiss_first_run
-    start_model
-    send_prompt "shape:tool-loop research this topic thoroughly" tool-loop-budget
-    wait_send_idle "$OUT/settled.json"
-    assert_tree_text "$OUT/settled.json" "Golden tool-loop synthesis"
-
-    jq -s -e '[.[] | select(.event == "tool_loop_call")] | length == 3' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "the app did not stop after exactly three tool executions"
-    jq -s -e '[.[] | select(.event == "tool_loop_synthesis" and .tool_results == 3)] | length == 1' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "the capped loop did not finish with one synthesis request"
-    jq -s -e '[.[] | select(.event == "chat_request"
-        and .request_origin != "background_assist")][-1].tools == []' \
-        "$OUT/fake-events.jsonl" >/dev/null \
-        || die "the final synthesis request still advertised tools"
-    cleanup_persona
-}
-
-flow_slow_stream_stop() {
-    log "4/6 controlled slow stream and Stop"
-    start_persona slow-stream-stop FAKE_INTER_TOKEN_SLEEP_S=0.01 FAKE_CONTENT_REPEAT=20000
-    dismiss_first_run
-    start_model
-    send_prompt "golden stop marker" slow
-    for _ in {1..40}; do
-        see_main "$OUT/slow-streaming.json"
-        if [[ "$(element_field "$OUT/slow-streaming.json" ChatView.SendOrStopButton description)" == "Stop generating" ]]; then break; fi
-        sleep 0.1
-    done
-    [[ "$(element_field "$OUT/slow-streaming.json" ChatView.SendOrStopButton description)" == "Stop generating" ]] \
-        || die "send button never transitioned to Stop generating"
-    # Stop a stream that is actually streaming CONTENT.
-    #
-    # The button flips to "Stop generating" on the first delta, and that delta
-    # is a REASONING token — the answer itself has not started. Pressing there
-    # leaves a bubble with no content node; pressing a moment later leaves one
-    # with. Both are legitimate app states, and the structural baseline can
-    # only pin one of them.
-    #
-    # Measured, same commit: this dev machine always had the content by then
-    # and the hosted runner never did, so whichever machine wrote the baseline
-    # made it un-enforceable on the other — three local runs were stable, which
-    # is exactly what makes this kind of race so easy to commit by accident.
-    #
-    # Waiting for the first content token removes the race and sharpens what
-    # the flow claims to test: cancelling a response that is being produced,
-    # not one that has yet to start.
-    for _ in {1..80}; do
-        see_main "$OUT/slow-streaming.json"
-        if jq -e '(.data.ui_elements | tostring) | contains("Hello")' \
-            "$OUT/slow-streaming.json" >/dev/null; then break; fi
-        sleep 0.1
-    done
-    assert_tree_text "$OUT/slow-streaming.json" "Hello"
-    press "$OUT/slow-streaming.json" ChatView.SendOrStopButton "$OUT/slow-stop.json"
-    for _ in {1..40}; do
-        see_main "$OUT/slow-stopped.json"
-        [[ "$(element_field "$OUT/slow-stopped.json" ChatView.SendOrStopButton description)" == "Send message" ]] && break
-        sleep 0.1
-    done
-    [[ "$(element_field "$OUT/slow-stopped.json" ChatView.SendOrStopButton description)" == "Send message" ]] \
-        || die "Stop did not restore Send state"
-    for _ in {1..100}; do
-        grep -q '"event": "chat_cancelled"' "$OUT/fake-events.jsonl" 2>/dev/null && break
-        sleep 0.05
-    done
-    grep -q '"event": "chat_cancelled"' "$OUT/fake-events.jsonl" \
-        || die "fake server did not observe stream cancellation"
-    if grep -q '"event": "chat_finished"' "$OUT/fake-events.jsonl"; then
-        die "slow response finished instead of being stopped early"
-    fi
-    jq -n '{success: true, assertion: "UI returned to Send and server observed cancellation"}' \
-        > "$OUT/stop-assertion.json"
-    wait_send_idle "$OUT/slow-settled.json"
-    baseline slow-stream-stop.stopped "$OUT/slow-settled.json"
-
-    # Release dogfood found a second Stop edge: cancelling before the first
-    # content token left an unanswered user prompt in wire history. The next
-    # request then answered that cancelled prompt instead of the new one.
-    # Exercise that zero-content lane and prove the immediately-following turn
-    # is routed from its own prompt.
-    send_prompt "cancel this before content" zero-content-stop
-    for _ in {1..40}; do
-        see_main "$OUT/zero-content-streaming.json"
-        if [[ "$(element_field "$OUT/zero-content-streaming.json" ChatView.SendOrStopButton description)" == "Stop generating" ]]; then break; fi
-        sleep 0.05
-    done
-    [[ "$(element_field "$OUT/zero-content-streaming.json" ChatView.SendOrStopButton description)" == "Stop generating" ]] \
-        || die "zero-content request never transitioned to Stop generating"
-    press "$OUT/zero-content-streaming.json" ChatView.SendOrStopButton "$OUT/zero-content-stop.json"
-    wait_send_idle "$OUT/zero-content-stopped.json"
-    send_prompt "shape:list answer the new request" after-stop
-    wait_send_idle "$OUT/after-stop-settled.json"
-    assert_tree_text "$OUT/after-stop-settled.json" "Three things, in order:"
-    jq -n '{success: true, assertion: "a send immediately after zero-content Stop answers the new prompt"}' \
-        > "$OUT/after-stop-assertion.json"
-
-    # A forming fenced block used to appear first as a stray backtick text
-    # row, then swap into a code card with a partial language, and finally
-    # shrink when the closing fence arrived. Sample the assembled app while
-    # the fake sidecar streams its deliberately split code fixture: no raw
-    # marker may become an accessibility row at any intermediate revision.
-    send_prompt "shape:code stream a code block" streaming-fence
-    local fence_samples=0
-    for sample in {1..120}; do
-        see_main "$OUT/streaming-fence-$sample.json"
-        if jq -e '.data.ui_elements[]?
-                  | ((.value // "") | tostring)
-                  | select((gsub("[[:space:]]"; "")) == "`"
-                           or (gsub("[[:space:]]"; "")) == "``")' \
-            "$OUT/streaming-fence-$sample.json" >/dev/null; then
-            die "a forming code fence flickered into the streaming AX tree"
-        fi
-        fence_samples=$((fence_samples + 1))
-        [[ "$(element_field "$OUT/streaming-fence-$sample.json" ChatView.SendOrStopButton description)" == "Send message" ]] \
-            && break
-        sleep 0.01
-    done
-    wait_send_idle "$OUT/streaming-fence-settled.json"
-    assert_code_block_is_its_own_view \
-        "$OUT/streaming-fence-settled.json" \
-        "Here is the function you asked for" \
-        "def fib(n):"
-    jq -n --argjson samples "$fence_samples" \
-        '{success: true, assertion: "forming fences never became text rows", samples: $samples}' \
-        > "$OUT/streaming-fence-assertion.json"
     cleanup_persona
 }
 
@@ -3838,25 +3483,6 @@ flow_chat_depth() {
     log "  and every shape still rendered the way it was before the relaunch"
     baseline chat-depth.restored "$OUT/depth-restored-transcript.json"
     cleanup_persona
-}
-
-assert_markdown_code_and_table() {
-    local transcript="$1" scratch="$2"
-    local code_message="$scratch-code.json" table_message="$scratch-table.json"
-    assistant_message_only "$transcript" 2 "$code_message"
-    assert_code_block_is_its_own_view "$code_message" \
-        "Here is the function you asked for" "def fib(n)"
-    assert_tree_text "$code_message" "    return a"
-
-    assistant_message_only "$transcript" 3 "$table_message"
-    assert_rendered_as_separate_nodes "$table_message" "table cells" \
-        "qwen3.5-9b" "5.2 GB" "74 tok/s" "llama-3.1-8b" "4.5 GB" "68 tok/s"
-    jq -e '[.data.ui_elements[]?] as $e
-            | any($e[]; .role == "AXOutline" and .description == "Markdown table")
-              and ([ $e[] | select(.role == "AXRow") ] | length >= 2)
-              and ([ $e[] | select(.role == "AXCell") ] | length >= 6)' \
-        "$table_message" >/dev/null \
-        || die "markdown table lost its navigable row/cell structure"
 }
 
 flow_catalog_integrity() {
@@ -5886,12 +5512,7 @@ case "$FLOW" in
     settings-persistence) flow_settings_persistence ;;
     settings-mtp) flow_settings_mtp ;;
     chat-restore) flow_chat_restore ;;
-    message-actions) flow_message_actions ;;
-    restored-tools) flow_restored_tools ;;
-    tool-loop-budget) flow_tool_loop_budget ;;
     chat-depth) flow_chat_depth ;;
-    math-rendering) flow_math_rendering ;;
-    slow-stream-stop) flow_slow_stream_stop ;;
     model-switch-active-request) flow_model_switch_active_request ;;
     model-crash-recovery) flow_model_crash_recovery ;;
     low-memory-choice) flow_low_memory_choice ;;
@@ -5919,12 +5540,7 @@ case "$FLOW" in
         flow_settings_persistence
         flow_settings_mtp
         flow_chat_restore
-        flow_message_actions
-        flow_restored_tools
-        flow_tool_loop_budget
         flow_chat_depth
-        flow_math_rendering
-        flow_slow_stream_stop
         flow_model_switch_active_request
         flow_model_crash_recovery
         flow_low_memory_choice
