@@ -672,7 +672,7 @@ for distribution, module_name in distributions.items():
         version = distribution_version(distribution)
     except importlib.metadata.PackageNotFoundError:
         version = None
-    except Exception:
+    except (Exception, SystemExit):
         version = None
     spec = importlib.util.find_spec(module_name)
     discoverable = spec is not None
@@ -1496,7 +1496,7 @@ def _pil_importable(
         # Force the native ``_imaging`` backend to actually initialise — a
         # broken/ABI-mismatched C ext otherwise slips through as healthy.
         Image.new("RGB", (1, 1))
-    except Exception:
+    except (Exception, SystemExit):
         # ImportError (absent/shadowed), OSError (broken native ext), or any
         # other load-time failure — all mean the real vision import can't run.
         return False
