@@ -11,7 +11,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm_mlx.output_collector import RequestOutputCollector
-from vllm_mlx.runtime.model_performance import ModelPerformanceLedger
+from vllm_mlx.runtime.model_performance import (
+    SEEN_REQUEST_ID_LIMIT,
+    ModelPerformanceLedger,
+)
 
 if TYPE_CHECKING:
     from vllm_mlx.request import Request
@@ -163,6 +166,17 @@ def test_ledger_best_effort_helpers_ignore_unusable_timings_and_errors(
 
     snapshot = ledger.snapshot()
     assert snapshot.total_requests == 0
+
+
+def test_ledger_dedupe_cache_is_bounded():
+    ledger = ModelPerformanceLedger("model-b")
+    for request_id in range(SEEN_REQUEST_ID_LIMIT):
+        assert ledger.record_failure(str(request_id))
+
+    assert ledger.record_failure("overflow") is True
+    assert len(ledger._seen_request_ids) == SEEN_REQUEST_ID_LIMIT
+    assert ledger.record_failure("0") is True
+    assert ledger.record_failure("overflow") is False
 
 
 def test_ledger_histograms_are_cumulative_and_memory_bounded():

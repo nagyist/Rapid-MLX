@@ -20,6 +20,7 @@ import logging
 import math
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -56,6 +57,10 @@ DECODE_TOKENS_PER_SECOND_BUCKETS = (
     500.0,
     math.inf,
 )
+
+# Keep duplicate-delivery dedupe bounded for 24/7 servers while retaining
+# enough recent IDs to absorb duplicate terminal/cancellation events.
+SEEN_REQUEST_ID_LIMIT = 65_536
 
 
 def _empty_bucket_counts(buckets: tuple[float, ...]) -> dict[str, int]:
@@ -118,7 +123,7 @@ class ModelPerformanceLedger:
     def __init__(self, model_name: str | None = None):
         self._model_name = model_name or ""
         self._lock = threading.Lock()
-        self._seen_request_ids: set[str] = set()
+        self._seen_request_ids: OrderedDict[str, None] = OrderedDict()
         self._requests_succeeded = 0
         self._requests_cancelled = 0
         self._requests_failed = 0
@@ -192,11 +197,14 @@ class ModelPerformanceLedger:
         """Record a completed request; return False when already accounted."""
         with self._lock:
             if request_id in self._seen_request_ids:
+                self._seen_request_ids.move_to_end(request_id)
                 return False
-            self._seen_request_ids.add(request_id)
+            prompt_tokens = max(0, int(prompt_tokens))
+            completion_tokens = max(0, int(completion_tokens))
+            self._remember_request_id(request_id)
             self._requests_succeeded += 1
-            self._prompt_tokens += max(0, int(prompt_tokens))
-            self._completion_tokens += max(0, int(completion_tokens))
+            self._prompt_tokens += prompt_tokens
+            self._completion_tokens += completion_tokens
             self._observe_timings(
                 ttft_seconds=ttft_seconds,
                 decode_tokens_per_second=decode_tokens_per_second,
@@ -215,11 +223,14 @@ class ModelPerformanceLedger:
         """Record an explicitly cancelled request exactly once."""
         with self._lock:
             if request_id in self._seen_request_ids:
+                self._seen_request_ids.move_to_end(request_id)
                 return False
-            self._seen_request_ids.add(request_id)
+            prompt_tokens = max(0, int(prompt_tokens))
+            completion_tokens = max(0, int(completion_tokens))
+            self._remember_request_id(request_id)
             self._requests_cancelled += 1
-            self._prompt_tokens += max(0, int(prompt_tokens))
-            self._completion_tokens += max(0, int(completion_tokens))
+            self._prompt_tokens += prompt_tokens
+            self._completion_tokens += completion_tokens
             self._observe_timings(
                 ttft_seconds=ttft_seconds,
                 decode_tokens_per_second=decode_tokens_per_second,
@@ -230,8 +241,9 @@ class ModelPerformanceLedger:
         """Record an engine/runtime failure exactly once."""
         with self._lock:
             if request_id in self._seen_request_ids:
+                self._seen_request_ids.move_to_end(request_id)
                 return False
-            self._seen_request_ids.add(request_id)
+            self._remember_request_id(request_id)
             self._requests_failed += 1
             return True
 
@@ -255,6 +267,12 @@ class ModelPerformanceLedger:
                 decode_tokens_per_second_max=self._decode_tokens_per_second_max,
                 last_decode_tokens_per_second=self._last_decode_tokens_per_second,
             )
+
+    def _remember_request_id(self, request_id: str) -> None:
+        """Store a terminal request ID under a bounded memory limit."""
+        self._seen_request_ids[request_id] = None
+        if len(self._seen_request_ids) > SEEN_REQUEST_ID_LIMIT:
+            self._seen_request_ids.popitem(last=False)
 
     def _observe_timings(
         self,
