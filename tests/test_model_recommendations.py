@@ -35,11 +35,28 @@ def test_atomic_policy_rejects_multiple_unrepresentable_limitations(
         recommendations, "load_product_recommendation_policy", lambda: policy
     )
     recommendations.load_recommendation_tiers.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="at most one limitation"):
+            recommendations.load_recommendation_tiers()
+    finally:
+        recommendations.load_recommendation_tiers.cache_clear()
 
-    with pytest.raises(ValueError, match="at most one limitation"):
-        recommendations.load_recommendation_tiers()
 
+def test_atomic_policy_requires_strictly_increasing_ram_floors(monkeypatch) -> None:
+    from vllm_mlx import recommendations
+    from vllm_mlx.catalog import load_product_recommendation_policy
+
+    policy = deepcopy(load_product_recommendation_policy())
+    policy["tiers"][1]["minimum_memory_mib"] = policy["tiers"][0]["minimum_memory_mib"]
+    monkeypatch.setattr(
+        recommendations, "load_product_recommendation_policy", lambda: policy
+    )
     recommendations.load_recommendation_tiers.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="strictly increasing"):
+            recommendations.load_recommendation_tiers()
+    finally:
+        recommendations.load_recommendation_tiers.cache_clear()
 
 
 def test_every_tier_has_exactly_smart_and_fast() -> None:

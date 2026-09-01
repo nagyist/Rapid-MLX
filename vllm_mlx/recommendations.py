@@ -90,8 +90,11 @@ def load_recommendation_tiers() -> tuple[RecommendationTier, ...]:
         if floor_mib % 1024:
             raise ValueError("Desktop RAM tier floors must be whole GiB values")
         tiers.append(RecommendationTier(floor_mib // 1024, picks))
-    if not tiers or list(tiers) != sorted(tiers, key=lambda tier: tier.floor_gb):
-        raise ValueError("recommendation tiers must be sorted by floor_gb")
+    if not tiers or any(
+        current.floor_gb <= previous.floor_gb
+        for previous, current in zip(tiers, tiers[1:])
+    ):
+        raise ValueError("recommendation tiers must have strictly increasing floors")
     return tuple(tiers)
 
 
