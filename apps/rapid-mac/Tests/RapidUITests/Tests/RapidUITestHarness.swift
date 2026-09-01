@@ -57,13 +57,34 @@ struct MemoryConfirmationRetryPolicy {
 }
 
 enum FileDropRetryPolicy {
+    static let minimumRetryBudget: TimeInterval = 3
+
     static func shouldRetry(
         completedDrop: Bool,
         attempt: Int,
         maximumAttempts: Int,
         remainingTime: TimeInterval
     ) -> Bool {
-        !completedDrop && attempt < maximumAttempts && remainingTime > 0
+        !completedDrop
+            && attempt < maximumAttempts
+            && remainingTime >= minimumRetryBudget
+    }
+}
+
+enum DropEventFile {
+    enum ClearError: Error {
+        case remainedAfterRemoval
+    }
+
+    static func clear(at url: URL, fileManager: FileManager = .default) throws {
+        do {
+            try fileManager.removeItem(at: url)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            // An absent marker is the required pre-drag state.
+        }
+        guard !fileManager.fileExists(atPath: url.path) else {
+            throw ClearError.remainedAfterRemoval
+        }
     }
 }
 
@@ -338,7 +359,12 @@ final class RapidUITestHarness {
         }
         let maximumAttempts = 2
         for attempt in 1...maximumAttempts {
-            try? FileManager.default.removeItem(at: dropEventFile)
+            do {
+                try DropEventFile.clear(at: dropEventFile)
+            } catch {
+                XCTFail("could not clear UI-test drop marker before gesture: \(error)")
+                return attempt
+            }
             source.click(forDuration: 1, thenDragTo: dropTarget)
 
             // The drop-completion marker and the product render arrive

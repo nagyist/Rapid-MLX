@@ -19,7 +19,7 @@ final class ChatAttachmentJourneyTests: XCTestCase {
                 completedDrop: false,
                 attempt: 1,
                 maximumAttempts: 2,
-                remainingTime: 1
+                remainingTime: FileDropRetryPolicy.minimumRetryBudget
             )
         )
         XCTAssertFalse(
@@ -27,7 +27,7 @@ final class ChatAttachmentJourneyTests: XCTestCase {
                 completedDrop: false,
                 attempt: 2,
                 maximumAttempts: 2,
-                remainingTime: 1
+                remainingTime: FileDropRetryPolicy.minimumRetryBudget
             )
         )
         XCTAssertFalse(
@@ -35,7 +35,7 @@ final class ChatAttachmentJourneyTests: XCTestCase {
                 completedDrop: true,
                 attempt: 1,
                 maximumAttempts: 2,
-                remainingTime: 1
+                remainingTime: FileDropRetryPolicy.minimumRetryBudget
             )
         )
         XCTAssertFalse(
@@ -43,9 +43,22 @@ final class ChatAttachmentJourneyTests: XCTestCase {
                 completedDrop: false,
                 attempt: 1,
                 maximumAttempts: 2,
-                remainingTime: 0
+                remainingTime: FileDropRetryPolicy.minimumRetryBudget - 0.001
             )
         )
+    }
+
+    func testDropEventFileClearIsIdempotent() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-drop-marker-\(UUID().uuidString)")
+        let marker = directory.appendingPathComponent("completed.txt")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try "performed".write(to: marker, atomically: true, encoding: .utf8)
+
+        try DropEventFile.clear(at: marker)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        try DropEventFile.clear(at: marker)
     }
 
     func testPickerAttachmentsStayWithTheirConversationAndWirePayload() throws {
