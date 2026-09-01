@@ -63,13 +63,18 @@ struct ChatRestoredToolsGoldenTests {
 
     /// The bash flow's closing event check, on the recorded bodies: the
     /// synthesis request for a researched turn must still carry the web
-    /// evidence (its trailing message is the tool result) AND the tools.
+    /// evidence — its trailing message is a tool result holding the fixture
+    /// story and URL, not just any tool role — AND the tools.
     static func synthesisRequestsCarryingWebEvidence(in fake: GoldenChatFake) -> Int {
         fake.recordedBodies().filter { body in
             guard
                 let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                 let messages = object["messages"] as? [[String: Any]],
-                (messages.last?["role"] as? String) == "tool"
+                let trailing = messages.last,
+                (trailing["role"] as? String) == "tool",
+                let evidence = trailing["content"] as? String,
+                evidence.contains("Golden technology story"),
+                evidence.contains("https://example.com/golden-tech")
             else { return false }
             return ((object["tools"] as? [[String: Any]]) ?? []).contains {
                 (($0["function"] as? [String: Any])?["name"] as? String) == "web_search"

@@ -74,8 +74,10 @@ struct ChatMathRenderingGoldenTests {
         // developer's persisted appearance choice is never touched.
         let previousAppearance = NSApp.appearance
         defer { NSApp.appearance = previousAppearance }
+        let defaultsSuite = "golden-appearance-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: defaultsSuite) }
         let appearance = AppearanceConfig(
-            defaults: UserDefaults(suiteName: "golden-appearance-\(UUID().uuidString)")!
+            defaults: UserDefaults(suiteName: defaultsSuite)!
         )
 
         appearance.mode = .dark
