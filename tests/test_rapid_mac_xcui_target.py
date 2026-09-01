@@ -126,6 +126,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert '"RAPID_XCUI_DROP_EVENT_FILE": dropEventFile.path' in harness
     assert 'recordUITestFileDrop("entered")' not in chat_view
     assert 'recordUITestFileDrop("performed")' in chat_view
+    assert "try? phase.write" not in chat_view
+    assert 'fatalError("could not record completed UI-test file drop' in chat_view
     assert (
         '"RAPID_XCUI_DROP_FIRST_GESTURE": simulateMissedFirstGesture ? "1" : "0"'
         in harness

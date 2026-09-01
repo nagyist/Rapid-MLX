@@ -2512,7 +2512,14 @@ final class AutosizingTextView: NSTextView {
         guard let path = ProcessInfo.processInfo.environment["RAPID_XCUI_DROP_EVENT_FILE"] else {
             return
         }
-        try? phase.write(toFile: path, atomically: true, encoding: .utf8)
+        do {
+            try phase.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            // This environment variable exists only in the native UI-test
+            // process. Losing its completion signal must fail closed: treating
+            // a consumed drop as a transport miss could attach the file twice.
+            fatalError("could not record completed UI-test file drop: \(error)")
+        }
     }
 
     /// Returns true when a file drop was consumed, regardless of whether the
