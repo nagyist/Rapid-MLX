@@ -1809,6 +1809,14 @@ def test_mtp_running_limit_uses_only_attested_continuous_capacity():
     runtime_capabilities.atomic_cache_commit = False
     assert scheduler._max_running_sequences() == 1
 
+    runtime_capabilities.atomic_cache_commit = True
+    scheduler.batch_generator._continuous_mtp_router.config = None
+    assert scheduler._max_running_sequences() == 1
+
+    scheduler.batch_generator._continuous_mtp_router.config = router_config
+    scheduler.batch_generator._continuous_mtp_runtime.capabilities = None
+    assert scheduler._max_running_sequences() == 1
+
 
 def test_mtp_fixed_membership_collects_initial_wave_then_freezes_admission():
     from types import SimpleNamespace

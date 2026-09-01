@@ -929,9 +929,9 @@ def _install_continuous_mtp_router(
             sequence[:8]
         )
         request_id = None if uid_to_request_id is None else uid_to_request_id.get(uid)
-        request = (
-            None if requests is None or request_id is None else requests.get(request_id)
-        )
+        if request_id is None:
+            return None
+        request = None if requests is None else requests.get(request_id)
         if request is None:
             return None
         prompt = tuple(int(token) for segment in segments for token in segment)
@@ -1025,8 +1025,8 @@ def _install_continuous_mtp_router(
         room = max(0, int(router.config.max_lanes) - occupied)
         if room == 0 or _free_bytes() <= int(router.config.hard_reserve_bytes):
             return
-        joining_specs = []
-        joining_stops = {}
+        joining_specs: list[SelfMTPLaneSpec] = []
+        joining_stops: dict[int, frozenset[int]] = {}
         for sequence, metadata in _queued_candidates():
             if len(joining_specs) >= room:
                 break
@@ -7337,6 +7337,8 @@ class Scheduler:
             runtime = getattr(batch_generator, "_continuous_mtp_runtime", None)
             router_config = getattr(router, "config", None)
             runtime_capabilities = getattr(runtime, "capabilities", None)
+            if router_config is None or runtime_capabilities is None:
+                return 1
             fixed_core = all(
                 getattr(runtime_capabilities, name, False) is True
                 for name in (

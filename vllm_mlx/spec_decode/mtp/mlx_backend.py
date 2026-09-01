@@ -524,7 +524,7 @@ class RapidMLXSelfMTPBackend:
                 "target forward",
             )
             outputs = []
-            bonuses = []
+            terminal_bonuses = []
             hidden_rows = []
             for row, lane in enumerate(lanes):
                 token, logprobs = self._distribution(
@@ -532,7 +532,7 @@ class RapidMLXSelfMTPBackend:
                     self._prefix(lane, [lane.cur]),
                     target_logits[row, 0],
                 )
-                bonuses.append(token)
+                terminal_bonuses.append(token)
                 outputs.append((MTPToken(token, logprobs, False),))
                 hidden_rows.append(target_hidden[row : row + 1, :1])
             return CycleComputation(
@@ -548,7 +548,7 @@ class RapidMLXSelfMTPBackend:
                     old_seed_hidden=tuple(lane.seed_hidden for lane in lanes),
                     drafts=tuple(() for _ in lanes),
                     verify_hidden=tuple(hidden_rows),
-                    bonuses=tuple(bonuses),
+                    bonuses=tuple(terminal_bonuses),
                 ),
             )
 
