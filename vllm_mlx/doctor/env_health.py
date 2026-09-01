@@ -347,17 +347,18 @@ def _module_available(
     real_import: bool = False,
 ) -> bool:
     """Return whether *module* is discoverable, without importing it."""
-    if runtime is not None and runtime != Path(sys.executable).resolve():
+    if runtime is not None and runtime != Path(sys.executable).absolute():
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
         )
         if not probe:
             return False
-        package = _probe_package_by_module(probe, module)
-        if package is not None:
-            return bool(package.get("importable"))
-        return False
+        return _runtime_module_importable(
+            runtime,
+            module,
+            _bundled_sidecar_root(runtime),
+        )
     try:
         if real_import:
             if not _module_origin_is_trusted(module):
@@ -504,7 +505,7 @@ def _runtime_python_path() -> Path:
             if entry.name == "rapid-mlx":
                 if not _is_installed_rapid_mlx_entrypoint(entry):
                     return None
-                candidate = Path(process.exe()).resolve()
+                candidate = Path(process.exe()).absolute()
             elif (
                 len(command) >= 3
                 and command[1] == "-m"
@@ -515,7 +516,7 @@ def _runtime_python_path() -> Path:
                 and entry.parent.name == "vllm_mlx"
                 and _is_installed_rapid_mlx_module(entry)
             ):
-                candidate = Path(process.exe()).resolve()
+                candidate = Path(process.exe()).absolute()
             else:
                 return None
             if (
@@ -574,9 +575,9 @@ def _runtime_python_path() -> Path:
     if override:
         candidate = Path(override).expanduser()
         if _is_diagnostic_python_override(candidate):
-            return candidate.resolve()
+            return candidate.absolute()
 
-    return Path(sys.executable).resolve()
+    return Path(sys.executable).absolute()
 
 
 _PROBE_SCRIPT = """\
@@ -589,12 +590,14 @@ from pathlib import Path
 
 probe_paths = json.loads(sys.argv[2])
 trusted_roots = [root for root in probe_paths["trusted"] if root]
+trusted_metadata_roots = list(trusted_roots)
 for site_root in trusted_roots:
     sys.path.insert(0, site_root)
+trusted_metadata_roots.extend(sys.path)
 module_trusted_roots = [*trusted_roots, *sys.path]
 for site_root in reversed(probe_paths["context"]):
     sys.path.insert(0, site_root)
-metadata_roots = list(sys.path)
+context_metadata_roots = [root for root in probe_paths["context"] if root]
 trusted_roots = [
     str(Path(root).resolve()) for root in module_trusted_roots
 ]
@@ -614,16 +617,16 @@ def _module_path_is_trusted(spec):
 distributions = json.loads(sys.argv[1])
 
 def distribution_version(name):
-    for distribution in importlib.metadata.distributions(path=metadata_roots):
-        dist_name = (distribution.metadata.get("Name") or "").lower()
-        if dist_name == name.lower():
-            return distribution.version
+    for metadata_roots in (trusted_metadata_roots, context_metadata_roots):
+        for distribution in importlib.metadata.distributions(path=metadata_roots):
+            dist_name = (distribution.metadata.get("Name") or "").lower()
+            if dist_name == name.lower():
+                return distribution.version
     return None
 
 packages = {}
 for distribution, module_name in distributions.items():
     version = None
-    importable = False
     discoverable = False
     spec = None
     try:
@@ -632,22 +635,11 @@ for distribution, module_name in distributions.items():
         version = None
     except Exception:
         version = None
-    try:
-        spec = importlib.util.find_spec(module_name)
-        discoverable = spec is not None
-        if discoverable and _module_path_is_trusted(spec):
-            if distribution == "pillow":
-                Image = importlib.import_module("PIL.Image")
-                Image.new("RGB", (1, 1))
-                importable = True
-            else:
-                importlib.import_module(module_name)
-                importable = True
-    except Exception:
-        importable = False
+    spec = importlib.util.find_spec(module_name)
+    discoverable = spec is not None
     trusted_origin = spec is not None and _module_path_is_trusted(spec)
     packages[distribution] = {
-        "importable": importable,
+        "importable": None,
         "discoverable": discoverable,
         "trusted_origin": trusted_origin,
         "module": module_name,
@@ -666,6 +658,52 @@ _RUNTIME_PACKAGES: dict[str, str] = dict(_DISTRIBUTION_MODULES)
 for _audio_dist, _audio_module in (*_AUDIO_IMPORTS, *_AUDIO_DESKTOP_IMPORTS):
     _RUNTIME_PACKAGES.setdefault(_audio_dist, _audio_module)
 _RUNTIME_PROBE_CACHE: dict[Path, dict[str, object] | None] = {}
+_RUNTIME_IMPORT_SCRIPT = """\
+import importlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+module_name = sys.argv[1]
+probe_paths = json.loads(sys.argv[2])
+exercise = module_name == "PIL.Image"
+trusted_roots = [root for root in probe_paths["trusted"] if root]
+trusted_roots = [str(Path(root).resolve()) for root in [*trusted_roots, *sys.path]]
+for root in reversed(trusted_roots):
+    sys.path.insert(0, root)
+
+def _path_is_trusted(path):
+    resolved = Path(path).resolve()
+    return any(
+        resolved == Path(root) or resolved.is_relative_to(root)
+        for root in trusted_roots
+    )
+
+def _module_path_is_trusted(spec):
+    locations = []
+    if spec.origin:
+        locations.append(str(Path(spec.origin).parent))
+    if spec.submodule_search_locations:
+        locations.extend(spec.submodule_search_locations)
+    return any(_path_is_trusted(location) for location in locations)
+
+spec = importlib.util.find_spec(module_name)
+if spec is None or not _module_path_is_trusted(spec):
+    print(json.dumps({"importable": False, "trusted_origin": False}))
+else:
+    if exercise:
+        import PIL.Image as Image
+
+        Image.new("RGB", (1, 1))
+    else:
+        importlib.import_module(module_name)
+    print(json.dumps({"importable": True, "trusted_origin": True}))
+"""
+_RUNTIME_IMPORT_CACHE: dict[
+    tuple[Path, str, str, bool],
+    bool,
+] = {}
 
 
 def _probe_package(
@@ -692,6 +730,57 @@ def _probe_package_by_module(
         if isinstance(package, dict) and package.get("module") == module:
             return cast("dict[str, object]", package)
     return None
+
+
+def _runtime_module_importable(
+    runtime: Path,
+    module: str,
+    sidecar_root: Path | None,
+    *,
+    exercise: bool = False,
+) -> bool:
+    """Import one trusted module in *runtime*, independently of other probes."""
+    cache_key = (
+        runtime,
+        module,
+        str(sidecar_root.resolve()) if sidecar_root else "",
+        exercise,
+    )
+    if cache_key in _RUNTIME_IMPORT_CACHE:
+        return _RUNTIME_IMPORT_CACHE[cache_key]
+    importable = False
+    try:
+        result = subprocess.run(  # noqa: S603 — runtime path is caller-validated
+            [
+                str(runtime),
+                "-I",
+                "-c",
+                _RUNTIME_IMPORT_SCRIPT,
+                "PIL.Image" if exercise else module,
+                json.dumps(
+                    {
+                        "trusted": [str(sidecar_root / "site-packages")]
+                        if sidecar_root
+                        else [],
+                    }
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "HOME": os.environ.get("HOME", str(Path.home())),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            },
+            cwd="/",
+            check=True,
+        )
+        result_json = json.loads(result.stdout)
+        importable = bool(result_json.get("importable"))
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        importable = False
+    _RUNTIME_IMPORT_CACHE[cache_key] = importable
+    return importable
 
 
 def _probe_runtime(
@@ -1132,7 +1221,7 @@ def section_python() -> Section:
     s = Section("Python")
 
     py_ver = ".".join(str(x) for x in sys.version_info[:3])
-    exe = Path(sys.executable).resolve()
+    exe = Path(sys.executable).absolute()
     # Defensive: pyproject pins ``requires-python = ">=3.10"`` so install-
     # time pip would already have refused — but doctor should still tell the
     # user clearly if they somehow got rapid-mlx onto an older interpreter
@@ -1223,8 +1312,8 @@ def _safe_version(
     dist: str,
     runtime: Path | None = None,
 ) -> str | None:
-    runtime = runtime or Path(sys.executable).resolve()
-    if runtime != Path(sys.executable).resolve():
+    runtime = runtime or Path(sys.executable).absolute()
+    if runtime != Path(sys.executable).absolute():
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
@@ -1251,11 +1340,11 @@ def _visible_without_metadata(
     package "not installed" is a false negative: the server launched by this
     interpreter can see it. We report the metadata defect separately instead.
     """
-    runtime = runtime or Path(sys.executable).resolve()
+    runtime = runtime or Path(sys.executable).absolute()
     module = _DISTRIBUTION_MODULES.get(dist)
     if module is None:
         return False
-    if runtime != Path(sys.executable).resolve():
+    if runtime != Path(sys.executable).absolute():
         return _module_visibility(dist, runtime)[0]
     return _module_available(module, real_import=True)
 
@@ -1270,8 +1359,8 @@ def _module_visibility(
     but doctor must not execute code from those paths merely to diagnose it.
     Such a module is reported as visible but unverified rather than missing.
     """
-    runtime = runtime or Path(sys.executable).resolve()
-    if runtime != Path(sys.executable).resolve():
+    runtime = runtime or Path(sys.executable).absolute()
+    if runtime != Path(sys.executable).absolute():
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
@@ -1279,11 +1368,19 @@ def _module_visibility(
         package = _probe_package(probe, dist) if probe else None
         if package is None:
             return False, False
-        importable = bool(package.get("importable"))
-        trusted_origin = bool(package.get("trusted_origin", importable))
-        if importable and trusted_origin:
+        importable = package.get("importable")
+        trusted_origin = bool(
+            package.get("trusted_origin", isinstance(importable, bool) and importable)
+        )
+        if trusted_origin and _runtime_module_importable(
+            runtime,
+            str(package.get("module", "")),
+            _bundled_sidecar_root(runtime),
+        ):
             return True, True
-        if bool(package.get("discoverable")):
+        if bool(
+            package.get("discoverable", isinstance(importable, bool) and importable)
+        ):
             return True, False
         return False, False
     importable = _module_available(_DISTRIBUTION_MODULES[dist], real_import=True)
@@ -1333,15 +1430,19 @@ def _pil_importable(
     does NOT pull torch the way a real ``import mlx_vlm`` would, so it stays
     well within doctor's ≤5 s budget. ANY failure (missing, shadowed, broken
     native ext) ⇒ not importable."""
-    if runtime is not None and runtime != Path(sys.executable).resolve():
+    if runtime is not None and runtime != Path(sys.executable).absolute():
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
         )
         if not probe:
             return False
-        pillow = _probe_package(probe, "pillow") if probe else None
-        return pillow is not None and bool(pillow.get("importable"))
+        return _runtime_module_importable(
+            runtime,
+            "PIL.Image",
+            _bundled_sidecar_root(runtime),
+            exercise=True,
+        )
 
     try:
         from PIL import Image
@@ -1401,10 +1502,10 @@ def section_required_packages() -> Section:
             runtime,
             sidecar_root,
         )
-        if runtime != Path(sys.executable).resolve()
+        if runtime != Path(sys.executable).absolute()
         else None
     )
-    if runtime != Path(sys.executable).resolve() and runtime_probe is None:
+    if runtime != Path(sys.executable).absolute() and runtime_probe is None:
         s.add(
             "Could not inspect the active server runtime",
             CheckStatus.FAIL,
@@ -1418,7 +1519,7 @@ def section_required_packages() -> Section:
     for dist, label in REQUIRED_PACKAGES:
         ver = (
             _safe_version(dist, runtime)
-            if runtime != Path(sys.executable).resolve()
+            if runtime != Path(sys.executable).absolute()
             else _safe_version(dist)
         )
         if ver and not _version_supported(dist, ver):
@@ -1450,7 +1551,7 @@ def section_required_packages() -> Section:
             repair = sidecar_hint or _runtime_pip_command("rapid-mlx", runtime=runtime)
             visible, import_verified = _module_visibility(
                 dist,
-                runtime if runtime != Path(sys.executable).resolve() else None,
+                runtime if runtime != Path(sys.executable).absolute() else None,
             )
             if not visible:
                 s.add(
@@ -1485,7 +1586,7 @@ def section_required_packages() -> Section:
         else:
             visible, import_verified = _module_visibility(
                 dist,
-                runtime if runtime != Path(sys.executable).resolve() else None,
+                runtime if runtime != Path(sys.executable).absolute() else None,
             )
             if not visible:
                 repair = sidecar_hint or _runtime_pip_command(
@@ -1620,10 +1721,10 @@ def section_optional_packages() -> Section:
             runtime,
             sidecar_root,
         )
-        if runtime != Path(sys.executable).resolve()
+        if runtime != Path(sys.executable).absolute()
         else None
     )
-    if runtime != Path(sys.executable).resolve() and runtime_probe is None:
+    if runtime != Path(sys.executable).absolute() and runtime_probe is None:
         s.add(
             "Could not inspect the active server runtime",
             CheckStatus.FAIL,
@@ -1645,7 +1746,7 @@ def section_optional_packages() -> Section:
         )
         ver = (
             _safe_version(dist, runtime)
-            if runtime != Path(sys.executable).resolve()
+            if runtime != Path(sys.executable).absolute()
             else _safe_version(dist)
         )
         if bundled and not ver and dist in _DESKTOP_EXCLUDED_DISTS:
@@ -1702,7 +1803,7 @@ def section_optional_packages() -> Section:
                     for distribution, module in audio_contract
                     if not _module_available(
                         module,
-                        runtime if runtime != Path(sys.executable).resolve() else None,
+                        runtime if runtime != Path(sys.executable).absolute() else None,
                     )
                 ]
                 if missing:
@@ -1725,7 +1826,7 @@ def section_optional_packages() -> Section:
             # the FastAPI lifespan. Report it honestly and name the real
             # gap so the user fixes the right thing.
             if dist == "mlx-vlm" and not _pil_importable(
-                runtime if runtime != Path(sys.executable).resolve() else None,
+                runtime if runtime != Path(sys.executable).absolute() else None,
             ):
                 s.add(
                     f"{label} {ver} present but Pillow (PIL) missing or "
@@ -1739,7 +1840,7 @@ def section_optional_packages() -> Section:
                 continue
             visible, import_verified = _module_visibility(
                 dist,
-                runtime if runtime != Path(sys.executable).resolve() else None,
+                runtime if runtime != Path(sys.executable).absolute() else None,
             )
             if not visible or not import_verified:
                 s.add(
@@ -1760,7 +1861,7 @@ def section_optional_packages() -> Section:
             )
         elif (
             _visible_without_metadata(dist, runtime)
-            if runtime != Path(sys.executable).resolve()
+            if runtime != Path(sys.executable).absolute()
             else _visible_without_metadata(dist)
         ):
             s.add(
@@ -1799,7 +1900,7 @@ def section_optional_packages() -> Section:
     )
     vlm_ver = (
         _safe_version("mlx-vlm", runtime)
-        if runtime != Path(sys.executable).resolve()
+        if runtime != Path(sys.executable).absolute()
         else _safe_version("mlx-vlm")
     )
     if vlm_ver and _version_at_least(vlm_ver, dflash_min):
@@ -1807,7 +1908,7 @@ def section_optional_packages() -> Section:
         # mlx-vlm whose Pillow dep is missing can't actually run the
         # dflash/vision runtime, so don't paint it green.
         if not _pil_importable(
-            runtime if runtime != Path(sys.executable).resolve() else None,
+            runtime if runtime != Path(sys.executable).absolute() else None,
         ):
             s.add(
                 "mlx-vlm 0.5.0+ (dflash extras) present but Pillow (PIL) "
@@ -1821,7 +1922,7 @@ def section_optional_packages() -> Section:
         else:
             _, vlm_verified = _module_visibility(
                 "mlx-vlm",
-                runtime if runtime != Path(sys.executable).resolve() else None,
+                runtime if runtime != Path(sys.executable).absolute() else None,
             )
             if not vlm_verified:
                 s.add(

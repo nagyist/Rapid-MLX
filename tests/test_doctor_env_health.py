@@ -40,8 +40,28 @@ from vllm_mlx.doctor import env_health as eh
 @pytest.fixture(autouse=True)
 def clean_runtime_probe_state(monkeypatch):
     monkeypatch.setitem(sys.modules, "psutil", None)
+    original_import_probe = eh._runtime_module_importable
+
+    def import_from_probe_when_available(
+        runtime, module, sidecar_root, *, exercise=False
+    ):
+        probe = eh._probe_runtime(runtime, sidecar_root)
+        package = eh._probe_package_by_module(probe, module) if probe else None
+        if package is not None and package.get("importable") is not None:
+            return bool(package["importable"])
+        return original_import_probe(
+            runtime,
+            module,
+            sidecar_root,
+            exercise=exercise,
+        )
+
+    monkeypatch.setattr(
+        eh, "_runtime_module_importable", import_from_probe_when_available
+    )
     yield
     eh._RUNTIME_PROBE_CACHE.clear()
+    eh._RUNTIME_IMPORT_CACHE.clear()
     eh._RUNTIME_CONTEXTS.clear()
 
 
@@ -209,7 +229,8 @@ def test_remote_probe_reads_sanitized_context_metadata_without_trusting_imports(
     assert package["version"] == "5.12.1"
     assert package["discoverable"] is True
     assert package["trusted_origin"] is False
-    assert package["importable"] is False
+    assert package["importable"] is None
+    assert not eh._runtime_module_importable(runtime, "probe_metadata_module", None)
 
 
 def test_remote_probe_preserves_context_path_order(tmp_path, monkeypatch):
@@ -410,7 +431,7 @@ def test_required_packages_all_present_marks_ok():
         "transformers": "5.12.1",
     }
 
-    def fake_ver(dist: str) -> str:
+    def fake_ver(dist: str, runtime=None) -> str:
         return str(supported.get(dist, "9.9.9"))
 
     with (
@@ -457,7 +478,7 @@ def test_runtime_compatibility_policy_matches_project():
 
 
 def test_required_package_missing_marks_fail():
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return None if dist == "transformers" else "1.2.3"
 
     with (
@@ -499,7 +520,7 @@ def test_remediation_command_quotes_interpreter_and_requirements():
 def test_signed_sidecar_required_dependency_gets_safe_repair(tmp_path):
     runtime = _stage_sidecar_bundle(tmp_path)
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return None if dist == "transformers" else "1.2.3"
 
     with (
@@ -545,7 +566,7 @@ def test_incompatible_transformers_fails_with_runtime_specific_repair(tmp_path):
     runtime.parent.mkdir(parents=True)
     runtime.write_text("")
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "5.16.0" if dist == "transformers" else "1.2.3"
 
     with (
@@ -562,7 +583,7 @@ def test_incompatible_transformers_fails_with_runtime_specific_repair(tmp_path):
 
 
 def test_supported_transformers_remains_ok():
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "5.12.1" if dist == "transformers" else "1.2.3"
 
     with (
@@ -576,7 +597,7 @@ def test_supported_transformers_remains_ok():
 
 
 def test_supported_transformers_with_broken_import_is_not_ok():
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "5.12.1" if dist == "transformers" else "1.2.3"
 
     with (
@@ -598,7 +619,7 @@ def test_supported_transformers_with_broken_import_is_not_ok():
 
 
 def test_supported_transformers_excluded_release_is_rejected():
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "5.13.0" if dist == "transformers" else "1.2.3"
 
     with mock.patch.object(eh, "_safe_version", side_effect=fake_ver):
@@ -840,6 +861,80 @@ def test_relative_module_server_uses_process_executable(
     assert eh._runtime_python_path() == server_runtime.resolve()
 
 
+def test_running_server_runtime_preserves_venv_executable_symlink(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    base_python = tmp_path / "base" / "bin" / "python"
+    base_python.parent.mkdir(parents=True)
+    base_python.write_text("")
+    server_runtime = tmp_path / "server-venv" / "bin" / "python"
+    server_runtime.parent.mkdir(parents=True)
+    server_runtime.symlink_to(base_python)
+    (server_runtime.parents[1] / "pyvenv.cfg").write_text("")
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [
+                    "python",
+                    "-m",
+                    "vllm_mlx.cli",
+                    "serve",
+                ],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(server_runtime)
+
+        def environ(self):
+            return dict(os.environ)
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    selected = eh._runtime_python_path()
+
+    assert selected == server_runtime
+    assert selected != server_runtime.resolve()
+
+
+def test_stopped_runtime_override_preserves_venv_executable_symlink(
+    tmp_path,
+    monkeypatch,
+):
+    base_python = tmp_path / "base" / "bin" / "python"
+    base_python.parent.mkdir(parents=True)
+    base_python.write_text("")
+    override_runtime = tmp_path / "override" / "bin" / "python"
+    override_runtime.parent.mkdir(parents=True)
+    override_runtime.symlink_to(base_python)
+    (override_runtime.parents[1] / "pyvenv.cfg").write_text("")
+    monkeypatch.setenv("RAPID_MLX_RUNTIME_PYTHON", str(override_runtime))
+
+    selected = eh._runtime_python_path()
+
+    assert selected == override_runtime
+    assert selected != override_runtime.resolve()
+
+
 def test_unrelated_vllm_mlx_module_server_is_not_selected(
     tmp_path,
     monkeypatch,
@@ -869,7 +964,11 @@ def test_unrelated_vllm_mlx_module_server_is_not_selected(
             return str(server_runtime)
 
         def environ(self):
-            return dict(os.environ)
+            return {
+                "PYTHONPATH": os.environ.get(
+                    "RAPID_MLX_TEST_SERVER_PYTHONPATH", "/attacker-controlled"
+                )
+            }
 
         def cwd(self):
             return str(tmp_path)
@@ -1227,6 +1326,7 @@ def test_remote_runtime_probe_uses_an_allowlisted_environment(
     doctor_exe.parent.mkdir(parents=True)
     doctor_exe.write_text("")
     server_runtime = Path(sys.executable)
+    server_env_path = tmp_path / "server-context-packages"
     script = (
         "import json, os, sys; [sys.path.insert(0, root) for root in "
         "json.loads(sys.argv[2])['trusted'] + json.loads(sys.argv[2])['context']]; "
@@ -1253,7 +1353,7 @@ def test_remote_runtime_probe_uses_an_allowlisted_environment(
             return str(server_runtime)
 
         def environ(self):
-            return dict(os.environ)
+            return {"PYTHONPATH": str(server_env_path)}
 
         def cwd(self):
             return str(tmp_path)
@@ -1272,6 +1372,7 @@ def test_remote_runtime_probe_uses_an_allowlisted_environment(
     monkeypatch.setenv("PYTHONHOME", "/attacker-home")
     monkeypatch.setenv("DYLD_INSERT_LIBRARIES", "/attacker.dylib")
     server_env_path = tmp_path / "server-context-packages"
+    monkeypatch.setenv("RAPID_MLX_TEST_SERVER_PYTHONPATH", str(server_env_path))
     monkeypatch.setattr(
         eh,
         "_RUNTIME_CONTEXTS",
@@ -1370,7 +1471,7 @@ def test_remote_importable_package_without_metadata_is_a_warning(tmp_path, monke
     section = eh.section_required_packages()
     row = next(c for c in section.checks if c.label.startswith("transformers"))
     assert row.status is eh.CheckStatus.WARN
-    assert "importable" in row.label
+    assert "importability" in row.label
     assert "not installed" not in row.label
     assert str(server_runtime) in row.detail
 
@@ -1445,7 +1546,8 @@ def test_remote_probe_accepts_trusted_single_file_module(
     package = cast("dict[str, object]", probe["packages"]["transformers"])
     assert package["discoverable"] is True
     assert package["trusted_origin"] is True
-    assert package["importable"] is True
+    assert package["importable"] is None
+    assert eh._runtime_module_importable(runtime, "probe_single_file", sidecar_root)
     assert package["version"] is None
 
 
@@ -1583,7 +1685,7 @@ def test_remote_pillow_probe_rejects_a_module_that_cannot_import(tmp_path, monke
 def test_missing_optional_package_marks_warning():
     """A missing optional package is ⚠ with an install hint, never ✗."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         # mlx-audio missing; the rest present.
         return None if dist == "mlx-audio" else "1.0.0"
 
@@ -1622,7 +1724,7 @@ def test_incompatible_mlx_vlm_names_bounded_extension_repair(tmp_path):
     runtime.parent.mkdir(parents=True)
     runtime.write_text("")
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.7.1" if dist == "mlx-vlm" else None
 
     with (
@@ -1644,7 +1746,7 @@ def test_incompatible_mlx_vlm_names_bounded_extension_repair(tmp_path):
 
 
 def test_compatible_mlx_vlm_is_accepted():
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.6.16" if dist == "mlx-vlm" else None
 
     with (
@@ -1660,7 +1762,7 @@ def test_compatible_mlx_vlm_is_accepted():
 def test_signed_sidecar_receives_no_pip_remediation(tmp_path):
     runtime = _stage_sidecar_bundle(tmp_path)
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.7.1" if dist == "mlx-vlm" else None
 
     with (
@@ -1684,7 +1786,7 @@ def test_signed_sidecar_receives_no_pip_remediation(tmp_path):
 def test_unsupported_mlx_audio_version_marks_warning():
     """A transitive mlx-audio outside Rapid-MLX's pin is not healthy."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.4.6" if dist == "mlx-audio" else None
 
     with mock.patch.object(eh, "_safe_version", side_effect=fake_ver):
@@ -1699,7 +1801,7 @@ def test_unsupported_mlx_audio_version_marks_warning():
 def test_supported_mlx_audio_version_marks_ok():
     """A version inside the declared audio range remains healthy."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.4.3" if dist == "mlx-audio" else None
 
     with (
@@ -1746,7 +1848,7 @@ def test_incomplete_audio_dependency_import_stack_marks_warning():
     """A present mlx-audio with a missing/broken audio dependency import is
     WARN, not OK — the audio feature set is not actually usable."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.4.3" if dist == "mlx-audio" else None
 
     with (
@@ -1867,7 +1969,7 @@ def test_bundled_sidecar_grades_audio_against_desktop_extra(tmp_path: Path):
     soundfile only). Grading it against the full ``[audio]`` closure reported a
     healthy build as incomplete."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.4.3" if dist == "mlx-audio" else None
 
     # Everything outside the audio-desktop extra is absent, exactly like the
@@ -2022,7 +2124,7 @@ def test_runtime_override_broken_audio_row_uses_the_runtime_hint(tmp_path: Path)
     """End-to-end: a genuinely broken override bundle is still ⚠, and the
     remediation the user reads is the runtime one, not the app one."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.4.3" if dist == "mlx-audio" else None
 
     exe = _stage_sidecar_bundle(tmp_path, slot="runtime-override")
@@ -2049,7 +2151,7 @@ def test_bundled_sidecar_still_flags_a_genuinely_broken_audio_install(
     """Narrowing the contract must not make the bundle unfalsifiable — a
     missing soundfile is still inside the audio-desktop contract."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.4.3" if dist == "mlx-audio" else None
 
     exe = _stage_sidecar_bundle(tmp_path)

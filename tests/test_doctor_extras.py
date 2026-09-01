@@ -115,7 +115,7 @@ def test_anthropic_sdk_check_gone_even_when_installed():
 def test_dflash_row_ok_when_mlx_vlm_at_min_version():
     """``mlx-vlm == 0.5.0`` exactly → ✓ DFlash row."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.5.0" if dist == "mlx-vlm" else "1.0.0"
 
     with mock.patch.object(eh, "_safe_version", side_effect=fake_ver):
@@ -136,7 +136,7 @@ def test_dflash_row_ok_when_mlx_vlm_above_min_version():
     """``mlx-vlm == 1.2.3`` → ✓ DFlash row (version comparison handles
     multi-component bumps, not just exact-match)."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "1.2.3" if dist == "mlx-vlm" else "1.0.0"
 
     with mock.patch.object(eh, "_safe_version", side_effect=fake_ver):
@@ -151,7 +151,7 @@ def test_dflash_row_warns_when_mlx_vlm_too_old():
     surfaced in the label so the user can see exactly how far they're
     behind without digging through `pip show`."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.4.9" if dist == "mlx-vlm" else "1.0.0"
 
     with mock.patch.object(eh, "_safe_version", side_effect=fake_ver):
@@ -167,7 +167,7 @@ def test_dflash_row_warns_when_mlx_vlm_missing():
     """``mlx-vlm`` not installed at all → ⚠ DFlash row labelled
     ``current: not installed``."""
 
-    def fake_ver(dist: str) -> str | None:
+    def fake_ver(dist: str, runtime=None) -> str | None:
         return None if dist == "mlx-vlm" else "1.0.0"
 
     with mock.patch.object(eh, "_safe_version", side_effect=fake_ver):

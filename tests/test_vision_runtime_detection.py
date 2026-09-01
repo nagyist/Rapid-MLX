@@ -358,7 +358,7 @@ def test_doctor_vision_row_not_ok_and_names_pil_when_pil_missing(monkeypatch):
     from vllm_mlx.doctor.env_health import CheckStatus
 
     # mlx-vlm metadata present (Homebrew --no-deps), PIL not importable.
-    def fake_safe_version(dist):
+    def fake_safe_version(dist, runtime=None):
         if dist == "mlx-vlm":
             return "0.6.16"
         return None
@@ -400,7 +400,7 @@ def test_doctor_vision_row_ok_when_pil_present(monkeypatch):
     from vllm_mlx.doctor import env_health
     from vllm_mlx.doctor.env_health import CheckStatus
 
-    def fake_safe_version(dist):
+    def fake_safe_version(dist, runtime=None):
         if dist == "mlx-vlm":
             return "0.6.16"
         return None
@@ -432,7 +432,7 @@ def test_doctor_vision_row_warns_when_mlx_vlm_truly_absent(monkeypatch):
     from vllm_mlx.doctor.env_health import CheckStatus
 
     # mlx-vlm not installed at all.
-    monkeypatch.setattr(env_health, "_safe_version", lambda dist: None)
+    monkeypatch.setattr(env_health, "_safe_version", lambda dist, runtime=None: None)
     # PIL state is irrelevant when mlx-vlm itself is absent, but pin it
     # present so a spurious PIL mention can't sneak in via the absent path.
     monkeypatch.setattr(
@@ -552,7 +552,7 @@ def test_doctor_vision_row_red_when_pillow_damaged(monkeypatch):
     from vllm_mlx.doctor import env_health
     from vllm_mlx.doctor.env_health import CheckStatus
 
-    def fake_safe_version(dist):
+    def fake_safe_version(dist, runtime=None):
         return "0.6.16" if dist == "mlx-vlm" else None
 
     monkeypatch.setattr(env_health, "_safe_version", fake_safe_version)
