@@ -201,6 +201,8 @@ def _run_authorization_script(
     event_label: str = "merge-ready-mac",
     live_head: str = "head-sha",
     fail_status_call: int | None = None,
+    fail_add: bool = False,
+    fail_remove: bool = False,
 ) -> dict[str, object]:
     """Execute the exact github-script body against deterministic API mocks."""
 
@@ -216,6 +218,8 @@ def _run_authorization_script(
             "eventLabel": event_label,
             "liveHead": live_head,
             "failStatusCall": fail_status_call,
+            "failAdd": fail_add,
+            "failRemove": fail_remove,
         }
     )
     harness = f"""
@@ -246,8 +250,14 @@ const github = {{ rest: {{
     if (scenario.failStatusCall === statusCalls) throw Object.assign(new Error("status failure"), {{ status: 500 }});
   }} }},
   issues: {{
-    removeLabel: async () => {{ calls.push(["remove"]); }},
-    addLabels: async (args) => {{ calls.push(["add", args.labels]); }},
+    removeLabel: async () => {{
+      calls.push(["remove"]);
+      if (scenario.failRemove) throw Object.assign(new Error("remove failure"), {{ status: 500 }});
+    }},
+    addLabels: async (args) => {{
+      calls.push(["add", args.labels]);
+      if (scenario.failAdd) throw Object.assign(new Error("add failure"), {{ status: 500 }});
+    }},
   }},
 }} }};
 const core = {{
@@ -278,12 +288,12 @@ def test_dequeued_head_is_blocked_before_marker_removal_then_reauthorized():
     result = _run_authorization_script(labels=["merge-ready-mac", "dequeued"])
     operations = [call[0] for call in result["calls"]]
 
-    assert operations == ["get", "status", "remove", "notice", "status", "add"]
+    assert operations == ["get", "status", "add", "remove", "notice", "status"]
     assert [call[1] for call in result["calls"] if call[0] == "status"] == [
         "pending",
         "success",
     ]
-    assert result["calls"][-1] == ["add", ["merge-requeue-trigger"]]
+    assert result["calls"][2] == ["add", ["merge-requeue-trigger"]]
 
 
 def test_initial_authorization_does_not_issue_a_requeue_trigger():
@@ -300,6 +310,52 @@ def test_status_failure_cannot_remove_the_dequeue_circuit_breaker():
     assert result["calls"] == [
         ["get"],
         ["status", "pending"],
+        ["threw", "status failure"],
+    ]
+
+
+def test_trigger_failure_keeps_both_queue_circuit_breakers():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"], fail_add=True
+    )
+
+    assert result["calls"] == [
+        ["get"],
+        ["status", "pending"],
+        ["add", ["merge-requeue-trigger"]],
+        ["threw", "add failure"],
+    ]
+
+
+def test_marker_failure_leaves_trigger_blocked_and_retryable():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"], fail_remove=True
+    )
+
+    assert result["calls"] == [
+        ["get"],
+        ["status", "pending"],
+        ["add", ["merge-requeue-trigger"]],
+        ["remove"],
+        ["threw", "remove failure"],
+    ]
+
+
+def test_final_status_failure_leaves_trigger_blocked_and_retryable():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"], fail_status_call=2
+    )
+
+    assert result["calls"] == [
+        ["get"],
+        ["status", "pending"],
+        ["add", ["merge-requeue-trigger"]],
+        ["remove"],
+        [
+            "notice",
+            "Cleared stale dequeued state before re-authorizing merge-ready-mac.",
+        ],
+        ["status", "success"],
         ["threw", "status failure"],
     ]
 

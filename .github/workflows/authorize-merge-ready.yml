@@ -63,7 +63,7 @@ jobs:
             // dequeue events keep the marker and cannot retry themselves.
             if (authorized && currentLabels.has("dequeued")) {
               // Invalidate any success left by an earlier authorization before
-              // removing the retry circuit breaker.  If either API call below
+              // removing the retry circuit breaker. If any following API call
               // fails, the queue's check-success condition remains blocked.
               await github.rest.repos.createCommitStatus({
                 owner: context.repo.owner,
@@ -73,6 +73,17 @@ jobs:
                 context: "merge-ready-head",
                 description: `Re-authorizing ${present[0]} on this exact head`,
                 target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/pull/${context.issue.number}`,
+              });
+              // Mint the one-shot token while both the pending status and the
+              // dequeue marker still block Mergify. Every interruption point
+              // is then fail-closed and recoverable by another fresh label
+              // event: addLabels is idempotent, and a surviving token remains
+              // blocked until the final success status is written.
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ["merge-requeue-trigger"],
               });
               try {
                 await github.rest.issues.removeLabel({
@@ -107,18 +118,4 @@ jobs:
             if (!authorized) {
               core.setFailed(description);
               return;
-            }
-
-            // Initial admission continues through auto_merge_conditions.  A
-            // terminally dequeued head additionally needs a one-shot token so
-            // merely removing Mergify's marker can never replay an old success
-            // status.  Mergify consumes this bot-owned label in the same rule
-            // that explicitly queues the head.
-            if (currentLabels.has("dequeued")) {
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                labels: ["merge-requeue-trigger"],
-              });
             }
