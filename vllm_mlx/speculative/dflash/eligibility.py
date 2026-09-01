@@ -83,6 +83,7 @@ def report(
     curated_pair = (
         profile.supports_dflash
         and bool(profile.dflash_algorithm)
+        and (not is_4bit or profile.dflash_algorithm == "dflash2")
         and bool(drafter_model or profile.dflash_draft_model)
         and (drafter_model is None or drafter_model == profile.dflash_draft_model)
     )

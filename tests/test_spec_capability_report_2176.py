@@ -80,6 +80,7 @@ def test_quantized_curated_flags_remain_experimental():
             hf_path=hf_path,
             supports_dflash=True,
             dflash_draft_model="user/drafter",
+            dflash_algorithm="dflash",
             mtp_draft_model="user/mtp-head",
         )
         for method in ("dflash", "mtp"):

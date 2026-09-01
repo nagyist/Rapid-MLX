@@ -116,6 +116,20 @@ def test_explicit_4bit_main_model_is_experimental() -> None:
         check(p, alias="qwen3.5-27b-4bit")
 
 
+def test_legacy_dflash_4bit_cannot_become_curated_by_registry_flag_alone() -> None:
+    profile = AliasProfile(
+        hf_path="user/target-4bit",
+        supports_dflash=True,
+        dflash_draft_model="user/legacy-dflash",
+        dflash_algorithm="dflash",
+    )
+    result = report(profile, alias="legacy-4bit")
+    assert result.recommendation == "experimental"
+    assert "explicit experimental opt-in" in " ".join(result.reasons)
+    with pytest.raises(DFlashUnavailable, match="explicit experimental opt-in"):
+        check(profile, alias="legacy-4bit")
+
+
 def test_check_message_lists_eligible_aliases() -> None:
     """Error messages must point users at a working alias — saves a
     docs round-trip."""
