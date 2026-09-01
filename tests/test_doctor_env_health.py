@@ -2777,6 +2777,7 @@ def test_compatible_mlx_vlm_is_accepted():
     with (
         mock.patch.object(eh, "_safe_version", side_effect=fake_ver),
         mock.patch.object(eh, "_pil_importable", return_value=True),
+        mock.patch.object(eh, "_module_visibility", return_value=(True, True)),
     ):
         section = eh.section_optional_packages()
 

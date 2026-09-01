@@ -411,6 +411,11 @@ def test_doctor_vision_row_ok_when_pil_present(monkeypatch):
         "_pil_importable",
         lambda runtime=None, packages=None: True,
     )
+    monkeypatch.setattr(
+        env_health,
+        "_module_visibility",
+        lambda dist, runtime=None: (True, True),
+    )
 
     section = env_health.section_optional_packages()
     vision_row = _find_row(section, "mlx-vlm", "vision")

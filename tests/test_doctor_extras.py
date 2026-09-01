@@ -118,7 +118,10 @@ def test_dflash_row_ok_when_mlx_vlm_is_validated_version():
     def fake_ver(dist: str, runtime=None) -> str | None:
         return "0.6.17" if dist == "mlx-vlm" else "1.0.0"
 
-    with mock.patch.object(eh, "_safe_version", side_effect=fake_ver):
+    with (
+        mock.patch.object(eh, "_safe_version", side_effect=fake_ver),
+        mock.patch.object(eh, "_module_visibility", return_value=(True, True)),
+    ):
         section = eh.section_optional_packages()
 
     dflash = next((c for c in section.checks if "dflash" in c.label), None)
