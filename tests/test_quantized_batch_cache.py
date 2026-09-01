@@ -703,6 +703,50 @@ def test_normalize_leaves_cachelist_untouched():
     assert all(type(c) is KVCache for c in out[1].caches)
 
 
+@pytest.mark.skipif(not _has_cachelist(), reason="mlx-lm has no CacheList")
+def test_install_quantizes_only_qwen4_qsa_attention_kv():
+    from mlx_lm.models.cache import CacheList, KVCache
+
+    from vllm_mlx.models.qwen4_exp_cache import QSAIndexCache
+    from vllm_mlx.quantized_batch_cache import install_quantized_batch_cache
+
+    qsa = QSAIndexCache(compress_ratio=4)
+
+    class _FakeBG:
+        def _make_new_cache(self):
+            return [CacheList(KVCache(), qsa)]
+
+    bg = _FakeBG()
+    assert install_quantized_batch_cache(bg, group_size=64, bits=8) is True
+    composite = bg._make_new_cache()[0]
+
+    assert isinstance(composite, CacheList)
+    assert isinstance(composite.caches[0], _QuantizableKVCache)
+    assert composite.caches[0].q_group_size == 64
+    assert composite.caches[0].q_bits == 8
+    assert composite.caches[1] is qsa
+
+
+@pytest.mark.skipif(not _has_cachelist(), reason="mlx-lm has no CacheList")
+def test_qwen4_qsa_prefix_hit_normalization_preserves_both_children():
+    from mlx_lm.models.cache import CacheList
+
+    from vllm_mlx.models.qwen4_exp_cache import QSAIndexCache
+    from vllm_mlx.quantized_batch_cache import normalize_caches_for_quantization
+
+    restored_kv = _seq_cache(15, 2)
+    qsa = QSAIndexCache(compress_ratio=4)
+    composite = CacheList(restored_kv, qsa)
+
+    normalized = normalize_caches_for_quantization([composite], GS, BITS)[0]
+
+    assert isinstance(normalized.caches[0], _QuantizableKVCache)
+    assert normalized.caches[0].offset == restored_kv.offset
+    assert normalized.caches[0].keys is restored_kv.keys
+    assert normalized.caches[0].values is restored_kv.values
+    assert normalized.caches[1] is qsa
+
+
 # --- head_dim resolution: one group size, shared by both caches --------------
 
 

@@ -637,17 +637,22 @@ def install_quantized_batch_cache(
     :class:`QuantizedBatchKVCache`) is therefore a single, minimal instance-level
     hook — no mlx-lm internals are patched.
 
-    Only exact top-level ``KVCache`` layers are swapped. Everything else keeps
-    its bf16 behavior:
+    Exact top-level ``KVCache`` layers are swapped. One model-owned composite
+    is also supported: Qwen4 QSA layers expose ``CacheList(KVCache,
+    QSAIndexCache)`` and read the first child exclusively through
+    ``update_and_fetch`` plus the common quantized-attention dispatcher. The
+    first child is therefore swapped while the authoritative QSA index ledger
+    stays in its native precision. Everything else keeps its bf16 behavior:
 
     * ``RotatingKVCache`` (sliding-window / ``max_kv_size``) — quantized batched
       sliding-window is NYI upstream (``BatchRotatingKVCache`` raises NYI).
     * ``ArraysCache`` / ``MambaCache`` — linear/hybrid state, not KV.
-    * ``CacheList`` (hybrid models such as DeepSeek-V3.2, LongCat, Baichuan-M1,
-      Falcon-H1) — deliberately NOT recursed into. Dequant-on-read only holds
-      when the model reads KV exclusively through ``update_and_fetch`` (which
-      returns bf16). These models instead touch ``cache.keys`` directly in their
-      forward pass — e.g. DeepSeek-V3.2 runs
+    * other ``CacheList`` owners (hybrid models such as DeepSeek-V3.2, LongCat,
+      Baichuan-M1, Falcon-H1) — deliberately NOT recursed into. The quantized
+      read contract only holds when the model reads KV exclusively through
+      ``update_and_fetch`` and passes the cache owner to the common attention
+      dispatcher. These models instead touch ``cache.keys`` directly — e.g.
+      DeepSeek-V3.2 runs
       ``cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, ...))`` — which
       assumes a raw ``mx.array``, not a quantized ``[packed, scales, biases]``
       triple. Quantizing them is a follow-up requiring per-model handling.
@@ -671,7 +676,7 @@ def install_quantized_batch_cache(
 
     def _quantized_make_new_cache():
         return [
-            _QuantizableKVCache(group_size, bits) if type(c) is KVCache else c
+            _normalize_single_sequence_cache(c, group_size, bits)
             for c in orig_make_new_cache()
         ]
 
@@ -848,6 +853,46 @@ def resolve_kv_quantization(
     return gs, False
 
 
+def _is_qwen4_qsa_cache_list(cache: Any) -> bool:
+    """Return whether ``cache`` is the audited Qwen4 QSA composite shape."""
+
+    from mlx_lm.models.cache import CacheList
+
+    from .models.qwen4_exp_cache import QSAIndexCache
+
+    children = getattr(cache, "caches", ())
+    return (
+        type(cache) is CacheList
+        and len(children) == 2
+        and type(children[0]) is KVCache
+        and isinstance(children[1], QSAIndexCache)
+    )
+
+
+def _as_quantizable_kv(cache: KVCache, group_size: int, bits: int):
+    converted = _QuantizableKVCache(group_size, bits)
+    converted.keys = cache.keys
+    converted.values = cache.values
+    converted.offset = cache.offset
+    return converted
+
+
+def _normalize_single_sequence_cache(cache: Any, group_size: int, bits: int):
+    """Quantize an audited cache owner while preserving auxiliary state."""
+
+    if type(cache) is KVCache:
+        return _as_quantizable_kv(cache, group_size, bits)
+    if _is_qwen4_qsa_cache_list(cache):
+        from mlx_lm.models.cache import CacheList
+
+        kv_cache, qsa_index = cache.caches
+        return CacheList(
+            _as_quantizable_kv(kv_cache, group_size, bits),
+            qsa_index,
+        )
+    return cache
+
+
 def normalize_caches_for_quantization(caches: list, group_size: int, bits: int) -> list:
     """Convert plain ``KVCache`` layers into :class:`_QuantizableKVCache`.
 
@@ -857,17 +902,11 @@ def normalize_caches_for_quantization(caches: list, group_size: int, bits: int) 
     restored caches through here makes both paths converge on the quantized
     batch type. Existing content (keys/values/offset) is preserved.
 
-    Only exact top-level ``KVCache`` layers are converted, mirroring
-    :func:`install_quantized_batch_cache` exactly so the MISS and HIT paths agree:
-    ``RotatingKVCache`` / hybrid / ``CacheList`` layers pass through untouched
-    (see that function for why ``CacheList`` models stay bf16).
+    The same audited owners as :func:`install_quantized_batch_cache` are
+    converted so MISS and HIT paths agree. Unsupported ``RotatingKVCache`` and
+    arbitrary composite owners remain untouched.
     """
     out = []
     for c in caches:
-        if type(c) is KVCache:
-            q = _QuantizableKVCache(group_size, bits)
-            q.keys, q.values, q.offset = c.keys, c.values, c.offset
-            out.append(q)
-        else:
-            out.append(c)
+        out.append(_normalize_single_sequence_cache(c, group_size, bits))
     return out
