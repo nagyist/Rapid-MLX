@@ -499,8 +499,6 @@ def _runtime_python_path() -> Path:
             )
 
         def _is_installed_rapid_mlx_module(entry: Path) -> bool:
-            if entry.name != "cli.py" or entry.parent.name != "vllm_mlx":
-                return False
             package_root = entry.parent
             site_root = package_root.parent
             try:

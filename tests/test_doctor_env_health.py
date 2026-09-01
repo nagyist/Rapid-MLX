@@ -3808,3 +3808,887 @@ def test_rapid_mlx_on_path_empty_component_is_cwd(tmp_path: Path, monkeypatch):
     found = eh._rapid_mlx_on_path(path_env=os.pathsep + "/nonexistent-doctor-dir")
     resolved = [os.path.realpath(p) for p in found]
     assert os.path.realpath(str(cli)) in resolved
+
+
+def test_runtime_distribution_probe_honors_cache_deadline_and_errors(tmp_path):
+    runtime = tmp_path / "python"
+    runtime.write_text("")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(
+            eh, "_RUNTIME_DISTRIBUTION_CACHE", {runtime.absolute(): True}
+        )
+        monkeypatch.setattr(
+            eh.subprocess,
+            "run",
+            mock.Mock(side_effect=AssertionError("cached probe must not run")),
+        )
+        assert eh._runtime_has_rapid_mlx_distribution(runtime, tmp_path, {})
+    finally:
+        monkeypatch.undo()
+
+    with mock.patch.object(eh, "_DOCTOR_DEADLINE", 0.0):
+        assert not eh._runtime_has_rapid_mlx_distribution(runtime, tmp_path, {})
+
+    with mock.patch.object(
+        eh.subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired(cmd=str(runtime), timeout=1),
+    ):
+        assert not eh._runtime_has_rapid_mlx_distribution(runtime, tmp_path, {})
+
+
+def test_runtime_distribution_probe_validates_usr_bin_python(tmp_path):
+    result = SimpleNamespace(stdout='["rapid-mlx"]\n')
+    with mock.patch.object(eh.subprocess, "run", return_value=result):
+        assert eh._runtime_has_rapid_mlx_distribution(
+            Path("/usr/bin/python3"),
+            tmp_path,
+            {"PATH": str(tmp_path)},
+        )
+
+
+def test_module_probe_rejects_unprobeable_runtime(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: None)
+
+    assert not eh._module_available("transformers", runtime)
+
+    probe = {"packages": {"transformers": {"importable": True}}}
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(eh, "_runtime_module_importable", lambda *args, **kwargs: True)
+    assert eh._module_available("transformers", runtime)
+
+
+def test_module_probe_catches_all_unsafe_failures(monkeypatch):
+    with mock.patch.object(eh._iu, "find_spec", side_effect=SystemExit):
+        assert not eh._module_available("transformers")
+
+
+def test_module_origin_uses_bundled_sidecar_as_trusted_root(tmp_path, monkeypatch):
+    module = tmp_path / "trusted_probe_module.py"
+    module.write_text("probe_loaded = True\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(eh, "_bundled_sidecar_root", lambda python=None: tmp_path)
+
+    assert eh._module_origin_is_trusted("trusted_probe_module")
+
+
+def test_trusted_sys_path_roots_ignore_empty_components(monkeypatch):
+    monkeypatch.setattr(eh.sys, "path", ["", "relative"])
+
+    assert eh._trusted_sys_path_roots() == set()
+
+
+def test_filesystem_runtime_authentication_uses_sidecar_shape(tmp_path, monkeypatch):
+    runtime = tmp_path / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    site_root = tmp_path / "site-packages"
+    site_root.mkdir()
+    (site_root / "vllm_mlx").mkdir()
+    monkeypatch.setattr(eh, "_bundled_sidecar_root", lambda python=None: tmp_path)
+
+    assert eh._filesystem_runtime_has_rapid_mlx_distribution(runtime)
+
+    monkeypatch.setattr(eh, "_bundled_sidecar_root", lambda python=None: None)
+    assert not eh._filesystem_runtime_has_rapid_mlx_distribution(runtime)
+
+
+def test_bundled_sidecar_detection_fails_closed_on_resolve_error():
+    with mock.patch.object(Path, "resolve", side_effect=OSError):
+        assert eh._bundled_sidecar_root(Path(sys.executable)) is None
+
+
+@pytest.mark.parametrize(
+    "candidate,expected",
+    [
+        (Path("/tmp/missing-python"), False),
+        (Path("/tmp/not-python"), False),
+        (Path(sys.executable), True),
+    ],
+)
+def test_diagnostic_python_override_validates_shape(candidate, expected):
+    assert eh._is_diagnostic_python_override(candidate) is expected
+
+
+@pytest.mark.parametrize(
+    "sidecar_root,exe,prefix,expected",
+    [
+        (None, Path("/opt/python"), Path("/opt"), "system environment"),
+        (Path("/sidecar"), Path("/opt/python"), Path("/opt"), "desktop sidecar"),
+    ],
+)
+def test_runtime_environment_classifies_sidecar_and_system(
+    sidecar_root, exe, prefix, expected
+):
+    with mock.patch.object(eh, "_bundled_sidecar_root", return_value=sidecar_root):
+        assert eh._runtime_environment(exe, prefix, prefix) == expected
+
+
+def test_runtime_environment_classifies_all_layouts(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    application_bin = home / ".rapid-mlx" / "bin"
+    runtime_root = home / ".rapid-mlx-python"
+    application_python = application_bin / "python3"
+    runtime_python = runtime_root / "bin" / "python3"
+    developer_python = Path(eh.__file__).resolve().parents[2] / "bin" / "python3"
+    application_bin.mkdir(parents=True)
+    runtime_python.parent.mkdir(parents=True)
+    monkeypatch.setattr(eh.Path, "home", lambda: home)
+
+    assert (
+        eh._runtime_environment(application_python, Path(sys.prefix))
+        == "Rapid-MLX application environment"
+    )
+    assert (
+        eh._runtime_environment(runtime_python, runtime_root)
+        == "Rapid-MLX runtime environment"
+    )
+    assert (
+        eh._runtime_environment(developer_python, Path(sys.prefix))
+        == "developer installation"
+    )
+
+
+def test_selected_runtime_retries_null_cached_value(tmp_path, monkeypatch):
+    runtime = tmp_path / "python"
+    calls = []
+
+    def select_runtime():
+        calls.append("selected")
+        return runtime
+
+    monkeypatch.setattr(eh, "_runtime_python_path", select_runtime)
+    monkeypatch.setattr(eh, "_SELECTED_RUNTIME", None)
+    monkeypatch.setattr(eh, "_RUNTIME_SELECTION_DONE", False)
+
+    assert eh._selected_runtime() == (runtime, False)
+    monkeypatch.setattr(eh, "_SELECTED_RUNTIME", None)
+    assert eh._selected_runtime() == (runtime, False)
+    assert len(calls) == 2
+
+
+def test_probe_package_helpers_reject_invalid_reports():
+    assert eh._probe_package({"packages": []}, "transformers") is None
+    assert eh._probe_package_by_module({"packages": []}, "transformers") is None
+
+
+def test_runtime_import_probe_rejects_non_object_and_timeout(tmp_path):
+    runtime = tmp_path / "python"
+    runtime.write_text("")
+    result = SimpleNamespace(stdout=f"{eh._PROBE_RESULT_PREFIX}{json.dumps([])}\n")
+    with mock.patch.object(eh.subprocess, "run", return_value=result):
+        assert not eh._runtime_module_importable(runtime, "transformers", None)
+
+    with mock.patch.object(
+        eh.subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired(cmd=str(runtime), timeout=1),
+    ):
+        assert not eh._runtime_module_importable(runtime, "transformers", None)
+        assert not eh._import_probe_was_interrupted(runtime, "transformers", None)
+        assert not eh._runtime_module_importable(runtime, "mlx_vlm", None)
+        assert eh._import_probe_was_interrupted(runtime.absolute(), "mlx_vlm", None)
+
+
+def test_python_section_warns_when_selected_runtime_cannot_be_probed(
+    tmp_path, monkeypatch
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: None)
+
+    section = eh.section_python()
+    row = next(c for c in section.checks if "could not be inspected" in c.label)
+
+    assert row.status is eh.CheckStatus.WARN
+    assert str(runtime) in row.detail
+    assert "RAPID_MLX_RUNTIME_PYTHON" in row.detail
+
+
+def test_visibility_helpers_distinguish_unknown_and_context_modules(monkeypatch):
+    assert not eh._visible_without_metadata("unknown-distribution")
+
+    with mock.patch.object(eh, "_module_available", return_value=True):
+        assert eh._visible_without_metadata("transformers", None)
+
+    runtime = Path("/do-not-exist/python")
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: None)
+    assert eh._module_visibility("transformers", runtime) == (False, False)
+
+    package = {
+        "module": "trusted_probe_module",
+        "importable": True,
+        "trusted_origin": True,
+    }
+    report = {"packages": {"transformers": package}}
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: report)
+    monkeypatch.setattr(eh, "_runtime_module_importable", lambda *args, **kwargs: True)
+    assert eh._module_visibility("transformers", runtime) == (True, True)
+
+
+def test_invalid_dependency_version_is_not_supported():
+    assert not eh._version_supported("transformers", "not-a-version")
+
+
+def test_remote_pillow_probe_fails_closed_without_runtime_probe(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: None)
+
+    assert not eh._pil_importable(runtime)
+
+
+def _server_process(tmp_path, cmdline, exe, environ, uids=None):
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": cmdline,
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(exe)
+
+        def environ(self):
+            return environ
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return uids or SimpleNamespace(real=os.getuid())
+
+    return FakeProcess()
+
+
+class _FailingUidProbe:
+    def __call__(self):
+        raise OSError
+
+
+def _install_fake_process_runtime(monkeypatch, process):
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [process]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+
+def test_runtime_selection_rejects_relative_module_command_with_no_interpreter(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    runtime.chmod(0o755)
+    (runtime.parents[1] / "pyvenv.cfg").write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            ["python", "-m", "vllm_mlx.cli", "serve"],
+            runtime,
+            {"PATH": ""},
+        ),
+    )
+
+    assert eh._runtime_python_path() == runtime.absolute()
+
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            ["python", "-m", "vllm_mlx.cli", "serve"],
+            runtime,
+            {"PATH": str(runtime.parent)},
+        ),
+    )
+    assert eh._runtime_python_path() == runtime.absolute()
+
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            ["python", "-m", "vllm_mlx.cli", "serve"],
+            runtime,
+            {"PATH": str(runtime.parent)},
+        ),
+    )
+    assert eh._runtime_python_path() == runtime.absolute()
+
+
+def test_runtime_selection_rejects_non_python_uid_probe(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    fake_process = _server_process(
+        tmp_path,
+        [str(runtime), "-m", "vllm_mlx.cli", "serve"],
+        runtime,
+        {},
+        uids=SimpleNamespace(real=os.getuid() + 1),
+    )
+    _install_fake_process_runtime(
+        monkeypatch,
+        fake_process,
+    )
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(runtime), "-m", "vllm_mlx.cli", "serve"],
+            runtime,
+            {},
+            uids=_FailingUidProbe(),
+        ),
+    )
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
+def test_runtime_selection_rejects_empty_server_command(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(tmp_path, ["serve"], runtime, {}),
+    )
+
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
+def test_runtime_selection_resolves_relative_entrypoint_from_server_cwd(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    entrypoint = tmp_path / "tools" / "rapid-mlx"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text(f"#!{runtime}\nfrom vllm_mlx.cli import main\nmain()\n")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(runtime), "tools/rapid-mlx", "serve"],
+            runtime,
+            {"PATH": str(runtime.parent)},
+        ),
+    )
+
+    assert eh._runtime_python_path() == runtime.absolute()
+
+
+def test_runtime_selection_rejects_missing_relative_entrypoint(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(runtime), "rapid-mlx", "serve"],
+            runtime,
+            {"PATH": ""},
+        ),
+    )
+
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
+def test_runtime_selection_rejects_invalid_entrypoint_and_unknown_entry(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    entrypoint = tmp_path / "bin" / "rapid-mlx"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("# not a valid entrypoint\n")
+    missing_entrypoint = tmp_path / "missing" / "rapid-mlx"
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(runtime), str(missing_entrypoint), "serve"],
+            runtime,
+            {},
+        ),
+    )
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+    with mock.patch.object(
+        Path,
+        "read_bytes",
+        side_effect=OSError,
+    ):
+        _install_fake_process_runtime(
+            monkeypatch,
+            _server_process(
+                tmp_path,
+                [str(runtime), str(entrypoint), "serve"],
+                runtime,
+                {},
+            ),
+        )
+        assert eh._runtime_python_path() == doctor_exe.absolute()
+
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(runtime), "not-rapid-mlx", "serve"],
+            runtime,
+            {},
+        ),
+    )
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
+def test_runtime_selection_supports_sibling_python_and_env_fallback(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python3"
+    sibling = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    sibling.write_text("")
+    entrypoint = runtime.parent / "rapid-mlx"
+    entrypoint.write_text("echo no shebang\nfrom vllm_mlx.cli import main\nmain()\n")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(entrypoint), "serve"],
+            runtime,
+            {},
+        ),
+    )
+    assert eh._runtime_python_path() == runtime.absolute()
+
+    entrypoint.write_text(
+        "#!/usr/bin/env python\nfrom vllm_mlx.cli import main\nmain()\n"
+    )
+    process_runtime = tmp_path / "process" / "bin" / "python"
+    process_runtime.parent.mkdir(parents=True)
+    process_runtime.write_text("")
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(entrypoint), "serve"],
+            process_runtime,
+            {},
+        ),
+    )
+    assert eh._runtime_python_path() == process_runtime.absolute()
+
+    shell_process = tmp_path / "process" / "bin" / "sh"
+    shell_process.write_text("")
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(entrypoint), "serve"],
+            shell_process,
+            {},
+        ),
+    )
+    assert eh._runtime_python_path() == runtime.absolute()
+
+
+def test_runtime_selection_handles_entrypoint_read_errors(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    entrypoint = runtime.parent / "rapid-mlx"
+    entrypoint.write_text(f"#!{runtime}\nfrom vllm_mlx.cli import main\nmain()\n")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    with (
+        mock.patch.object(
+            Path,
+            "read_bytes",
+            return_value=b"from vllm_mlx.cli import main\nmain()\n",
+        ),
+        mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=OSError,
+        ),
+    ):
+        _install_fake_process_runtime(
+            monkeypatch,
+            _server_process(
+                tmp_path,
+                [str(entrypoint), "serve"],
+                runtime,
+                {},
+            ),
+        )
+        assert eh._runtime_python_path() == runtime.absolute()
+
+
+def test_runtime_selection_reads_installed_module_marker_files(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    site_root = tmp_path / "site"
+    package_root = site_root / "vllm_mlx"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("")
+    (package_root / "cli.py").write_text("from vllm_mlx.cli import main\n")
+    (site_root / "rapid_mlx-0.0.0.dist-info").mkdir()
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(runtime), str(package_root / "cli.py"), "serve"],
+            runtime,
+            {},
+        ),
+    )
+
+    assert eh._runtime_python_path() == runtime.absolute()
+
+    package_root.joinpath("cli.py").unlink()
+    package_root.joinpath("cli.py").mkdir()
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(
+            tmp_path,
+            [str(runtime), str(package_root / "cli.py"), "serve"],
+            runtime,
+            {},
+        ),
+    )
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
+def test_runtime_selection_swallows_process_iteration_failures(tmp_path, monkeypatch):
+    class FailingProcess:
+        @property
+        def info(self):
+            raise psutil_access_denied
+
+    psutil_access_denied = type("AccessDenied", (RuntimeError,), {})
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FailingProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = psutil_access_denied
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert eh._runtime_python_path() == Path(sys.executable).absolute()
+
+
+def test_runtime_selection_ignores_non_server_and_self_processes(
+    tmp_path, monkeypatch, allow_rapid_mlx_module_servers
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    _install_fake_process_runtime(
+        monkeypatch,
+        _server_process(tmp_path, [str(runtime), "not-serve"], runtime, {}),
+    )
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [
+        _server_process(tmp_path, [str(runtime), "serve"], runtime, {})
+    ]
+    fake_psutil.process_iter.return_value[0].info["pid"] = os.getpid()
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
+def test_required_package_timeout_is_warn_for_installed_and_visible_states(
+    tmp_path, monkeypatch
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    probe = {
+        "executable": str(runtime),
+        "prefix": str(runtime.parents[1]),
+        "base_prefix": str(runtime.parents[1]),
+        "path": [],
+        "packages": {},
+    }
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: "5.12.1")
+    monkeypatch.setattr(
+        eh, "_import_probe_was_interrupted", lambda *args, **kwargs: True
+    )
+
+    section = eh.section_required_packages()
+    row = next(c for c in section.checks if c.label.startswith("transformers"))
+
+    assert row.status is eh.CheckStatus.WARN
+    assert "probe timed out" in row.label
+
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: None)
+    monkeypatch.setattr(
+        eh, "_module_visibility", lambda dist, runtime=None: (True, False)
+    )
+    visibility_counts: dict[str, int] = {}
+
+    def interrupt_after_visibility(runtime, module, sidecar_root):
+        count = visibility_counts.get(module, 0)
+        visibility_counts[module] = count + 1
+        return count > 0
+
+    monkeypatch.setattr(eh, "_import_probe_was_interrupted", interrupt_after_visibility)
+    section = eh.section_required_packages()
+    row = next(c for c in section.checks if c.label.startswith("transformers"))
+    assert row.status is eh.CheckStatus.WARN
+    assert "probe timed out" in row.label
+
+
+def test_required_package_timeout_before_visibility(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    probe = {
+        "executable": str(runtime),
+        "prefix": str(runtime.parents[1]),
+        "base_prefix": str(runtime.parents[1]),
+        "path": [],
+        "packages": {},
+    }
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: None)
+    monkeypatch.setattr(
+        eh, "_import_probe_was_interrupted", lambda *args, **kwargs: True
+    )
+
+    section = eh.section_required_packages()
+    row = next(c for c in section.checks if c.label.startswith("transformers"))
+
+    assert row.status is eh.CheckStatus.WARN
+    assert "probe timed out" in row.label
+
+
+def test_required_package_timeout_after_visibility(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    probe = {
+        "executable": str(runtime),
+        "prefix": str(runtime.parents[1]),
+        "base_prefix": str(runtime.parents[1]),
+        "path": [],
+        "packages": {},
+    }
+    counts: dict[str, int] = {}
+
+    def interrupt_after_visibility(runtime, module, sidecar_root):
+        counts[module] = counts.get(module, 0) + 1
+        return counts[module] > 1
+
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: None)
+    monkeypatch.setattr(
+        eh, "_module_visibility", lambda dist, runtime=None: (True, False)
+    )
+    monkeypatch.setattr(eh, "_import_probe_was_interrupted", interrupt_after_visibility)
+
+    section = eh.section_required_packages()
+
+    assert section.checks
+    assert all("probe timed out" in check.label for check in section.checks)
+
+
+def test_optional_package_timeout_is_warn(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    probe = {
+        "executable": str(runtime),
+        "prefix": str(runtime.parents[1]),
+        "base_prefix": str(runtime.parents[1]),
+        "path": [],
+        "packages": {},
+    }
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: None)
+    monkeypatch.setattr(
+        eh, "_import_probe_was_interrupted", lambda *args, **kwargs: True
+    )
+
+    section = eh.section_optional_packages()
+
+    assert section.checks
+    timeout_rows = [
+        check for check in section.checks if "probe timed out" in check.label
+    ]
+    assert timeout_rows
+    assert all(check.status is eh.CheckStatus.WARN for check in timeout_rows)
+
+
+def test_optional_package_probe_can_interrupt_after_visibility(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    probe = {
+        "executable": str(runtime),
+        "prefix": str(runtime.parents[1]),
+        "base_prefix": str(runtime.parents[1]),
+        "path": [],
+        "packages": {},
+    }
+    interruption_counts: dict[str, int] = {}
+
+    def interrupt_after_visibility(runtime, module, sidecar_root):
+        count = interruption_counts.get(module, 0)
+        interruption_counts[module] = count + 1
+        return count > 0
+
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: None)
+    monkeypatch.setattr(
+        eh, "_module_visibility", lambda dist, runtime=None: (True, False)
+    )
+    monkeypatch.setattr(eh, "_import_probe_was_interrupted", interrupt_after_visibility)
+
+    section = eh.section_optional_packages()
+
+    assert section.checks
+    timeout_rows = [
+        check for check in section.checks if "probe timed out" in check.label
+    ]
+    assert timeout_rows
+    assert all(check.status is eh.CheckStatus.WARN for check in timeout_rows)
+
+
+def test_dflash_reports_supported_vlm_with_unverified_import(tmp_path, monkeypatch):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    probe = {
+        "executable": str(runtime),
+        "prefix": str(runtime.parents[1]),
+        "base_prefix": str(runtime.parents[1]),
+        "path": [],
+        "packages": {},
+    }
+
+    def safe_version(dist, runtime=None):
+        return "0.6.17" if dist == "mlx-vlm" else None
+
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: probe)
+    monkeypatch.setattr(eh, "_safe_version", safe_version)
+    monkeypatch.setattr(eh, "_pil_importable", lambda runtime=None: True)
+    monkeypatch.setattr(
+        eh, "_module_visibility", lambda dist, runtime=None: (True, False)
+    )
+
+    section = eh.section_optional_packages()
+    row = next(c for c in section.checks if c.label.startswith("mlx-vlm 0.5.0+"))
+
+    assert row.status is eh.CheckStatus.WARN
+    assert "broken or unverified" in row.label
+    assert str(runtime) in row.detail
