@@ -16,9 +16,17 @@ restarts if it wants longer-term history.
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
+import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from vllm_mlx.request import Request
 
 # Prometheus histograms need fixed buckets.  These cover the local-model
 # operating range without making every bucket width a UI policy: TTFT spans
@@ -127,6 +135,46 @@ class ModelPerformanceLedger:
         self._decode_tokens_per_second_sum = 0.0
         self._decode_tokens_per_second_max: float | None = None
         self._last_decode_tokens_per_second: float | None = None
+
+    def decode_rate_for_request(self, request: Request) -> float | None:
+        """Return inverse-TPOT decode speed, or None when not measurable."""
+        if request.first_token_time is None or request.num_output_tokens < 2:
+            return None
+        decode_seconds = time.time() - request.first_token_time
+        if decode_seconds <= 0:
+            return None
+        return (request.num_output_tokens - 1) / decode_seconds
+
+    def ttft_for_request(self, request: Request) -> float | None:
+        if request.first_token_time is None or request.num_output_tokens == 0:
+            return None
+        return max(0.0, request.first_token_time - request.arrival_time)
+
+    def record_finished_performance(self, request: Request) -> None:
+        """Best-effort performance accounting for a terminal response."""
+        try:
+            self.record_success(
+                request.request_id,
+                prompt_tokens=request.num_prompt_tokens,
+                completion_tokens=request.num_output_tokens,
+                ttft_seconds=self.ttft_for_request(request),
+                decode_tokens_per_second=self.decode_rate_for_request(request),
+            )
+        except Exception:
+            logger.debug("Failed to record performance for %s", request.request_id)
+
+    def record_cancelled_performance(self, request: Request) -> None:
+        """Best-effort performance accounting for an aborted request."""
+        try:
+            self.record_cancelled(
+                request.request_id,
+                prompt_tokens=request.num_prompt_tokens,
+                completion_tokens=request.num_output_tokens,
+                ttft_seconds=self.ttft_for_request(request),
+                decode_tokens_per_second=self.decode_rate_for_request(request),
+            )
+        except Exception:
+            logger.debug("Failed to record cancellation for %s", request.request_id)
 
     @property
     def model_name(self) -> str:

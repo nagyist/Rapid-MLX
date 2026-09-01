@@ -185,7 +185,7 @@ def test_scheduler_records_terminal_success_once():
     assert performance.decode_observations == 1
 
     # Re-delivery of the same terminal response must not double-count.
-    scheduler._record_finished_performance(request)
+    scheduler.performance.record_finished_performance(request)
     assert scheduler.performance.snapshot().requests_succeeded == 1
 
 
@@ -201,7 +201,7 @@ def test_scheduler_records_explicit_cancellation_once():
     assert performance.prompt_tokens == 5
     assert performance.completion_tokens == 2
 
-    scheduler._record_cancelled_performance(scheduler.requests["cancelled"])
+    scheduler.performance.record_cancelled_performance(scheduler.requests["cancelled"])
     assert scheduler.performance.snapshot().requests_cancelled == 1
 
 

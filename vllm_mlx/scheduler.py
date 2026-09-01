@@ -7319,7 +7319,7 @@ class Scheduler:
             self.total_prompt_tokens += request.num_prompt_tokens
 
         if request is not None:
-            self._record_cancelled_performance(request)
+            self.performance.record_cancelled_performance(request)
             request.set_finished(RequestStatus.FINISHED_CANCELLED)
             # Release cache references so Metal buffers can be freed
             request.prompt_cache = None
@@ -8250,7 +8250,7 @@ class Scheduler:
 
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1
-                self._record_finished_performance(request)
+                self.performance.record_finished_performance(request)
 
                 logger.debug(
                     f"Request {request_id} finished: {response.finish_reason}, "
@@ -9405,43 +9405,3 @@ class Scheduler:
             )
         logger.info("[cache_persist] no memory-aware cache to load into")
         return 0
-
-    def _record_cancelled_performance(self, request: Request) -> None:
-        """Best-effort performance accounting for an aborted request."""
-        try:
-            self.performance.record_cancelled(
-                request.request_id,
-                prompt_tokens=request.num_prompt_tokens,
-                completion_tokens=request.num_output_tokens,
-                ttft_seconds=self._ttft_for_request(request),
-                decode_tokens_per_second=self._decode_rate_for_request(request),
-            )
-        except Exception:
-            logger.debug("Failed to record cancellation for %s", request.request_id)
-
-    def _decode_rate_for_request(self, request: Request) -> float | None:
-        """Return inverse-TPOT decode speed, or None when not measurable."""
-        if request.first_token_time is None or request.num_output_tokens < 2:
-            return None
-        decode_seconds = time.time() - request.first_token_time
-        if decode_seconds <= 0:
-            return None
-        return (request.num_output_tokens - 1) / decode_seconds
-
-    def _ttft_for_request(self, request: Request) -> float | None:
-        if request.first_token_time is None or request.num_output_tokens == 0:
-            return None
-        return max(0.0, request.first_token_time - request.arrival_time)
-
-    def _record_finished_performance(self, request: Request) -> None:
-        """Best-effort performance accounting for a terminal response."""
-        try:
-            self.performance.record_success(
-                request.request_id,
-                prompt_tokens=request.num_prompt_tokens,
-                completion_tokens=request.num_output_tokens,
-                ttft_seconds=self._ttft_for_request(request),
-                decode_tokens_per_second=self._decode_rate_for_request(request),
-            )
-        except Exception:
-            logger.debug("Failed to record performance for %s", request.request_id)
