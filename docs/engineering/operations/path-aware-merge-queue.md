@@ -142,6 +142,15 @@ The queue contract lives in `.mergify.yml`:
 
 - label-gated `auto_merge_conditions`, so a ready label automatically enqueues
   the pull request without a second command or checkbox;
+- provider-supported recovery for a head left in terminal `dequeued` state.
+  Diagnose the candidate failure and fix the original pull request when the
+  failure is real. Once its exact-head checks are green and exactly one ready
+  label remains, issue `@mergifyio queue no-mac-batch` or
+  `@mergifyio queue mac-batch` in a PR comment. The command resets terminal
+  provider state but does not bypass `queue_conditions`; the authorized head
+  still runs the full combined candidate validation. Re-applying a ready label,
+  removing `dequeued`, pushing an empty commit, or adding a custom trigger label
+  does not reset terminal queue state and must not be used as a substitute;
 - an exact-head authorization status in both queue conditions, preventing a
   newly pushed head from racing asynchronous label revocation;
 - serial mode with one batch in flight, so speculative checks cannot multiply
@@ -213,6 +222,11 @@ Production activation is an owner operation and must happen in this order:
    onto an internal queue branch changes GitHub's token and secret boundary.
    After review, bring an accepted external change onto a same-repository
    maintainer branch before authorizing it for the batch queue.
+
+Maintainers who can manage labels are part of the queue's trusted control
+plane: they can authorize a head by applying its ready label. Requeue commands
+remain auditable and are restricted by the provider to users with sufficient
+repository permission.
 4. In the existing `main` protection, retain required contexts `tests`,
    `desktop-tests`, and `version-bump-guard`, required conversation resolution,
    administrator enforcement, and linear history. Disable only **Require
@@ -230,11 +244,14 @@ Production activation is an owner operation and must happen in this order:
    lanes. Then remove the applicable ready label from a queued test PR and
    verify it leaves the queue without merging.
 
-Every `synchronize` event removes either ready label before the updated head can
-be admitted. A new commit therefore requires fresh review and an explicit new
-authorization after its own required checks pass. The revocation workflow uses
-`pull_request_target` without checking out or executing pull-request code, and
-holds only pull-request label write permission.
+A head update never mutates PR-scoped labels asynchronously. Authorization is a
+commit status, so the prior `merge-ready-head=success` remains attached only to
+the old SHA and cannot admit the new head. A visible ready label may remain, but
+the queue stays blocked until a maintainer completes review and removes and
+re-applies that one ready label, creating a fresh authorization event for the
+new exact SHA. Avoiding asynchronous label deletion removes the race in which a
+delayed synchronize job could erase authorization deliberately applied to the
+newer head.
 
 Do not enable batching while strict up-to-date protection remains on, and do
 not weaken or remove any required context to make a batch move. A missing,

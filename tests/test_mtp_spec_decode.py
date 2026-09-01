@@ -1395,6 +1395,26 @@ def test_inject_mtp_support_attaches_four_surfaces():
     assert model.mtp_prompt_lookup_supported is True
 
 
+def test_inject_mtp_support_mirrors_batch_seam_to_outer_wrapper():
+    """The scheduler may retain the outer model returned by mlx-lm."""
+    from vllm_mlx.spec_decode.mtp.qwen3_5_inject import inject_mtp_support
+
+    try:
+        inner = _build_tiny_qwen3_5_text_model()
+    except (TypeError, AttributeError) as exc:
+        pytest.skip(f"Qwen3.5 TextModelArgs schema mismatch in this mlx-lm: {exc}")
+
+    class _Outer:
+        def __init__(self, language_model):
+            self.language_model = language_model
+
+    outer = _Outer(inner)
+    assert inject_mtp_support(outer, allow_random_init=True) is True
+    assert outer.mtp_batch_forward.__self__ is inner
+    assert outer.batched_mtp_capability is inner.batched_mtp_capability
+    assert outer.mtp_recursive_draft_depth == 2
+
+
 def test_inject_mtp_support_rejects_non_qwen35_model():
     """A non-Qwen3.5 model (no ``args.mtp_num_hidden_layers``) must
     return False and not patch anything.
@@ -2489,6 +2509,50 @@ def test_generator_sampled_verify_accepts_matching_draft():
         (13, False),
     ]
     assert counter.snapshot().accepts == 1
+
+
+def test_generator_sampled_verify_uses_request_local_rng():
+    """Sampled MTP consumes only the request-owned carried key."""
+    from vllm_mlx._seeded_sampler import RequestSeededRNG
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    lane_rng = RequestSeededRNG(42)
+    emitted = list(
+        mtp_generate_step(
+            mx.array([1], dtype=mx.uint32),
+            _MockedQwen35Model([7, 11, 13], [11]),
+            max_tokens=3,
+            temp=0.7,
+            top_p=0.95,
+            disable_auto_k=True,
+            accept_counter=MTPAcceptCounter(),
+            lane_rng=lane_rng,
+        )
+    )
+
+    assert [(token, drafted) for token, _lp, drafted in emitted] == [
+        (7, False),
+        (11, True),
+        (13, False),
+    ]
+    assert lane_rng.draws > 0
+
+
+def test_mtp_request_rng_and_greedy_sampler_publish_state_contract():
+    """Apple MTP lane covers the request-local state exposed to the scheduler."""
+    from vllm_mlx._seeded_sampler import RequestSeededRNG, make_seeded_sampler
+
+    carried = RequestSeededRNG(42)
+    initial = carried.key
+    subkey = carried.next_key()
+    assert carried.draws == 1
+    assert carried.key is not initial
+    assert subkey is not None
+
+    greedy = make_seeded_sampler(seed=42, temperature=0.0)
+    assert greedy.lane_rng is None
+    assert greedy.request_seeded is True
 
 
 def test_generator_accepted_draft_reports_target_logprobs(monkeypatch):
