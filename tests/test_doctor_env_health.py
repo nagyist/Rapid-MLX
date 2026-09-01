@@ -1273,6 +1273,24 @@ def test_local_import_rejects_source_tree_shadow_module(
     assert not eh._module_available("transformers", real_import=True)
 
 
+def test_trusted_sys_path_roots_exclude_dynamic_paths(
+    tmp_path,
+    monkeypatch,
+):
+    python_path_root = tmp_path / "python-path"
+    python_path_root.mkdir()
+    source_root = Path(eh.__file__).resolve().parents[2]
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(python_path_root))
+    monkeypatch.syspath_prepend(tmp_path)
+
+    trusted_roots = eh._trusted_sys_path_roots()
+
+    assert python_path_root.resolve() not in trusted_roots
+    assert tmp_path.resolve() not in trusted_roots
+    assert source_root not in trusted_roots
+
+
 def test_local_pillow_probe_rejects_source_tree_shadow_module(
     tmp_path,
     monkeypatch,

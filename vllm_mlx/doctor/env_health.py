@@ -32,7 +32,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import sysconfig
 import time
 import urllib.error
 import urllib.parse
@@ -244,6 +243,7 @@ _DOCTOR_BUDGET_S = 5.0
 _DOCTOR_DEADLINE: float | None = None
 _RUNTIME_CONTEXTS: dict[Path, tuple[Path, dict[str, str]]] = {}
 _RUNTIME_DISTRIBUTION_CACHE: dict[Path, bool] = {}
+_TRUSTED_SYS_PATH_ROOTS: tuple[Path, ...] = ()
 
 
 def _runtime_has_rapid_mlx_distribution(
@@ -372,13 +372,7 @@ def _module_origin_is_trusted(module: str) -> bool:
         locations.extend(
             Path(location) for location in spec.submodule_search_locations or []
         )
-        purelib = sysconfig.get_path("purelib")
-        platlib = sysconfig.get_path("platlib")
-        trusted_roots = {
-            Path(purelib).resolve() if purelib else None,
-            Path(platlib).resolve() if platlib else None,
-        }
-        trusted_roots.discard(None)
+        trusted_roots = set(_TRUSTED_SYS_PATH_ROOTS)
         sidecar_root = _bundled_sidecar_root()
         if sidecar_root is not None:
             trusted_roots.add(sidecar_root.resolve())
@@ -391,6 +385,32 @@ def _module_origin_is_trusted(module: str) -> bool:
         )
     except (OSError, ValueError, ImportError):
         return False
+
+
+def _trusted_sys_path_roots() -> set[Path]:
+    """Return safe active roots from which local real imports may execute."""
+    unsafe_roots: set[Path] = set()
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if entry:
+            unsafe_roots.add(Path(entry).expanduser().resolve())
+    unsafe_roots.add(Path.cwd().resolve())
+    unsafe_roots.add(Path(__file__).resolve().parents[2])
+
+    trusted_roots: set[Path] = set()
+    for entry in sys.path:
+        if not entry:
+            continue
+        candidate = Path(entry).expanduser()
+        if not candidate.is_absolute():
+            continue
+        resolved = candidate.resolve()
+        if resolved in unsafe_roots:
+            continue
+        trusted_roots.add(resolved)
+    return trusted_roots
+
+
+_TRUSTED_SYS_PATH_ROOTS = tuple(_trusted_sys_path_roots())
 
 
 def _is_diagnostic_python_override(candidate: Path) -> bool:
@@ -473,9 +493,16 @@ def _runtime_python_path() -> Path:
             if not shebang.startswith("#!"):
                 return _python_sibling(entry)
             shebang_parts = shebang[2:].strip().split()
-            if len(shebang_parts) >= 1 and not Path(shebang_parts[0]).name.startswith(
+            if len(shebang_parts) >= 1 and Path(shebang_parts[0]).name.startswith(
                 "env"
             ):
+                process_exe = Path(process.exe()).absolute()
+                if process_exe.is_file() and process_exe.name.lower().startswith(
+                    "python"
+                ):
+                    return process_exe
+                return _python_sibling(entry)
+            if shebang_parts:
                 interpreter = Path(shebang_parts[0]).absolute()
                 if interpreter.is_file() and interpreter.name.lower().startswith(
                     "python"
