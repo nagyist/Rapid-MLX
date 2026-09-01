@@ -430,18 +430,30 @@ def _is_diagnostic_python_override(candidate: Path) -> bool:
     return True
 
 
-def _is_trusted_runtime_executable(runtime: Path) -> bool:
-    """Restrict automatic execution to independently trusted layouts."""
+def _filesystem_runtime_has_rapid_mlx_distribution(runtime: Path) -> bool:
+    """Validate a runtime's Rapid-MLX install without executing it."""
+    runtime = runtime.absolute()
     if _bundled_sidecar_root(runtime) is not None:
         return True
-    home = Path.home().resolve()
-    managed_roots = (
-        home / ".rapid-mlx",
-        home / ".rapid-mlx-python",
-        Path(__file__).resolve().parents[2],
-    )
-    runtime = runtime.absolute()
-    return any(runtime == root or root in runtime.parents for root in managed_roots)
+    for parent in (runtime.parent, *runtime.parents):
+        candidates = [
+            *parent.glob("lib/python3.*/site-packages"),
+            *parent.glob("lib/python3/dist-packages"),
+            *parent.glob("lib/site-packages"),
+            *parent.glob("site-packages"),
+        ]
+        for site_root in candidates:
+            package_root = site_root / "vllm_mlx"
+            if not (package_root / "cli.py").is_file():
+                continue
+            if any(site_root.glob("rapid_mlx-*.dist-info")):
+                return True
+    return False
+
+
+def _is_trusted_runtime_executable(runtime: Path) -> bool:
+    """Authenticate a candidate before doctor executes any probe."""
+    return _filesystem_runtime_has_rapid_mlx_distribution(runtime)
 
 
 def _runtime_python_path() -> Path:

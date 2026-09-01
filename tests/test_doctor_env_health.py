@@ -194,7 +194,11 @@ def allow_rapid_mlx_module_servers(monkeypatch):
         "_runtime_has_rapid_mlx_distribution",
         lambda runtime, cwd, env: True,
     )
-    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: True)
+    monkeypatch.setattr(
+        eh,
+        "_filesystem_runtime_has_rapid_mlx_distribution",
+        lambda runtime: True,
+    )
 
 
 def test_stopped_runtime_override_accepts_system_python_and_resolves_relative_path(
@@ -212,6 +216,35 @@ def test_stopped_runtime_override_accepts_system_python_and_resolves_relative_pa
 
     assert eh._is_diagnostic_python_override(system_runtime)
     assert eh._runtime_python_path() == relative_runtime.resolve()
+
+
+def test_runtime_authentication_uses_filesystem_distribution_without_launch(tmp_path):
+    runtime = tmp_path / "arbitrary-venv" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("")
+    site_root = (
+        runtime.parent.parent
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    package_root = site_root / "vllm_mlx"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("")
+    (package_root / "cli.py").write_text("from vllm_mlx.server import app\n")
+    (site_root / "rapid_mlx-0.0.0.dist-info").mkdir()
+    (site_root / "rapid_mlx-0.0.0.dist-info" / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: rapid-mlx\nVersion: 0.0.0\n"
+    )
+
+    assert eh._filesystem_runtime_has_rapid_mlx_distribution(runtime) is True
+    assert eh._is_trusted_runtime_executable(runtime) is True
+
+    untrusted_runtime = tmp_path / "not-rapid-mlx" / "bin" / "python"
+    untrusted_runtime.parent.mkdir(parents=True)
+    untrusted_runtime.write_text("")
+
+    assert eh._is_trusted_runtime_executable(untrusted_runtime) is False
 
 
 def test_module_server_runtime_must_register_rapid_mlx_distribution(tmp_path):
