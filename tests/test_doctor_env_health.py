@@ -531,7 +531,7 @@ def test_signed_sidecar_required_dependency_gets_safe_repair(tmp_path):
         section = eh.section_required_packages()
 
     row = next(c for c in section.checks if c.label.startswith("transformers"))
-    assert row.status is eh.CheckStatus.FAIL
+    assert row.status is eh.CheckStatus.WARN
     assert "reinstall Rapid-MLX Desktop.app" in row.label
     assert "pip install" not in row.label
     assert "-m pip" not in row.label
@@ -933,6 +933,55 @@ def test_stopped_runtime_override_preserves_venv_executable_symlink(
 
     assert selected == override_runtime
     assert selected != override_runtime.resolve()
+
+
+def test_local_import_rejects_source_tree_shadow_module(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delitem(sys.modules, "transformers", raising=False)
+    shadow = tmp_path / "transformers.py"
+    shadow.write_text("raise AssertionError('doctor executed a shadow module')\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    assert eh._module_origin_is_trusted("transformers") is False
+    assert not eh._module_available("transformers", real_import=True)
+
+
+def test_local_pillow_probe_rejects_source_tree_shadow_module(
+    tmp_path,
+    monkeypatch,
+):
+    shadow = tmp_path / "PIL"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("")
+    (shadow / "Image.py").write_text(
+        "raise AssertionError('doctor executed a Pillow shadow module')\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    saved_modules = {name: sys.modules.get(name) for name in ("PIL", "PIL.Image")}
+    try:
+        for name in saved_modules:
+            sys.modules.pop(name, None)
+        assert eh._module_origin_is_trusted("PIL.Image") is False
+        assert not eh._pil_importable()
+    finally:
+        for name, module in saved_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+def test_runtime_import_probe_rejects_non_object_json(tmp_path):
+    runtime = tmp_path / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\nprintf '[]\\n'\n")
+    runtime.chmod(0o755)
+    eh._RUNTIME_IMPORT_CACHE.clear()
+
+    assert not eh._runtime_module_importable(runtime, "transformers", None)
 
 
 def test_unrelated_vllm_mlx_module_server_is_not_selected(

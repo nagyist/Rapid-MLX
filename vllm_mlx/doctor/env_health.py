@@ -33,6 +33,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import sysconfig
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -386,15 +387,18 @@ def _module_origin_is_trusted(module: str) -> bool:
         locations.extend(
             Path(location) for location in spec.submodule_search_locations or []
         )
-        project_root = Path(__file__).resolve().parents[2]
+        purelib = sysconfig.get_path("purelib")
+        platlib = sysconfig.get_path("platlib")
         trusted_roots = {
-            Path(sys.prefix).resolve(),
-            Path(sys.base_prefix).resolve(),
-            project_root,
+            Path(purelib).resolve() if purelib else None,
+            Path(platlib).resolve() if platlib else None,
         }
+        trusted_roots.discard(None)
         sidecar_root = _bundled_sidecar_root()
         if sidecar_root is not None:
             trusted_roots.add(sidecar_root.resolve())
+        vllm_mlx_source = Path(__file__).resolve().parents[1]
+        trusted_roots.add(vllm_mlx_source)
         return any(
             location.resolve().is_relative_to(trusted_root)
             for location in locations
@@ -776,7 +780,10 @@ def _runtime_module_importable(
             check=True,
         )
         result_json = json.loads(result.stdout)
-        importable = bool(result_json.get("importable"))
+        if not isinstance(result_json, dict):
+            importable = False
+        else:
+            importable = bool(result_json.get("importable"))
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
         importable = False
     _RUNTIME_IMPORT_CACHE[cache_key] = importable
@@ -1445,6 +1452,8 @@ def _pil_importable(
         )
 
     try:
+        if not _module_origin_is_trusted("PIL.Image"):
+            return False
         from PIL import Image
 
         # Force the native ``_imaging`` backend to actually initialise — a
@@ -1569,7 +1578,7 @@ def section_required_packages() -> Section:
                 s.add(
                     f"{label} {ver} is visible but importability cannot be "
                     "verified safely",
-                    CheckStatus.FAIL,
+                    CheckStatus.WARN,
                     detail=(
                         f"distribution={dist} version={ver} "
                         f"module={_DISTRIBUTION_MODULES[dist]} "
@@ -1594,7 +1603,7 @@ def section_required_packages() -> Section:
                 )
                 s.add(
                     f"{label} not installed in {runtime} — run `{repair}`",
-                    CheckStatus.FAIL,
+                    CheckStatus.WARN if sidecar_hint else CheckStatus.FAIL,
                     detail=(f"distribution={dist} missing runtime={runtime}"),
                 )
                 continue
