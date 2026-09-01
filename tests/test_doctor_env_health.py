@@ -194,6 +194,7 @@ def allow_rapid_mlx_module_servers(monkeypatch):
         "_runtime_has_rapid_mlx_distribution",
         lambda runtime, cwd, env: True,
     )
+    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: True)
 
 
 def test_stopped_runtime_override_accepts_system_python_and_resolves_relative_path(
@@ -865,7 +866,7 @@ def test_doctor_follows_the_running_server_runtime(
     packages = eh.section_required_packages()
 
     runtime_row = next(
-        c for c in python_section.checks if "Active server runtime" in c.label
+        c for c in python_section.checks if "Selected diagnostic runtime" in c.label
     )
     transformers_row = next(
         c for c in packages.checks if c.label.startswith("transformers")
@@ -1156,7 +1157,7 @@ def test_module_command_accepts_python_value_flags_before_dash_m(
     assert eh._runtime_python_path() == doctor_exe.absolute()
 
 
-def test_arbitrary_installed_server_interpreter_is_selected(
+def test_arbitrary_server_interpreter_requires_explicit_override(
     tmp_path,
     monkeypatch,
     allow_rapid_mlx_module_servers,
@@ -1167,6 +1168,7 @@ def test_arbitrary_installed_server_interpreter_is_selected(
     arbitrary_runtime = tmp_path / "uv" / "bin" / "python"
     arbitrary_runtime.parent.mkdir(parents=True)
     arbitrary_runtime.write_text("")
+    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: False)
 
     class FakeProcess:
         def __init__(self):
@@ -1202,8 +1204,8 @@ def test_arbitrary_installed_server_interpreter_is_selected(
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
 
-    assert eh._runtime_python_path() == arbitrary_runtime.absolute()
-    assert eh._SELECTED_SERVER_RUNTIME is True
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+    assert eh._SELECTED_SERVER_RUNTIME is False
 
 
 def test_running_server_same_interpreter_is_still_server_context(
@@ -1683,6 +1685,40 @@ def test_timed_out_required_import_is_unknown_not_failed(
     assert "importability unknown" in row.label
 
 
+def test_timeout_during_visibility_is_unknown_not_failed(
+    tmp_path,
+    monkeypatch,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = tmp_path / "server-runtime" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    report = {
+        "executable": str(runtime),
+        "prefix": str(tmp_path),
+        "base_prefix": str(tmp_path),
+        "path": [],
+        "packages": {},
+    }
+
+    def time_out_during_visibility(dist, runtime=None):
+        eh._RUNTIME_IMPORT_TIMEOUTS.add((runtime, "transformers", "", False))
+        return False, False
+
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+    monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
+    monkeypatch.setattr(eh, "_probe_runtime", lambda *args, **kwargs: report)
+    monkeypatch.setattr(eh, "_safe_version", lambda dist, runtime=None: "5.12.1")
+    monkeypatch.setattr(eh, "_module_visibility", time_out_during_visibility)
+
+    section = eh.section_required_packages()
+
+    row = next(check for check in section.checks if "transformers" in check.label)
+    assert row.status is eh.CheckStatus.WARN
+    assert "importability unknown" in row.label
+
+
 def test_unrelated_vllm_mlx_module_server_is_not_selected(
     tmp_path,
     monkeypatch,
@@ -1786,7 +1822,9 @@ def test_unrelated_process_with_similar_arguments_is_not_a_server(
     monkeypatch.setenv("RAPID_MLX_RUNTIME_PYTHON", str(override_runtime))
 
     section = eh.section_python()
-    runtime_row = next(c for c in section.checks if "Active server runtime" in c.label)
+    runtime_row = next(
+        c for c in section.checks if "Selected diagnostic runtime" in c.label
+    )
 
     assert str(override_runtime) in runtime_row.detail
     assert "system environment" in runtime_row.label
@@ -2187,7 +2225,9 @@ def test_remote_system_runtime_is_not_mislabeled_as_a_virtual_environment(
     monkeypatch.setenv("RAPID_MLX_RUNTIME_PYTHON", str(runtime))
 
     section = eh.section_python()
-    runtime_row = next(c for c in section.checks if "Active server runtime" in c.label)
+    runtime_row = next(
+        c for c in section.checks if "Selected diagnostic runtime" in c.label
+    )
 
     assert "system environment" in runtime_row.label
 

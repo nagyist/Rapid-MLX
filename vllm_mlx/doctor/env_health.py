@@ -430,6 +430,20 @@ def _is_diagnostic_python_override(candidate: Path) -> bool:
     return True
 
 
+def _is_trusted_runtime_executable(runtime: Path) -> bool:
+    """Restrict automatic execution to independently trusted layouts."""
+    if _bundled_sidecar_root(runtime) is not None:
+        return True
+    home = Path.home().resolve()
+    managed_roots = (
+        home / ".rapid-mlx",
+        home / ".rapid-mlx-python",
+        Path(__file__).resolve().parents[2],
+    )
+    runtime = runtime.absolute()
+    return any(runtime == root or root in runtime.parents for root in managed_roots)
+
+
 def _runtime_python_path() -> Path:
     """Return the authoritative Python executable for runtime checks.
 
@@ -605,6 +619,7 @@ def _runtime_python_path() -> Path:
                 not candidate.is_absolute()
                 or not candidate.is_file()
                 or not candidate.name.lower().startswith("python")
+                or not _is_trusted_runtime_executable(candidate)
             ):
                 return None
             if not _runtime_has_rapid_mlx_distribution(
@@ -1437,6 +1452,11 @@ def section_python() -> Section:
 
     selected_runtime, server_runtime_selected = _selected_runtime()
     server_differs = server_runtime_selected or selected_runtime != exe
+    runtime_noun = (
+        "Active server runtime"
+        if server_runtime_selected
+        else "Selected diagnostic runtime"
+    )
     runtime_probe = (
         _probe_runtime(selected_runtime, _bundled_sidecar_root(selected_runtime))
         if server_differs
@@ -1460,7 +1480,7 @@ def section_python() -> Section:
                 Path(str(selected_base_prefix)),
             )
             label = (
-                "Active server runtime differs from the doctor CLI; "
+                f"{runtime_noun} differs from the doctor CLI; "
                 f"package checks use {selected_kind}"
             )
             detail += (
@@ -1470,8 +1490,7 @@ def section_python() -> Section:
             )
         else:
             label = (
-                "Active server runtime differs from the doctor CLI and could "
-                "not be inspected"
+                f"{runtime_noun} differs from the doctor CLI and could not be inspected"
             )
             detail += (
                 f"; server_runtime={selected_runtime}; "
@@ -1757,6 +1776,13 @@ def section_required_packages() -> Section:
                 dist,
                 runtime if _runtime_uses_context(runtime) else None,
             )
+            if _import_probe_was_interrupted(runtime, module, sidecar_root):
+                s.add(
+                    f"{label} {ver} importability unknown — doctor probe timed out",
+                    CheckStatus.WARN,
+                    detail=f"distribution={dist} module={module} timeout=true",
+                )
+                continue
             if not visible:
                 s.add(
                     f"{label} {ver} has broken metadata or cannot import in "
@@ -1804,6 +1830,13 @@ def section_required_packages() -> Section:
                 dist,
                 runtime if _runtime_uses_context(runtime) else None,
             )
+            if _import_probe_was_interrupted(runtime, module, sidecar_root):
+                s.add(
+                    f"{label} importability unknown — doctor probe timed out",
+                    CheckStatus.WARN,
+                    detail=f"distribution={dist} module={module} timeout=true",
+                )
+                continue
             if not visible:
                 repair = sidecar_hint or _runtime_pip_command(
                     "rapid-mlx", runtime=runtime
@@ -2081,6 +2114,13 @@ def section_optional_packages() -> Section:
                 dist,
                 runtime if _runtime_uses_context(runtime) else None,
             )
+            if _import_probe_was_interrupted(runtime, module, sidecar_root):
+                s.add(
+                    f"{label} importability unknown — doctor probe timed out",
+                    CheckStatus.WARN,
+                    detail=f"distribution={dist} module={module} timeout=true",
+                )
+                continue
             if not visible:
                 s.add(
                     f"{label} not installed (`{hint}`)",
