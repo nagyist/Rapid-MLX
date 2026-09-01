@@ -34,6 +34,7 @@ import socket
 import subprocess
 import sys
 import sysconfig
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -240,6 +241,8 @@ _RUNTIME_OVERRIDE_REPAIR_HINT_TEMPLATE = (
     "replaces it — install the current Rapid-MLX Desktop.app (its DMG ships a "
     "sidecar), then remove {root} and relaunch so the bundled sidecar is used"
 )
+_DOCTOR_BUDGET_S = 5.0
+_DOCTOR_DEADLINE: float | None = None
 _RUNTIME_CONTEXTS: dict[Path, tuple[Path, dict[str, str]]] = {}
 _RUNTIME_DISTRIBUTION_CACHE: dict[Path, bool] = {}
 
@@ -319,12 +322,9 @@ def _runtime_environment(
         return "desktop sidecar"
     home = Path.home()
     application_bin = home / ".rapid-mlx" / "bin"
-    application_exe = (application_bin / "python").resolve()
-    application_python3 = (application_bin / "python3").resolve()
     runtime_root = (home / ".rapid-mlx-python").resolve()
     if (
         exe in {application_bin / "python", application_bin / "python3"}
-        or exe in {application_exe, application_python3}
         or exe.parent == application_bin
     ):
         return "Rapid-MLX application environment"
@@ -752,6 +752,13 @@ _RUNTIME_IMPORT_CACHE: dict[
 ] = {}
 
 
+def _bounded_timeout(default_s: float) -> float:
+    """Return the remaining doctor budget without yielding a zero timeout."""
+    if _DOCTOR_DEADLINE is None:
+        return default_s
+    return max(0.05, _DOCTOR_DEADLINE - time.monotonic())
+
+
 def _probe_package(
     probe: dict[str, object],
     distribution: str,
@@ -813,7 +820,7 @@ def _runtime_module_importable(
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_bounded_timeout(10),
             env={
                 "HOME": os.environ.get("HOME", str(Path.home())),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -871,7 +878,7 @@ def _probe_runtime(
             ],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=_bounded_timeout(20),
             env=env,
             cwd="/",
             check=True,
@@ -1938,7 +1945,11 @@ def section_optional_packages() -> Section:
         if runtime != Path(sys.executable).absolute()
         else _safe_version("mlx-vlm")
     )
-    if vlm_ver and _version_at_least(vlm_ver, dflash_min):
+    if (
+        vlm_ver
+        and _version_supported("mlx-vlm", vlm_ver)
+        and _version_at_least(vlm_ver, dflash_min)
+    ):
         # #1126: same PIL honesty as the vision row — a version-adequate
         # mlx-vlm whose Pillow dep is missing can't actually run the
         # dflash/vision runtime, so don't paint it green.
@@ -1978,8 +1989,9 @@ def section_optional_packages() -> Section:
     else:
         current = vlm_ver or "not installed"
         s.add(
-            f"mlx-vlm 0.5.0+ (dflash extras) not installed or too old "
-            f"(current: {current}, need: 0.5.0+)",
+            f"mlx-vlm 0.5.0+ (dflash extras) not installed, too old, or "
+            f"incompatible (current: {current}, need: 0.5.0+ and "
+            f"{_SUPPORTED_VERSIONS['mlx-vlm']})",
             CheckStatus.WARN,
             detail=dflash_hint,
         )
@@ -2494,16 +2506,21 @@ def run_all() -> Report:
     report as a single ✗ row labelled with the exception class — that's
     still a useful signal ("doctor is broken, file a bug").
     """
+    global _DOCTOR_DEADLINE
     report = Report()
-    for builder in _SECTION_BUILDERS:
-        try:
-            report.sections.append(builder())
-        except Exception as e:  # noqa: BLE001 — see docstring above
-            crashed = Section(builder.__name__.replace("section_", "").title())
-            crashed.add(
-                f"probe crashed: {type(e).__name__}: {e}",
-                CheckStatus.FAIL,
-                detail=f"{type(e).__module__}.{type(e).__name__}: {e}",
-            )
-            report.sections.append(crashed)
+    try:
+        _DOCTOR_DEADLINE = time.monotonic() + _DOCTOR_BUDGET_S
+        for builder in _SECTION_BUILDERS:
+            try:
+                report.sections.append(builder())
+            except Exception as e:  # noqa: BLE001 — see docstring above
+                crashed = Section(builder.__name__.replace("section_", "").title())
+                crashed.add(
+                    f"probe crashed: {type(e).__name__}: {e}",
+                    CheckStatus.FAIL,
+                    detail=f"{type(e).__module__}.{type(e).__name__}: {e}",
+                )
+                report.sections.append(crashed)
+    finally:
+        _DOCTOR_DEADLINE = None
     return report

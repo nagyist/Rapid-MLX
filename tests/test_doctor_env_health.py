@@ -160,6 +160,26 @@ def test_python_section_does_not_trust_symlink_target_directory(tmp_path, monkey
     assert kind == "virtual environment"
 
 
+def test_python_section_does_not_classify_base_target_as_application(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    application_prefix = home / ".rapid-mlx"
+    application_bin = application_prefix / "bin"
+    application_bin.mkdir(parents=True)
+    base_runtime = tmp_path / "base" / "bin" / "python3"
+    base_runtime.parent.mkdir(parents=True)
+    base_runtime.write_text("")
+    (application_bin / "python3").symlink_to(base_runtime)
+    monkeypatch.setattr(eh.Path, "home", lambda: home)
+    monkeypatch.setattr(eh.sys, "executable", str(base_runtime))
+    monkeypatch.setattr(eh.sys, "prefix", str(application_prefix))
+
+    kind = eh._runtime_environment(base_runtime.absolute(), Path(application_prefix))
+
+    assert kind != "Rapid-MLX application environment"
+
+
 @pytest.fixture(name="allow_rapid_mlx_module_servers")
 def allow_rapid_mlx_module_servers(monkeypatch):
     monkeypatch.setattr(
@@ -2083,6 +2103,38 @@ def test_compatible_mlx_vlm_is_accepted():
 
     row = next(c for c in section.checks if c.label.startswith("mlx-vlm (vision"))
     assert row.status is eh.CheckStatus.OK
+
+
+def test_incompatible_mlx_vlm_does_not_mark_dflash_ok():
+    def fake_ver(dist: str, runtime=None) -> str | None:
+        return "0.7.1" if dist == "mlx-vlm" else None
+
+    with (
+        mock.patch.object(eh, "_safe_version", side_effect=fake_ver),
+        mock.patch.object(eh, "_pil_importable", return_value=True),
+    ):
+        section = eh.section_optional_packages()
+
+    dflash_row = next(c for c in section.checks if "dflash" in c.label)
+    assert dflash_row.status is not eh.CheckStatus.OK
+    assert "incompatible" in dflash_row.label
+
+
+def test_run_all_bounds_remote_probe_budget_and_clears_deadline(monkeypatch):
+    seen_deadlines = []
+
+    def inspect_deadline():
+        seen_deadlines.append(eh._DOCTOR_DEADLINE)
+        return eh.Section("Test")
+
+    monkeypatch.setattr(eh, "_SECTION_BUILDERS", (inspect_deadline,))
+
+    report = eh.run_all()
+
+    assert report.sections[0].title == "Test"
+    assert len(seen_deadlines) == 1
+    assert seen_deadlines[0] is not None
+    assert eh._DOCTOR_DEADLINE is None
 
 
 def test_signed_sidecar_receives_no_pip_remediation(tmp_path):
