@@ -372,7 +372,7 @@ def _module_available(
         return _iu.find_spec(module) is not None
     except (ImportError, AttributeError, ValueError):
         return False
-    except Exception:
+    except (Exception, SystemExit):
         return False
 
 
@@ -607,7 +607,7 @@ def _runtime_python_path() -> Path:
             )
             _RUNTIME_CONTEXTS[selected] = (selected_cwd, selected_env)
             return selected
-    except Exception:
+    except (Exception, SystemExit):
         pass
 
     override = os.environ.get("RAPID_MLX_RUNTIME_PYTHON", "").strip()
@@ -1538,11 +1538,6 @@ def section_required_packages() -> Section:
     runtime = _runtime_python_path()
     sidecar_root = _bundled_sidecar_root(runtime)
     sidecar_hint = _sidecar_repair_hint(sidecar_root) if sidecar_root else None
-    required_packages = {
-        dist: module
-        for dist, module in _DISTRIBUTION_MODULES.items()
-        if dist in {required_dist for required_dist, _ in REQUIRED_PACKAGES}
-    }
     runtime_probe = (
         _probe_runtime(
             runtime,
@@ -1751,17 +1746,6 @@ def section_optional_packages() -> Section:
     bundled = sidecar_root is not None
     audio_contract = _AUDIO_DESKTOP_IMPORTS if bundled else _AUDIO_IMPORTS
     repair_hint = _sidecar_repair_hint(sidecar_root) if sidecar_root else None
-    optional_packages = {
-        dist: module
-        for dist, module in _DISTRIBUTION_MODULES.items()
-        if dist in {optional_dist for optional_dist, _, _ in OPTIONAL_PACKAGES}
-    }
-    optional_packages["pillow"] = "PIL"
-    module_to_distribution = {
-        module: dist for dist, module in _DISTRIBUTION_MODULES.items()
-    }
-    for _, module in audio_contract:
-        optional_packages[module_to_distribution.get(module, module)] = module
     runtime_probe = (
         _probe_runtime(
             runtime,

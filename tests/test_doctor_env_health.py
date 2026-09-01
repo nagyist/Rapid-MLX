@@ -562,6 +562,27 @@ def test_local_import_health_check_ignores_untrusted_shadow_modules(
     assert not eh._module_available("doctor_untrusted_shadow_probe", real_import=True)
 
 
+def test_local_import_health_check_catches_system_exit(monkeypatch):
+    monkeypatch.setattr(eh, "_module_origin_is_trusted", lambda _module: True)
+    monkeypatch.setattr(
+        eh.importlib,
+        "import_module",
+        mock.Mock(side_effect=SystemExit(2)),
+    )
+
+    assert not eh._module_available("damaged_dependency", real_import=True)
+
+
+def test_local_pillow_probe_catches_system_exit(monkeypatch):
+    broken_image = SimpleNamespace(new=mock.Mock(side_effect=SystemExit(2)))
+    monkeypatch.setattr(eh, "_module_origin_is_trusted", lambda _module: True)
+    with mock.patch.dict(
+        eh.sys.modules,
+        {"PIL": SimpleNamespace(Image=broken_image)},
+    ):
+        assert not eh._pil_importable()
+
+
 def test_remediation_command_quotes_interpreter_and_requirements():
     runtime = Path("/tmp/space dir/bad'python")
 
