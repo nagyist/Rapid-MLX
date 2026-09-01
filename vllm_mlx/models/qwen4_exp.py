@@ -490,7 +490,10 @@ class GatedDeltaNet(nn.Module):
         # barrier would serialize decode and erase the fusion's benefit.
         # Custom-kernel outputs are fresh arrays, so constructing them cannot
         # mutate the live cache; commit their lazy graph only after dispatch
-        # construction succeeds.
+        # construction succeeds. A later command-buffer failure is a fatal
+        # generation error, not a retryable kernel-selection error: the
+        # scheduler closes the entire BatchGenerator and discards every
+        # affected request cache before any future step.
         cache[0] = conv_state
         cache[1] = recurrent_state
         cache.advance(1)

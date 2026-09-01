@@ -74,3 +74,18 @@ MLX_ENABLE_TF32=0 PYTHONPATH=. python \
 The environment flag remains disabled by default. Prefill, multi-request
 batching, ragged caches, and speculative rollback are explicit stock-path
 fallbacks rather than unqualified extensions of this result.
+
+## Failure lifecycle
+
+The capability probe compile-and-runs the exact BF16 kernel specialization
+before the fused path can be selected. Unsupported shapes and synchronous
+probe or dispatch failures leave the request cache untouched and use stock.
+A later Metal command-buffer failure is handled at Rapid's generation boundary:
+the scheduler aborts the affected running cohort, closes its `BatchGenerator`,
+drops the request-owned caches, and clears Metal state. It is not safe to retry
+that token against any partially executed model graph.
+
+Forcing `mx.eval` inside every GDN layer was rejected because it inserts a host
+synchronization boundary between sequential model layers and turns the optional
+fast path into a regression. The request lifecycle boundary preserves the
+engine's existing fatal-device-error semantics without serializing decode.
