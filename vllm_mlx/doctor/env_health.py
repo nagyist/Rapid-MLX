@@ -272,8 +272,7 @@ def _runtime_has_rapid_mlx_distribution(
     packaging metadata; it never imports the server or a user's module.
     """
     runtime = runtime.resolve()
-    context_roots = _context_root_paths(cwd, env)
-    cache_key = (runtime, tuple(context_roots))
+    cache_key = runtime
     if cache_key in _RUNTIME_DISTRIBUTION_CACHE:
         return _RUNTIME_DISTRIBUTION_CACHE[cache_key]
     if runtime == Path("/usr/bin/python3") and cwd != Path("/"):
@@ -290,10 +289,8 @@ def _runtime_has_rapid_mlx_distribution(
                 "-I",
                 "-c",
                 "import importlib.metadata, json, sys; "
-                "for root in json.loads(sys.argv[1]): sys.path.insert(0, root); "
                 "print(json.dumps(importlib.metadata.packages_distributions().get("
                 "'vllm_mlx', [])))",
-                json.dumps([str(root) for root in context_roots]),
             ],
             capture_output=True,
             text=True,
@@ -596,11 +593,11 @@ probe_paths = json.loads(sys.argv[2])
 trusted_roots = [root for root in probe_paths["trusted"] if root]
 for site_root in trusted_roots:
     sys.path.insert(0, site_root)
-metadata_roots = list(sys.path)
 baseline_roots = list(sys.path)
 for site_root in probe_paths["context"]:
     if site_root:
         sys.path.insert(0, site_root)
+metadata_roots = [*baseline_roots, *probe_paths["context"]]
 trusted_roots = [
     str(Path(root).resolve()) for root in [*trusted_roots, *baseline_roots]
 ]

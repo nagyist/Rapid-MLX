@@ -163,6 +163,54 @@ def test_runtime_validation_requires_system_python_to_register_distribution():
     )
 
 
+def test_runtime_validation_ignores_context_distribution_metadata(tmp_path):
+    context_root = tmp_path / "server-context"
+    dist_info = context_root / "rapid_mlx-999.fake.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: rapid-mlx\nVersion: 999.fake\n"
+    )
+    runtime = tmp_path / "runtime" / "bin" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text('#!/bin/sh\nexec /usr/bin/python3 "$@"\n')
+    runtime.chmod(0o755)
+
+    assert not eh._runtime_has_rapid_mlx_distribution(
+        runtime,
+        context_root,
+        {"PATH": "/usr/bin:/bin"},
+    )
+
+
+def test_remote_probe_reads_sanitized_context_metadata_without_trusting_imports(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = Path(sys.executable).resolve()
+    context_root = tmp_path / "server-context"
+    context_root.mkdir()
+    (context_root / "probe_metadata_module.py").write_text("probe_loaded = True\n")
+    dist_info = context_root / "transformers-5.12.1.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: transformers\nVersion: 5.12.1\n"
+    )
+    monkeypatch.setattr(eh, "_RUNTIME_CONTEXTS", {runtime: (context_root, {})})
+    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+
+    probe = eh._probe_runtime(
+        runtime,
+        packages={"transformers": "probe_metadata_module"},
+    )
+
+    assert probe is not None
+    package = cast("dict[str, object]", probe["packages"]["transformers"])
+    assert package["version"] == "5.12.1"
+    assert package["discoverable"] is True
+    assert package["trusted_origin"] is False
+    assert package["importable"] is False
+
+
 def test_apple_silicon_warn_on_non_arm64_mac():
     """Intel Mac should produce a WARN row, not a FAIL."""
     with (
