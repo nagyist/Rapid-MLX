@@ -1867,6 +1867,7 @@ class TestPrefillErrorCleanup:
 
         from vllm_mlx.mllm_batch_generator import MLLMBatchRequest
         from vllm_mlx.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
+        from vllm_mlx.request import RequestStatus
 
         mock_model = MagicMock()
         mock_processor = MagicMock()
@@ -1891,6 +1892,7 @@ class TestPrefillErrorCleanup:
             prompt="oversized prompt",
             num_prompt_tokens=7,
         )
+        scheduler.requests[req_id].status = RequestStatus.RUNNING
         scheduler.running[req_id] = scheduler.requests[req_id]
         scheduler.output_queues[req_id] = asyncio.Queue()
 

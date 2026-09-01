@@ -200,6 +200,7 @@ def test_mllm_failed_request_records_partial_work():
         num_prompt_tokens=17,
         num_output_tokens=2,
     )
+    request.status = RequestStatus.RUNNING
 
     scheduler._record_terminal_performance(request, "failed")
 
@@ -209,6 +210,21 @@ def test_mllm_failed_request_records_partial_work():
     assert performance.completion_tokens == 2
     assert performance.ttft_seconds_count == 1
     assert performance.decode_observations == 1
+
+
+def test_mllm_waiting_failure_records_no_unprocessed_prompt_tokens():
+    scheduler = _bare_scheduler()
+    request = MLLMRequest(
+        request_id="waiting-failure",
+        prompt="hello",
+        num_prompt_tokens=17,
+    )
+
+    scheduler._record_terminal_performance(request, "failed")
+
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_failed == 1
+    assert performance.prompt_tokens == 0
 
 
 def test_mllm_does_not_commit_success_when_later_response_fails():

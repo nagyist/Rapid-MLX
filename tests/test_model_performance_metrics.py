@@ -300,6 +300,22 @@ def test_scheduler_records_explicit_cancellation_once():
     assert scheduler.performance.snapshot().requests_cancelled == 1
 
 
+def test_waiting_cancellation_records_no_unprocessed_prompt_tokens():
+    from vllm_mlx.request import Request, SamplingParams
+
+    scheduler = _scheduler()
+    request = Request("waiting", "queued prompt", SamplingParams(max_tokens=8))
+    request.num_prompt_tokens = 5
+    scheduler.requests[request.request_id] = request
+    scheduler.waiting.append(request)
+
+    assert scheduler._do_abort_request(request.request_id) is True
+
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_cancelled == 1
+    assert performance.prompt_tokens == 0
+
+
 def test_scheduler_records_reconciled_orphan_cancellation():
     pytest.importorskip("mlx")
 

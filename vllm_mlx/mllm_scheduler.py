@@ -411,7 +411,7 @@ class MLLMScheduler:
             if outcome == "succeeded":
                 self.performance.record_success(
                     request.request_id,
-                    prompt_tokens=request.num_prompt_tokens,
+                    prompt_tokens=self.performance.prompt_tokens_for_request(request),
                     completion_tokens=request.num_output_tokens,
                     ttft_seconds=ttft,
                     decode_tokens_per_second=decode_rate,
@@ -420,7 +420,7 @@ class MLLMScheduler:
             elif outcome == "cancelled":
                 self.performance.record_cancelled(
                     request.request_id,
-                    prompt_tokens=request.num_prompt_tokens,
+                    prompt_tokens=self.performance.prompt_tokens_for_request(request),
                     completion_tokens=request.num_output_tokens,
                     ttft_seconds=ttft,
                     decode_tokens_per_second=decode_rate,
@@ -429,7 +429,7 @@ class MLLMScheduler:
             else:
                 self.performance.record_failure(
                     request.request_id,
-                    prompt_tokens=request.num_prompt_tokens,
+                    prompt_tokens=self.performance.prompt_tokens_for_request(request),
                     completion_tokens=request.num_output_tokens,
                     ttft_seconds=ttft,
                     decode_tokens_per_second=decode_rate,

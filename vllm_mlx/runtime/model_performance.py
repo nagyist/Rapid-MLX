@@ -22,7 +22,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
 
@@ -157,12 +157,20 @@ class ModelPerformanceLedger:
             return None
         return max(0.0, request.first_token_time - request.arrival_time)
 
+    @staticmethod
+    def prompt_tokens_for_request(request: Any) -> int:
+        """Return prompt work attributable to the model for this lifetime."""
+        status = getattr(request, "status", None)
+        if getattr(status, "name", None) == "WAITING":
+            return 0
+        return int(request.num_prompt_tokens)
+
     def record_finished_performance(self, request: Request) -> None:
         """Best-effort performance accounting for a terminal response."""
         try:
             self.record_success(
                 request.request_id,
-                prompt_tokens=request.num_prompt_tokens,
+                prompt_tokens=self.prompt_tokens_for_request(request),
                 completion_tokens=request.num_output_tokens,
                 ttft_seconds=self.ttft_for_request(request),
                 decode_tokens_per_second=self.decode_rate_for_request(request),
@@ -176,7 +184,7 @@ class ModelPerformanceLedger:
         try:
             self.record_cancelled(
                 request.request_id,
-                prompt_tokens=request.num_prompt_tokens,
+                prompt_tokens=self.prompt_tokens_for_request(request),
                 completion_tokens=request.num_output_tokens,
                 ttft_seconds=self.ttft_for_request(request),
                 decode_tokens_per_second=self.decode_rate_for_request(request),
@@ -277,7 +285,7 @@ class ModelPerformanceLedger:
         """Record one failed request lifetime, even when its ID is later reused."""
         return self.record_failure(
             request.request_id,
-            prompt_tokens=request.num_prompt_tokens,
+            prompt_tokens=self.prompt_tokens_for_request(request),
             completion_tokens=request.num_output_tokens,
             ttft_seconds=self.ttft_for_request(request),
             decode_tokens_per_second=self.decode_rate_for_request(request),
