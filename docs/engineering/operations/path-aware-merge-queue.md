@@ -155,8 +155,7 @@ The queue contract lives in `.mergify.yml`:
   authorization to mint a replacement if the provider only partially executes
   its actions. After clearing `dequeued`, the workflow reads the event history
   again; if a newer dequeue raced the removal, it restores the circuit breaker
-  and fails authorization instead of publishing success. Every head update
-  removes recovery state carried by the old head. Removing `dequeued` alone
+  and fails authorization instead of publishing success. Removing `dequeued` alone
   cannot reuse an earlier authorization. Do not manually manage either internal label, post a
   queue command, push an empty commit, or remove `dequeued` by itself. The
   provider does not expose a machine-readable dequeue-cause condition here, so
@@ -257,14 +256,14 @@ not a security boundary against a malicious maintainer.
    lanes. Then remove the applicable ready label from a queued test PR and
    verify it leaves the queue without merging.
 
-Every `synchronize` event removes ready and recovery labels carried by the old
-head before the updated head can be admitted. A delayed revocation first checks
-that the webhook head is still live and compares label-event times with that
-push's `updated_at` immediately before each individual deletion; it preserves
-labels deliberately applied while reviewing the new head. A new commit
-therefore requires fresh review and an explicit new authorization after its own
-required checks pass. The revocation workflow uses
-`pull_request_target` without checking out or executing pull-request code.
+A head update never mutates PR-scoped labels asynchronously. Authorization is a
+commit status, so the prior `merge-ready-head=success` remains attached only to
+the old SHA and cannot admit the new head. Visible ready and recovery labels may
+remain, but the queue stays blocked until a maintainer completes review and
+removes and re-applies the one ready label, creating a fresh authorization event
+for the new exact SHA. Avoiding asynchronous label deletion removes the race in
+which a delayed synchronize job could erase authorization deliberately applied
+to the newer head.
 
 Do not enable batching while strict up-to-date protection remains on, and do
 not weaken or remove any required context to make a batch move. A missing,
