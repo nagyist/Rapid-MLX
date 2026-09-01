@@ -33,7 +33,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -241,7 +240,7 @@ _RUNTIME_OVERRIDE_REPAIR_HINT_TEMPLATE = (
     "sidecar), then remove {root} and relaunch so the bundled sidecar is used"
 )
 _RUNTIME_CONTEXTS: dict[Path, tuple[Path, dict[str, str]]] = {}
-_RUNTIME_DISTRIBUTION_CACHE: dict[tuple[Path, tuple[Path, ...]], bool] = {}
+_RUNTIME_DISTRIBUTION_CACHE: dict[Path, bool] = {}
 
 
 def _context_root_paths(cwd: Path, env: dict[str, str]) -> list[Path]:
@@ -346,14 +345,12 @@ def _module_available(
     runtime: Path | None = None,
     *,
     real_import: bool = False,
-    packages: dict[str, str] | None = None,
 ) -> bool:
     """Return whether *module* is discoverable, without importing it."""
     if runtime is not None and runtime != Path(sys.executable).resolve():
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
-            packages=packages,
         )
         if not probe:
             return False
@@ -594,12 +591,12 @@ probe_paths = json.loads(sys.argv[2])
 trusted_roots = [root for root in probe_paths["trusted"] if root]
 for site_root in trusted_roots:
     sys.path.insert(0, site_root)
-baseline_roots = list(sys.path)
+module_trusted_roots = [*trusted_roots, *sys.path]
 for site_root in reversed(probe_paths["context"]):
     sys.path.insert(0, site_root)
-metadata_roots = [*baseline_roots, *probe_paths["context"]]
+metadata_roots = list(sys.path)
 trusted_roots = [
-    str(Path(root).resolve()) for root in [*trusted_roots, *baseline_roots]
+    str(Path(root).resolve()) for root in module_trusted_roots
 ]
 
 def _path_is_trusted(path):
@@ -666,13 +663,9 @@ print(json.dumps({
 """
 
 _RUNTIME_PACKAGES: dict[str, str] = dict(_DISTRIBUTION_MODULES)
+for _audio_dist, _audio_module in (*_AUDIO_IMPORTS, *_AUDIO_DESKTOP_IMPORTS):
+    _RUNTIME_PACKAGES.setdefault(_audio_dist, _audio_module)
 _RUNTIME_PROBE_CACHE: dict[Path, dict[str, object] | None] = {}
-_PROBE_RUNTIME_TOTAL_BUDGET_SECONDS = 20.0
-_PROBE_RUNTIME_DEADLINE: float | None = None
-_SECTION_PROBE_CACHE: dict[
-    tuple[Path, tuple[tuple[str, str], ...]],
-    dict[str, object] | None,
-] = {}
 
 
 def _probe_package(
@@ -704,36 +697,17 @@ def _probe_package_by_module(
 def _probe_runtime(
     runtime: Path,
     sidecar_root: Path | None = None,
-    packages: dict[str, str] | None = None,
 ) -> dict[str, object] | None:
     """Inspect one interpreter without importing the server runtime."""
-    selected_packages = packages or _RUNTIME_PACKAGES
     sanitized_context = tuple(_server_import_paths(runtime))
-    if packages is None:
-        cache_key = (
-            runtime,
-            sidecar_root.resolve() if sidecar_root else None,
-            sanitized_context,
-        )
-        cache = _RUNTIME_PROBE_CACHE
-    else:
-        cache_key = (
-            runtime,
-            sidecar_root.resolve() if sidecar_root else None,
-            sanitized_context,
-            tuple(sorted(selected_packages.items())),
-        )
-        cache = _SECTION_PROBE_CACHE
+    cache_key = (
+        runtime,
+        sidecar_root.resolve() if sidecar_root else None,
+        sanitized_context,
+    )
+    cache = _RUNTIME_PROBE_CACHE
     if cache_key in cache:
         return cache[cache_key]
-    global _PROBE_RUNTIME_DEADLINE
-    now = time.monotonic()
-    if _PROBE_RUNTIME_DEADLINE is None:
-        _PROBE_RUNTIME_DEADLINE = now + _PROBE_RUNTIME_TOTAL_BUDGET_SECONDS
-    timeout = _PROBE_RUNTIME_DEADLINE - now
-    if timeout <= 0:
-        cache[cache_key] = None
-        return None
     try:
         env = {
             "HOME": os.environ.get("HOME", str(Path.home())),
@@ -745,7 +719,7 @@ def _probe_runtime(
                 "-I",
                 "-c",
                 _PROBE_SCRIPT,
-                json.dumps(selected_packages),
+                json.dumps(_RUNTIME_PACKAGES),
                 json.dumps(
                     {
                         "trusted": [str(sidecar_root / "site-packages")]
@@ -759,7 +733,7 @@ def _probe_runtime(
             ],
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=20,
             env=env,
             cwd="/",
             check=True,
@@ -1248,14 +1222,12 @@ def section_python() -> Section:
 def _safe_version(
     dist: str,
     runtime: Path | None = None,
-    packages: dict[str, str] | None = None,
 ) -> str | None:
     runtime = runtime or Path(sys.executable).resolve()
     if runtime != Path(sys.executable).resolve():
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
-            packages=packages,
         )
         package = _probe_package(probe, dist) if probe else None
         if package is not None:
@@ -1271,7 +1243,6 @@ def _safe_version(
 def _visible_without_metadata(
     dist: str,
     runtime: Path | None = None,
-    packages: dict[str, str] | None = None,
 ) -> bool:
     """Whether this runtime can import *dist* despite missing dist metadata.
 
@@ -1285,14 +1256,13 @@ def _visible_without_metadata(
     if module is None:
         return False
     if runtime != Path(sys.executable).resolve():
-        return _module_visibility(dist, runtime, packages)[0]
+        return _module_visibility(dist, runtime)[0]
     return _module_available(module, real_import=True)
 
 
 def _module_visibility(
     dist: str,
     runtime: Path | None = None,
-    packages: dict[str, str] | None = None,
 ) -> tuple[bool, bool]:
     """Return (module visible, doctor verified a real import).
 
@@ -1305,7 +1275,6 @@ def _module_visibility(
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
-            packages=packages,
         )
         package = _probe_package(probe, dist) if probe else None
         if package is None:
@@ -1343,7 +1312,6 @@ def _runtime_pip_command(
 
 def _pil_importable(
     runtime: Path | None = None,
-    packages: dict[str, str] | None = None,
 ) -> bool:
     """Lightweight probe: does mlx-vlm's ``from PIL import Image`` actually
     work?
@@ -1369,7 +1337,6 @@ def _pil_importable(
         probe = _probe_runtime(
             runtime,
             _bundled_sidecar_root(runtime),
-            packages=packages,
         )
         if not probe:
             return False
@@ -1433,7 +1400,6 @@ def section_required_packages() -> Section:
         _probe_runtime(
             runtime,
             sidecar_root,
-            packages=required_packages,
         )
         if runtime != Path(sys.executable).resolve()
         else None
@@ -1451,7 +1417,7 @@ def section_required_packages() -> Section:
         return s
     for dist, label in REQUIRED_PACKAGES:
         ver = (
-            _safe_version(dist, runtime, required_packages)
+            _safe_version(dist, runtime)
             if runtime != Path(sys.executable).resolve()
             else _safe_version(dist)
         )
@@ -1485,7 +1451,6 @@ def section_required_packages() -> Section:
             visible, import_verified = _module_visibility(
                 dist,
                 runtime if runtime != Path(sys.executable).resolve() else None,
-                required_packages,
             )
             if not visible:
                 s.add(
@@ -1521,7 +1486,6 @@ def section_required_packages() -> Section:
             visible, import_verified = _module_visibility(
                 dist,
                 runtime if runtime != Path(sys.executable).resolve() else None,
-                required_packages,
             )
             if not visible:
                 repair = sidecar_hint or _runtime_pip_command(
@@ -1655,7 +1619,6 @@ def section_optional_packages() -> Section:
         _probe_runtime(
             runtime,
             sidecar_root,
-            packages=optional_packages,
         )
         if runtime != Path(sys.executable).resolve()
         else None
@@ -1681,7 +1644,7 @@ def section_optional_packages() -> Section:
             else _runtime_pip_command(install_hint, runtime=runtime)
         )
         ver = (
-            _safe_version(dist, runtime, optional_packages)
+            _safe_version(dist, runtime)
             if runtime != Path(sys.executable).resolve()
             else _safe_version(dist)
         )
@@ -1740,7 +1703,6 @@ def section_optional_packages() -> Section:
                     if not _module_available(
                         module,
                         runtime if runtime != Path(sys.executable).resolve() else None,
-                        packages=optional_packages,
                     )
                 ]
                 if missing:
@@ -1764,7 +1726,6 @@ def section_optional_packages() -> Section:
             # gap so the user fixes the right thing.
             if dist == "mlx-vlm" and not _pil_importable(
                 runtime if runtime != Path(sys.executable).resolve() else None,
-                optional_packages,
             ):
                 s.add(
                     f"{label} {ver} present but Pillow (PIL) missing or "
@@ -1779,7 +1740,6 @@ def section_optional_packages() -> Section:
             visible, import_verified = _module_visibility(
                 dist,
                 runtime if runtime != Path(sys.executable).resolve() else None,
-                optional_packages,
             )
             if not visible or not import_verified:
                 s.add(
@@ -1799,7 +1759,7 @@ def section_optional_packages() -> Section:
                 detail=f"distribution={dist} version={ver}",
             )
         elif (
-            _visible_without_metadata(dist, runtime, optional_packages)
+            _visible_without_metadata(dist, runtime)
             if runtime != Path(sys.executable).resolve()
             else _visible_without_metadata(dist)
         ):
@@ -1838,7 +1798,7 @@ def section_optional_packages() -> Section:
         "rapid-mlx[vision]", runtime=runtime
     )
     vlm_ver = (
-        _safe_version("mlx-vlm", runtime, optional_packages)
+        _safe_version("mlx-vlm", runtime)
         if runtime != Path(sys.executable).resolve()
         else _safe_version("mlx-vlm")
     )
@@ -1848,7 +1808,6 @@ def section_optional_packages() -> Section:
         # dflash/vision runtime, so don't paint it green.
         if not _pil_importable(
             runtime if runtime != Path(sys.executable).resolve() else None,
-            optional_packages,
         ):
             s.add(
                 "mlx-vlm 0.5.0+ (dflash extras) present but Pillow (PIL) "
@@ -1863,7 +1822,6 @@ def section_optional_packages() -> Section:
             _, vlm_verified = _module_visibility(
                 "mlx-vlm",
                 runtime if runtime != Path(sys.executable).resolve() else None,
-                optional_packages,
             )
             if not vlm_verified:
                 s.add(

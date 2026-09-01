@@ -24,7 +24,6 @@ import plistlib
 import shlex
 import subprocess
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -40,7 +39,6 @@ from vllm_mlx.doctor import env_health as eh
 
 @pytest.fixture(autouse=True)
 def clean_runtime_probe_state(monkeypatch):
-    monkeypatch.setattr(eh, "_PROBE_RUNTIME_DEADLINE", None)
     monkeypatch.setitem(sys.modules, "psutil", None)
     yield
     eh._RUNTIME_PROBE_CACHE.clear()
@@ -198,11 +196,12 @@ def test_remote_probe_reads_sanitized_context_metadata_without_trusting_imports(
         "Metadata-Version: 2.1\nName: transformers\nVersion: 5.12.1\n"
     )
     monkeypatch.setattr(eh, "_RUNTIME_CONTEXTS", {runtime: (context_root, {})})
-    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+    monkeypatch.setattr(
+        eh, "_RUNTIME_PACKAGES", {"transformers": "probe_metadata_module"}
+    )
 
     probe = eh._probe_runtime(
         runtime,
-        packages={"transformers": "probe_metadata_module"},
     )
 
     assert probe is not None
@@ -228,24 +227,15 @@ def test_remote_probe_preserves_context_path_order(tmp_path, monkeypatch):
             )
         },
     )
-    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+    monkeypatch.setattr(eh, "_RUNTIME_PACKAGES", {"transformers": "probe_single_file"})
 
     probe = eh._probe_runtime(
         Path(sys.executable).resolve(),
-        packages={},
     )
 
     assert probe is not None
     path = cast("list[object]", probe["path"])
     assert path[:2] == [str(first_context.resolve()), str(second_context.resolve())]
-
-
-def test_remote_probe_enforces_single_global_budget(tmp_path, monkeypatch):
-    monkeypatch.setattr(eh, "_PROBE_RUNTIME_DEADLINE", time.monotonic())
-    monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
-    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
-
-    assert eh._probe_runtime(tmp_path / "missing-python") is None
 
 
 def test_apple_silicon_warn_on_non_arm64_mac():
@@ -1445,11 +1435,10 @@ def test_remote_probe_accepts_trusted_single_file_module(
     site_root.mkdir(parents=True)
     (site_root / "probe_single_file.py").write_text("probe_loaded = True\n")
     runtime = Path(sys.executable).resolve()
-    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+    monkeypatch.setattr(eh, "_RUNTIME_PACKAGES", {"transformers": "probe_single_file"})
     probe = eh._probe_runtime(
         runtime,
         sidecar_root=sidecar_root,
-        packages={"transformers": "probe_single_file"},
     )
 
     assert probe is not None
@@ -1516,10 +1505,11 @@ def test_context_module_without_metadata_is_visible_but_unverified(
     runtime.chmod(0o755)
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
     monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
-    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+    monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
 
     visible = eh._visible_without_metadata(
-        "transformers", runtime, {"transformers": "probe_context_module"}
+        "transformers",
+        runtime,
     )
 
     assert visible is True
@@ -1764,7 +1754,7 @@ def test_incomplete_audio_dependency_import_stack_marks_warning():
         mock.patch.object(
             eh,
             "_module_available",
-            side_effect=lambda module, _runtime=None, *, real_import=False, packages=None: (
+            side_effect=lambda module, _runtime=None, *, real_import=False: (
                 module != "f5_tts_mlx"
             ),
         ),
@@ -1891,7 +1881,7 @@ def test_bundled_sidecar_grades_audio_against_desktop_extra(tmp_path: Path):
         mock.patch.object(
             eh,
             "_module_available",
-            side_effect=lambda m, _runtime=None, *, real_import=False, packages=None: (
+            side_effect=lambda m, _runtime=None, *, real_import=False: (
                 m in desktop_modules
             ),
         ),
@@ -2043,9 +2033,7 @@ def test_runtime_override_broken_audio_row_uses_the_runtime_hint(tmp_path: Path)
         mock.patch.object(
             eh,
             "_module_available",
-            side_effect=lambda m, _runtime=None, *, real_import=False, packages=None: (
-                m != "soundfile"
-            ),
+            side_effect=lambda m, _runtime=None, *, real_import=False: m != "soundfile",
         ),
     ):
         section = eh.section_optional_packages()
@@ -2071,9 +2059,7 @@ def test_bundled_sidecar_still_flags_a_genuinely_broken_audio_install(
         mock.patch.object(
             eh,
             "_module_available",
-            side_effect=lambda m, _runtime=None, *, real_import=False, packages=None: (
-                m != "soundfile"
-            ),
+            side_effect=lambda m, _runtime=None, *, real_import=False: m != "soundfile",
         ),
     ):
         section = eh.section_optional_packages()
