@@ -24,6 +24,11 @@ import plistlib
 import shlex
 import subprocess
 import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 test matrix
+    import tomli as tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -62,6 +67,7 @@ def clean_runtime_probe_state(monkeypatch):
     yield
     eh._RUNTIME_PROBE_CACHE.clear()
     eh._RUNTIME_IMPORT_CACHE.clear()
+    eh._RUNTIME_DISTRIBUTION_CACHE.clear()
     eh._RUNTIME_CONTEXTS.clear()
 
 
@@ -200,6 +206,35 @@ def test_runtime_validation_ignores_context_distribution_metadata(tmp_path):
         context_root,
         {"PATH": "/usr/bin:/bin"},
     )
+
+
+def test_runtime_distribution_probe_preserves_venv_symlinks(tmp_path):
+    base_bin = tmp_path / "base" / "bin"
+    base_bin.mkdir(parents=True)
+    probe_script = base_bin / "python3"
+    probe_script.write_text(
+        '#!/bin/sh\ncase "$0" in *venv-a*) printf \'["rapid-mlx"]\\n\' ;; '
+        "*) printf '[]\\n' ;; esac\n"
+    )
+    probe_script.chmod(0o755)
+
+    venv_a = tmp_path / "venv-a" / "bin" / "python3"
+    venv_a.parent.mkdir(parents=True)
+    venv_a.symlink_to(probe_script)
+    venv_b = tmp_path / "venv-b" / "bin" / "python3"
+    venv_b.parent.mkdir(parents=True)
+    venv_b.symlink_to(probe_script)
+
+    assert eh._RUNTIME_DISTRIBUTION_CACHE == {}
+
+    assert eh._runtime_has_rapid_mlx_distribution(
+        venv_a, tmp_path, {"PATH": "/usr/bin:/bin"}
+    )
+    assert eh._RUNTIME_DISTRIBUTION_CACHE[venv_a] is True
+    assert not eh._runtime_has_rapid_mlx_distribution(
+        venv_b, tmp_path, {"PATH": "/usr/bin:/bin"}
+    )
+    assert eh._RUNTIME_DISTRIBUTION_CACHE[venv_b] is False
 
 
 def test_remote_probe_reads_sanitized_context_metadata_without_trusting_imports(
@@ -458,7 +493,7 @@ def test_runtime_compatibility_policy_matches_project():
         "mlx": ">=0.32.1,<0.33",
         "mlx-lm": ">=0.31.3,<0.32",
         "transformers": ">=5.0.0,!=5.13.0,<5.16",
-        "mlx-vlm": "==0.6.16",
+        "mlx-vlm": "==0.6.17",
     }
     policy = {
         requirement.name.lower(): str(requirement.specifier)
@@ -1874,6 +1909,13 @@ def test_remote_pillow_probe_rejects_a_module_that_cannot_import(tmp_path, monke
     monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
     monkeypatch.setattr(eh, "_runtime_python_path", lambda: runtime)
     monkeypatch.setattr(eh, "_bundled_sidecar_root", lambda _runtime=None: package_root)
+    monkeypatch.setattr(
+        eh,
+        "_safe_version",
+        lambda distribution, runtime=None: (
+            "0.6.17" if distribution == "mlx-vlm" else None
+        ),
+    )
 
     try:
         section = eh.section_optional_packages()
@@ -1942,7 +1984,7 @@ def test_incompatible_mlx_vlm_names_bounded_extension_repair(tmp_path):
         if c.label.startswith("mlx-vlm (vision") and "incompatible" in c.label
     )
     assert row.status is eh.CheckStatus.FAIL
-    assert "requires ==0.6.16" in row.label
+    assert "requires ==0.6.17" in row.label
     assert "rapid-mlx[vision]" in row.label
     assert "transformers>=5.0.0,!=5.13.0,<5.16" in row.label
     assert str(runtime.resolve()) in row.label
@@ -1950,7 +1992,7 @@ def test_incompatible_mlx_vlm_names_bounded_extension_repair(tmp_path):
 
 def test_compatible_mlx_vlm_is_accepted():
     def fake_ver(dist: str, runtime=None) -> str | None:
-        return "0.6.16" if dist == "mlx-vlm" else None
+        return "0.6.17" if dist == "mlx-vlm" else None
 
     with (
         mock.patch.object(eh, "_safe_version", side_effect=fake_ver),

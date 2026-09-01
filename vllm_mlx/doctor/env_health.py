@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
@@ -138,7 +138,7 @@ _SUPPORTED_VERSIONS: dict[str, str] = {
     "mlx": ">=0.32.1,<0.33",
     "mlx-lm": ">=0.31.3,<0.32",
     "transformers": ">=5.0.0,!=5.13.0,<5.16",
-    "mlx-vlm": "==0.6.16",
+    "mlx-vlm": "==0.6.17",
 }
 
 # Each tuple: (distribution, label, install hint). Missing optionals are ⚠
@@ -272,8 +272,7 @@ def _runtime_has_rapid_mlx_distribution(
     would also match an unrelated top-level module. This probe imports only
     packaging metadata; it never imports the server or a user's module.
     """
-    runtime = runtime.resolve()
-    cache_key = runtime
+    cache_key = runtime.absolute()
     if cache_key in _RUNTIME_DISTRIBUTION_CACHE:
         return _RUNTIME_DISTRIBUTION_CACHE[cache_key]
     if runtime == Path("/usr/bin/python3") and cwd != Path("/"):
@@ -284,7 +283,7 @@ def _runtime_has_rapid_mlx_distribution(
         ):
             return True
     try:
-        result = subprocess.run(  # noqa: S603 — runtime path is resolved above
+        result = subprocess.run(  # noqa: S603 — runtime path is validated by caller
             [
                 str(runtime),
                 "-I",
@@ -327,7 +326,7 @@ def _runtime_environment(
         or exe.parent == application_exe.parent
     ):
         return "Rapid-MLX application environment"
-    effective_prefix = prefix or Path(sys.prefix).resolve()
+    effective_prefix = prefix if prefix is not None else Path(sys.prefix).resolve()
     effective_base_prefix = Path(
         base_prefix or getattr(sys, "base_prefix", sys.prefix)
     ).resolve()
@@ -505,7 +504,7 @@ def _runtime_python_path() -> Path:
                 interpreter = Path(found)
             return interpreter.absolute()
 
-        def _runtime_candidate(cmdline: list[str], process: object) -> Path | None:
+        def _runtime_candidate(cmdline: list[str], process: Any) -> Path | None:
             if hasattr(os, "getuid") and hasattr(process, "uids"):
                 try:
                     if process.uids().real != os.getuid():
@@ -695,7 +694,9 @@ print(json.dumps({
 _RUNTIME_PACKAGES: dict[str, str] = dict(_DISTRIBUTION_MODULES)
 for _audio_dist, _audio_module in (*_AUDIO_IMPORTS, *_AUDIO_DESKTOP_IMPORTS):
     _RUNTIME_PACKAGES.setdefault(_audio_dist, _audio_module)
-_RUNTIME_PROBE_CACHE: dict[Path, dict[str, object] | None] = {}
+_RUNTIME_PROBE_CACHE: dict[
+    tuple[Path, Path | None, tuple[Path, ...]], dict[str, object] | None
+] = {}
 _RUNTIME_IMPORT_SCRIPT = """\
 import importlib
 import importlib.util
@@ -2385,7 +2386,7 @@ def _agent_integrations(home: Path) -> list[tuple[str, Path, str | None]]:
         for root in cline_roots
     )
 
-    integrations = []
+    integrations: list[tuple[str, Path, str | None]] = []
     for name, path in configs:
         if not path.is_file():
             continue

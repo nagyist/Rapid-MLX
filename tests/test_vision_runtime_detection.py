@@ -360,7 +360,7 @@ def test_doctor_vision_row_not_ok_and_names_pil_when_pil_missing(monkeypatch):
     # mlx-vlm metadata present (Homebrew --no-deps), PIL not importable.
     def fake_safe_version(dist, runtime=None):
         if dist == "mlx-vlm":
-            return "0.6.16"
+            return "0.6.17"
         return None
 
     monkeypatch.setattr(env_health, "_safe_version", fake_safe_version)
@@ -402,7 +402,7 @@ def test_doctor_vision_row_ok_when_pil_present(monkeypatch):
 
     def fake_safe_version(dist, runtime=None):
         if dist == "mlx-vlm":
-            return "0.6.16"
+            return "0.6.17"
         return None
 
     monkeypatch.setattr(env_health, "_safe_version", fake_safe_version)
@@ -553,7 +553,7 @@ def test_doctor_vision_row_red_when_pillow_damaged(monkeypatch):
     from vllm_mlx.doctor.env_health import CheckStatus
 
     def fake_safe_version(dist, runtime=None):
-        return "0.6.16" if dist == "mlx-vlm" else None
+        return "0.6.17" if dist == "mlx-vlm" else None
 
     monkeypatch.setattr(env_health, "_safe_version", fake_safe_version)
     _simulate_pillow_damaged(monkeypatch)
