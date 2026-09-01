@@ -100,7 +100,35 @@ def test_ledger_records_outcomes_once_and_ignores_bad_values():
         decode_tokens_per_second=1,
     )
     assert not ledger.record_failure("success")
+    assert not ledger.record_cancelled(
+        "cancelled",
+        prompt_tokens=99,
+        completion_tokens=99,
+        ttft_seconds=99,
+        decode_tokens_per_second=99,
+    )
+    assert ledger.model_name == "model-a"
     assert ledger.snapshot().prompt_tokens == 12
+
+
+def test_ledger_ignores_unusable_timing_observations():
+    ledger = ModelPerformanceLedger("model-b")
+    ledger.record_success(
+        "invalid-timings",
+        prompt_tokens=1,
+        completion_tokens=2,
+        ttft_seconds=float("nan"),
+        decode_tokens_per_second=-5,
+    )
+
+    snapshot = ledger.snapshot()
+    assert snapshot.requests_succeeded == 1
+    assert snapshot.prompt_tokens == 1
+    assert snapshot.completion_tokens == 2
+    assert snapshot.ttft_seconds_count == 0
+    assert snapshot.decode_observations == 0
+    assert snapshot.ttft_seconds_max is None
+    assert snapshot.decode_tokens_per_second_max is None
 
 
 def test_ledger_histograms_are_cumulative_and_memory_bounded():
