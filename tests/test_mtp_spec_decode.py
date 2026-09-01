@@ -2837,6 +2837,67 @@ def test_generator_k3_restores_ssm_state_at_partial_accept_boundary():
     assert ssm.rollback_state is None
 
 
+def test_generator_legacy_ssm_snapshot_is_limited_to_one_token():
+    """The legacy tuple restores K=1 and fails closed for a K>1 rollback."""
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    class LegacySSMCache:
+        rollback_state = None
+
+        def __init__(self):
+            self.cache = [mx.array([0]), mx.array([0])]
+
+        def __getitem__(self, idx):
+            return self.cache[idx]
+
+        def __setitem__(self, idx, value):
+            self.cache[idx] = value
+
+        def is_trimmable(self):
+            return False
+
+    class LegacySnapshotModel(_MockedQwen35Model):
+        def __init__(self, *, max_k):
+            super().__init__([7, 99, 0, 0, 0], list(range(11, 11 + max_k)))
+            self.layers = [object()]
+
+        def __call__(self, inputs, cache=None, **kwargs):
+            result = super().__call__(inputs, cache=cache, **kwargs)
+            if cache and inputs.shape[1] > 1:
+                cache[0].rollback_state = (mx.array([101]), mx.array([201]))
+                cache[0][0], cache[0][1] = mx.array([999]), mx.array([999])
+            return result
+
+    k1_cache = LegacySSMCache()
+    list(
+        mtp_generate_step(
+            mx.array([1], dtype=mx.uint32),
+            LegacySnapshotModel(max_k=1),
+            prompt_cache=[k1_cache],
+            max_tokens=2,
+            max_k=1,
+            disable_auto_k=True,
+            accept_counter=MTPAcceptCounter(),
+        )
+    )
+    assert k1_cache[0].item() == 101
+    assert k1_cache[1].item() == 201
+
+    with pytest.raises(AssertionError, match="only roll back one token"):
+        list(
+            mtp_generate_step(
+                mx.array([1], dtype=mx.uint32),
+                LegacySnapshotModel(max_k=3),
+                prompt_cache=[LegacySSMCache()],
+                max_tokens=4,
+                max_k=3,
+                disable_auto_k=True,
+                accept_counter=MTPAcceptCounter(),
+            )
+        )
+
+
 def test_generator_rolls_back_verify_round_on_early_materialization_abort(
     monkeypatch,
 ):
@@ -2951,11 +3012,30 @@ def test_generator_prompt_lookup_verifies_prompt_continuation(monkeypatch):
     # 7, rejects MTP's 99 in favour of target token 8, and finds prompt suffix
     # [7, 8] -> [20, 21]. The copied block is accepted only because the target
     # independently predicts 20 and 21; 22 is its ordinary bonus token.
-    model = _CacheAdvancingQwen35Model(
+    class CompositeCache:
+        def __init__(self):
+            self.caches = [_CountingKVCache()]
+
+        @property
+        def offset(self):
+            return self.caches[0].offset
+
+        @offset.setter
+        def offset(self, value):
+            self.caches[0].offset = value
+
+    class SnapshottingModel(_CacheAdvancingQwen35Model):
+        def __call__(self, inputs, cache=None, **kwargs):
+            result = super().__call__(inputs, cache=cache, **kwargs)
+            if cache and inputs.shape[1] > 2:
+                cache[0].caches[0].rollback_state = object()
+            return result
+
+    model = SnapshottingModel(
         backbone_outputs=[0, 0, 0, 7, 8, 0, 20, 21, 22],
         mtp_outputs=[0, 0, 0, 99, 0, 0],
     )
-    model_cache = _CountingKVCache()
+    model_cache = CompositeCache()
     mtp_cache = _CountingKVCache()
     timing: dict[str, float] = {}
 
@@ -2969,6 +3049,7 @@ def test_generator_prompt_lookup_verifies_prompt_continuation(monkeypatch):
             prompt_cache=[model_cache, mtp_cache],
             accept_counter=MTPAcceptCounter(),
             timing_stats=timing,
+            prompt_lookup_history=mx.array([7, 8, 20, 21], dtype=mx.uint32),
         )
     )
 
@@ -2985,7 +3066,8 @@ def test_generator_prompt_lookup_verifies_prompt_continuation(monkeypatch):
     # Three prefill positions + one ordinary draft + two lookup-history sync
     # positions. Prompt lookup itself consumed no MTP proposal.
     assert model._mtp_cursor == 6
-    assert model_cache.trim_calls == [1]
+    assert model_cache.caches[0].trim_calls == [1]
+    assert model_cache.caches[0].rollback_state is None
     assert mtp_cache.trim_calls == [1]
     assert mtp_cache.offset == 5
 

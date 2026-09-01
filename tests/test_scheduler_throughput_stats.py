@@ -41,6 +41,18 @@ def test_text_scheduler_exports_live_batch_generator_throughput():
     assert 4.0 < throughput["generation_tps"] < 6.0
 
 
+def test_text_scheduler_exports_vendored_mtp_counters_by_value():
+    scheduler = _scheduler()
+    counters = {"prompt_lookup_proposals": 3.0}
+    scheduler.batch_generator = MagicMock()
+    scheduler.batch_generator._mtp_vendored_stats = counters
+
+    stats = scheduler.get_stats()
+
+    assert stats["mtp_vendored"] == counters
+    assert stats["mtp_vendored"] is not counters
+
+
 def test_prompt_throughput_aggregates_requests_in_the_same_batch():
     scheduler = _scheduler()
     started = time.time() - 1.0

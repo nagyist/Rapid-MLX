@@ -12,9 +12,9 @@ Prompt-lookup drafting (PLD) is qualified for greedy native-MTP requests on
 
 The policy is captured with the immutable prompt at request start. Every
 proposal is verified by the target model, and only the accepted prefix is
-committed to the target and MTP caches. Before verification, the proposal is
-shortened to the largest amount every composite target cache can roll back;
-if no safe amount exists, that round uses ordinary MTP.
+committed to the target and MTP caches. Multi-token verification records each
+QSA raw-ring boundary so rollback remains atomic across the model's four-token
+index-compression groups. Ordinary K=1 MTP does not pay this snapshot cost.
 
 The PLD adaptation and high-overlap optimization direction were contributed by
 Pierre Lamy in PR #2809. This qualification narrows that contribution to the
@@ -59,16 +59,16 @@ Each value is the median of three cold-request runs. Completion lengths were
 
 | Scenario | MTP only (tok/s) | MTP + PLD (tok/s) | Speedup | Output parity |
 | --- | ---: | ---: | ---: | --- |
-| Exact code copy | 46.75 | 96.70 | 2.07x | SHA-256 identical, 3/3 |
-| One-line code edit | 41.04 | 92.67 | 2.26x | SHA-256 identical, 3/3 |
-| JSON manifest copy | 46.42 | 94.95 | 2.05x | SHA-256 identical, 3/3 |
-| Chinese document copy | 46.40 | 85.55 | 1.84x | SHA-256 identical, 3/3 |
-| Multi-turn code edit | 45.92 | 86.83 | 1.89x | SHA-256 identical, 3/3 |
+| Exact code copy | 46.75 | 98.74 | 2.11x | SHA-256 identical, 3/3 |
+| One-line code edit | 41.04 | 94.12 | 2.29x | SHA-256 identical, 3/3 |
+| JSON manifest copy | 46.42 | 99.40 | 2.14x | SHA-256 identical, 3/3 |
+| Chinese document copy | 46.40 | 92.74 | 2.00x | SHA-256 identical, 3/3 |
+| Multi-turn code edit | 45.92 | 93.80 | 2.04x | SHA-256 identical, 3/3 |
 
-A separate one-run smoke from the production-default implementation, with no
-PLD environment variable set, produced 86.61–92.88 tok/s across the same five
-scenarios. All five output hashes matched both the baseline and the qualifying
-PLD run.
+The production-default run used no PLD environment variables. It proposed
+15,680 tokens in 1,960 eight-token windows and accepted 15,388 (98.1%). MLX
+active memory remained approximately 104.7–105.6 GB; the process-reported peak
+was 148.1 GB.
 
 ## Correctness evidence
 
@@ -82,8 +82,9 @@ PLD run.
   and off for every measured run (15/15).
 - Model-free tests cover full acceptance, partial rejection, target/MTP cache
   alignment, request-scoped prompt history, explicit opt-out, sampled-request
-  exclusion, cancellation during target verification, and amount-aware QSA
-  rollback admission across a compression boundary.
+  exclusion, cancellation during target verification, transaction restoration
+  across a QSA compression boundary, and zero QSA snapshot overhead for
+  ordinary K=1 MTP.
 
 ## Why the old defaults were rejected
 

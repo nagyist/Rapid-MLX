@@ -128,6 +128,9 @@ def _safe_prompt_lookup_draft_count(model_cache, desired: int) -> int:
         # verify forward and restore them through this amount-aware API. They
         # do not implement trim(), so only trim-owned attention caches need
         # the pre-forward can_advance check.
+        children = getattr(cache, "caches", None)
+        if children is not None:
+            return all(_can_recover(child, count) for child in children)
         if callable(getattr(cache, "restore_rollback", None)):
             return True
         return can_advance(cache, count)
@@ -531,9 +534,16 @@ def mtp_generate_step(
         return token, logprobs, lp_accept
 
     def _clear_rollback():
+        def _clear(cache):
+            children = getattr(cache, "caches", None)
+            if children is not None:
+                for child in children:
+                    _clear(child)
+            elif hasattr(cache, "rollback_state"):
+                cache.rollback_state = None
+
         for c in model_cache:
-            if hasattr(c, "rollback_state"):
-                c.rollback_state = None
+            _clear(c)
 
     def _rollback_draft(n_to_drop: int = 1, verify_size: int | None = None):
         """Restore caches by dropping the last ``n_to_drop`` draft tokens.
@@ -546,7 +556,7 @@ def mtp_generate_step(
         entries.
         """
         trim_caches = []
-        snapshot_caches = []
+        snapshot_caches: list[tuple[Any, Any | None, tuple[Any, Any] | None]] = []
         for c in model_cache:
             restore = getattr(c, "restore_rollback", None)
             if callable(restore) and getattr(c, "rollback_state", None) is not None:
@@ -589,6 +599,7 @@ def mtp_generate_step(
             if restore is not None:
                 restore(n_to_drop, verify_size)
             else:
+                assert snapshots is not None
                 c[0], c[1] = snapshots
                 c.rollback_state = None
 
@@ -952,8 +963,6 @@ def mtp_generate_step(
         if _prompt_lookup_index is None:
             return None
         remaining = max_tokens - ntoks
-        if remaining <= 0:
-            return None
         match = _prompt_lookup_index.propose(
             generated_token_ids,
             max_tokens=min(prompt_lookup_policy.max_tokens, remaining),
