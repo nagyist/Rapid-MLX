@@ -135,7 +135,7 @@ def format_preflight_error(
         f"{active_bytes / 1e9:.1f} GB + minimum KV cache "
         f"{min_kv_bytes / 1e9:.1f} GB), but the current limit is "
         f"{cap_bytes / 1e9:.1f} GB "
-        f"(gpu_memory_utilization={utilization:.2f} of the "
+        f"(gpu_memory_utilization={utilization:g} of the "
         f"{device_budget_bytes / 1e9:.1f} GB Metal working-set budget). "
         f"Increase --gpu-memory-utilization, reduce context length or "
         f"concurrency, close memory-heavy apps, or choose a smaller model."
