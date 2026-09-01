@@ -311,6 +311,25 @@ struct RAMBucketedDefaultTests {
             ) == nil
         )
     }
+
+    @Test("Atomic policy accepts the schema's zero capability boundary")
+    func atomicPolicyAcceptsZeroCapability() throws {
+        var policy = try #require(
+            JSONSerialization.jsonObject(with: policyData()) as? [String: Any]
+        )
+        var tiers = try #require(policy["tiers"] as? [[String: Any]])
+        var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
+        picks[0]["capability_score_x100"] = 0
+        tiers[0]["picks"] = picks
+        policy["tiers"] = tiers
+
+        let decoded = try #require(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try addressedPolicyData(policy)
+            )
+        )
+        #expect(decoded[0].primary.capabilityPct == 0)
+    }
 }
 
 // MARK: - SafeDefaultFallback (codex r2 BLOCKING on #165)
