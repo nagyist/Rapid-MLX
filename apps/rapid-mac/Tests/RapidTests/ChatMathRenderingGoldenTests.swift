@@ -29,6 +29,14 @@ struct ChatMathRenderingGoldenTests {
         try await surface.sendPrompt("shape:math show me the Gaussian integral")
         try await stage.waitForText("A bridged alignment is")
         try await surface.waitForSendIdle()
+        // Send idle marks network settle, not render settle: the streaming
+        // markdown reveal can still be mid-flight on the trailing formula
+        // (on a slow runner the raw "$$\begin{align}…" tail is briefly on
+        // screen after idle). Wait for the LAST display formula's rendered
+        // node before sampling the tree for the raw-source negatives.
+        try await stage.wait(for: "the bridged alignment's rendered math node") {
+            stage.treeText().contains("Math: \\begin{align}")
+        }
         let mathText = stage.treeText()
         #expect(mathText.contains("The Gaussian integral is"))
         #expect(mathText.contains("and inline it reads $e^{i\\pi} + 1 = 0$."))
