@@ -10,6 +10,40 @@ merge_protections_settings:
         - label = merge-ready
         - label = merge-ready-mac
 
+# ``auto_merge_conditions`` admits a ready head initially, but Mergify keeps a
+# bisection member that was dropped untested in a terminal dequeued state.  The
+# explicit queue actions are the supported re-entry edge: re-applying the same
+# ready label clears the bot-owned ``dequeued`` marker in
+# authorize-merge-ready.yml, then this rule queues the still-authorized exact
+# head.  The negative marker prevents a failed/dequeued head from retrying by
+# itself, so the no-blind-retry budget below remains authoritative.
+pull_request_rules:
+  - name: enqueue an explicitly authorized no-Mac head
+    conditions:
+      - base = main
+      - -draft
+      - -from-fork
+      - label = merge-ready
+      - -label = merge-ready-mac
+      - -label = dequeued
+      - check-success = merge-ready-head
+    actions:
+      queue:
+        name: no-mac-batch
+
+  - name: enqueue an explicitly authorized Mac head
+    conditions:
+      - base = main
+      - -draft
+      - -from-fork
+      - label = merge-ready-mac
+      - -label = merge-ready
+      - -label = dequeued
+      - check-success = merge-ready-head
+    actions:
+      queue:
+        name: mac-batch
+
 queue_rules:
   - name: no-mac-batch
     queue_branch_prefix: mergify/merge-queue/

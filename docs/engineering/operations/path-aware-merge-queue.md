@@ -142,6 +142,13 @@ The queue contract lives in `.mergify.yml`:
 
 - label-gated `auto_merge_conditions`, so a ready label automatically enqueues
   the pull request without a second command or checkbox;
+- explicit, named queue actions provide the re-entry edge for a head that batch
+  bisection dropped without testing. Mergify marks that exact head `dequeued`,
+  which deliberately blocks automatic retry. To re-authorize the unchanged
+  head, remove and re-apply its one ready label: the exact-head authorization
+  workflow clears the stale marker only on that fresh label event, and the
+  matching action queues it again. Do not post a queue command, push an empty
+  commit, or remove `dequeued` by itself;
 - an exact-head authorization status in both queue conditions, preventing a
   newly pushed head from racing asynchronous label revocation;
 - serial mode with one batch in flight, so speculative checks cannot multiply

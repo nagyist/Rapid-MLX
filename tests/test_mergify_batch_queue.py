@@ -64,9 +64,36 @@ def test_ready_labels_autoqueue_without_enabling_blind_retries():
     config = _config()
     queues = _rules_by_name("queue_rules")
     auto_merge = config["merge_protections_settings"]["auto_merge_conditions"]
+    enqueue_rules = _rules_by_name("pull_request_rules")
 
     assert auto_merge == [{"or": ["label = merge-ready", "label = merge-ready-mac"]}]
-    assert "pull_request_rules" not in config
+    assert set(enqueue_rules) == {
+        "enqueue an explicitly authorized no-Mac head",
+        "enqueue an explicitly authorized Mac head",
+    }
+
+    expected_enqueue = {
+        "enqueue an explicitly authorized no-Mac head": (
+            {"label = merge-ready", "-label = merge-ready-mac"},
+            "no-mac-batch",
+        ),
+        "enqueue an explicitly authorized Mac head": (
+            {"label = merge-ready-mac", "-label = merge-ready"},
+            "mac-batch",
+        ),
+    }
+    for name, (labels, queue_name) in expected_enqueue.items():
+        rule = enqueue_rules[name]
+        conditions = set(rule["conditions"])
+        assert labels <= conditions
+        assert {
+            "base = main",
+            "-draft",
+            "-from-fork",
+            "-label = dequeued",
+            HEAD_AUTHORIZATION,
+        } <= conditions
+        assert rule["actions"] == {"queue": {"name": queue_name}}
 
     expected_labels = {
         "no-mac-batch": {"label = merge-ready", "-label = merge-ready-mac"},
@@ -136,7 +163,7 @@ def test_ready_authorization_is_bound_to_the_exact_head_commit():
     assert "head.repo.full_name == github.repository" in job["if"]
     assert "merge-ready" in job["if"]
     assert "merge-ready-mac" in job["if"]
-    assert job["permissions"] == {"statuses": "write"}
+    assert job["permissions"] == {"issues": "write", "statuses": "write"}
 
     (step,) = job["steps"]
     assert step["uses"].startswith("actions/github-script@")
@@ -145,4 +172,8 @@ def test_ready_authorization_is_bound_to_the_exact_head_commit():
     assert "sha: context.payload.pull_request.head.sha" in script
     assert 'context: "merge-ready-head"' in script
     assert "present.length === 1" in script
+    assert 'currentLabels.has("dequeued")' in script
+    assert 'name: "dequeued"' in script
+    assert "authorized &&" in script
+    assert "error.status !== 404" in script
     assert "checkout" not in script.lower()
