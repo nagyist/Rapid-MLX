@@ -531,7 +531,7 @@ def test_signed_sidecar_required_dependency_gets_safe_repair(tmp_path):
         section = eh.section_required_packages()
 
     row = next(c for c in section.checks if c.label.startswith("transformers"))
-    assert row.status is eh.CheckStatus.WARN
+    assert row.status is eh.CheckStatus.FAIL
     assert "reinstall Rapid-MLX Desktop.app" in row.label
     assert "pip install" not in row.label
     assert "-m pip" not in row.label
@@ -779,7 +779,7 @@ def test_discovered_system_python_is_not_restricted_to_runtime_override_layouts(
             self.info = {
                 "pid": os.getpid() + 1,
                 "cmdline": [
-                    "python3",
+                    str(server_runtime),
                     "-m",
                     "vllm_mlx.cli",
                     "serve",
@@ -829,7 +829,7 @@ def test_relative_module_server_uses_process_executable(
             self.info = {
                 "pid": os.getpid() + 1,
                 "cmdline": [
-                    "python",
+                    str(server_runtime),
                     "-m",
                     "vllm_mlx.cli",
                     "serve",
@@ -882,7 +882,7 @@ def test_running_server_runtime_preserves_venv_executable_symlink(
             self.info = {
                 "pid": os.getpid() + 1,
                 "cmdline": [
-                    "python",
+                    str(server_runtime),
                     "-m",
                     "vllm_mlx.cli",
                     "serve",
@@ -933,6 +933,108 @@ def test_stopped_runtime_override_preserves_venv_executable_symlink(
 
     assert selected == override_runtime
     assert selected != override_runtime.resolve()
+
+
+def test_module_command_wins_over_resolved_process_executable(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    base_python = tmp_path / "base" / "bin" / "python"
+    base_python.parent.mkdir(parents=True)
+    base_python.write_text("")
+    venv_python = tmp_path / "server-venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(base_python)
+    (venv_python.parents[1] / "pyvenv.cfg").write_text("")
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [
+                    str(venv_python),
+                    "-m",
+                    "vllm_mlx.cli",
+                    "serve",
+                ],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(base_python)
+
+        def environ(self):
+            return dict(os.environ)
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_python_path() == venv_python
+
+
+def test_entrypoint_command_derives_venv_python_sibling(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    base_python = tmp_path / "base" / "bin" / "python"
+    base_python.parent.mkdir(parents=True)
+    base_python.write_text("")
+    venv_root = tmp_path / "server-venv"
+    venv_python = venv_root / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(base_python)
+    entrypoint = venv_root / "bin" / "rapid-mlx"
+    entrypoint.write_text(f"#!{venv_python}\nfrom vllm_mlx.cli import main\nmain()\n")
+    entrypoint.chmod(0o755)
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [str(entrypoint), "serve"],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(base_python)
+
+        def environ(self):
+            return dict(os.environ)
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_python_path() == venv_python
 
 
 def test_local_import_rejects_source_tree_shadow_module(

@@ -473,6 +473,39 @@ def _runtime_python_path() -> Path:
                 and any(site_root.glob("rapid_mlx-*.dist-info"))
             )
 
+        def _python_sibling(entry: Path) -> Path | None:
+            for name in ("python3.12", "python3", "python"):
+                candidate = entry.with_name(name)
+                if candidate.is_file():
+                    return candidate.absolute()
+            return None
+
+        def _python_from_entrypoint(entry: Path) -> Path | None:
+            sibling = _python_sibling(entry)
+            if sibling is not None:
+                return sibling
+            try:
+                shebang = entry.read_text(encoding="utf-8").splitlines()[0]
+            except (OSError, UnicodeDecodeError, IndexError):
+                return None
+            if not shebang.startswith("#!"):
+                return None
+            shebang_parts = shebang[2:].strip().split()
+            if len(shebang_parts) != 1 or Path(shebang_parts[0]).name.startswith("env"):
+                return None
+            return Path(shebang_parts[0]).absolute()
+
+        def _python_from_module_command(
+            command: list[str], context_env: dict[str, str]
+        ) -> Path | None:
+            interpreter = Path(command[0])
+            if not interpreter.is_absolute():
+                found = shutil.which(command[0], path=context_env.get("PATH", ""))
+                if found is None:
+                    return None
+                interpreter = Path(found)
+            return interpreter.absolute()
+
         def _runtime_candidate(cmdline: list[str], process: object) -> Path | None:
             if hasattr(os, "getuid") and hasattr(process, "uids"):
                 try:
@@ -509,7 +542,7 @@ def _runtime_python_path() -> Path:
             if entry.name == "rapid-mlx":
                 if not _is_installed_rapid_mlx_entrypoint(entry):
                     return None
-                candidate = Path(process.exe()).absolute()
+                candidate = _python_from_entrypoint(entry)
             elif (
                 len(command) >= 3
                 and command[1] == "-m"
@@ -520,9 +553,11 @@ def _runtime_python_path() -> Path:
                 and entry.parent.name == "vllm_mlx"
                 and _is_installed_rapid_mlx_module(entry)
             ):
-                candidate = Path(process.exe()).absolute()
+                candidate = _python_from_module_command(command, context_env)
             else:
                 return None
+            if candidate is None:
+                candidate = Path(process.exe()).absolute()
             if (
                 not candidate.is_absolute()
                 or not candidate.is_file()
@@ -1603,7 +1638,7 @@ def section_required_packages() -> Section:
                 )
                 s.add(
                     f"{label} not installed in {runtime} — run `{repair}`",
-                    CheckStatus.WARN if sidecar_hint else CheckStatus.FAIL,
+                    CheckStatus.FAIL,
                     detail=(f"distribution={dist} missing runtime={runtime}"),
                 )
                 continue
