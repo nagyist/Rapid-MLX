@@ -592,16 +592,18 @@ def test_start_model_waits_for_an_interactive_readiness_action():
 def test_start_model_witnesses_the_selected_download_alias(tmp_path):
     """Fresh install starts the downloaded pick, not the persona's fallback."""
     source = HARNESS.read_text()
-    helper = "start_model() {" + source.split("start_model() {", 1)[1].split(
-        "\n}", 1
-    )[0] + "\n}"
+    helper = (
+        "start_model() {"
+        + source.split("start_model() {", 1)[1].split("\n}", 1)[0]
+        + "\n}"
+    )
     capture = tmp_path / "predicate.txt"
     result = subprocess.run(
         [
             "bash",
             "-c",
             helper
-            + r'''
+            + r"""
 set -euo pipefail
 OUT="$1"
 CAPTURE="$2"
@@ -618,7 +620,7 @@ wait_fake_event_after_start() { printf '%s\n' "$1" > "$CAPTURE"; }
 wait_send_idle() { :; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 start_model
-''',
+""",
             "start-model-selected-alias",
             str(tmp_path),
             str(capture),
