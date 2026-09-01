@@ -66,6 +66,7 @@ final class RapidUITestHarness {
     private let conversationStore: URL
     private let sidecarAlias: String
     private let sidecarPIDFile: URL
+    private let dropEventFile: URL
     private var portReservation: Int32?
     private var originalPasteboardItems: [[NSPasteboard.PasteboardType: Data]]?
     private var ownedPasteboardChangeCount: Int?
@@ -125,6 +126,7 @@ final class RapidUITestHarness {
         let appURL = rapidMacRoot.appendingPathComponent("build/Rapid-MLX Desktop.app")
         eventLog = testHome.appendingPathComponent("fake-events.jsonl")
         sidecarPIDFile = testHome.appendingPathComponent("fake-sidecar.pid")
+        dropEventFile = testHome.appendingPathComponent("xcui-drop-event.txt")
         sidecarAlias = fakeSettings["FAKE_VISION_CHAT"] == "1"
             ? "qwen3-vl-2b-4bit"
             : "fake-alias"
@@ -146,6 +148,7 @@ final class RapidUITestHarness {
             "CFFIXED_USER_HOME": testHome.path,
             "RAPID_BIN": fakeSidecar,
             "FAKE_EVENT_LOG": eventLog.path,
+            "RAPID_XCUI_DROP_EVENT_FILE": dropEventFile.path,
             "RAPID_DESKTOP_PORT": String(reservedPort.port),
             "RAPID_DESKTOP_NO_PORT_SWEEP": "1",
         ].merging(fakeSettings) { _, fixture in fixture }
@@ -273,11 +276,10 @@ final class RapidUITestHarness {
     /// ``expectedChip`` is the remove control the drop must produce, fetched at
     /// the call site via ``element(_:)`` (which keeps the query literal in the
     /// test source for the xcui workflow contract). A landed drop is treated as
-    /// one whose chip settles (exists and is hittable). The helper host reports
-    /// the AppKit drag-session outcome through its accessibility value. A
-    /// gesture that AppKit explicitly reports as ``none`` never reached the
-    /// product, so the harness may retry that transport failure once within the
-    /// original settle budget. A reported ``copy`` is never retried: if its chip
+    /// one whose chip settles (exists and is hittable). The product's compose
+    /// destination emits a test-only marker when it observes the gesture. A
+    /// gesture with no destination marker may be retried once within the
+    /// original settle budget. An observed gesture is never retried: if its chip
     /// does not appear, the test still exposes the product/AX regression. The
     /// chip is never dereferenced before it exists, so a not-yet-matched
     /// ``firstMatch`` cannot throw (#2481).
@@ -314,19 +316,21 @@ final class RapidUITestHarness {
         let settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
         let maximumAttempts = 2
         for attempt in 1...maximumAttempts {
+            try? FileManager.default.removeItem(at: dropEventFile)
             source.click(forDuration: 1, thenDragTo: dropTarget)
 
-            // The drag callback and the product render arrive independently.
-            // First wait briefly for either authoritative signal, then spend
-            // the rest of the original budget on a copied drop's chip.
+            // The destination marker and the product render arrive
+            // independently. First wait briefly for either authoritative
+            // signal, then spend the rest of the original budget on an
+            // observed drop's chip.
             _ = waitUntil(timeout: min(2, max(0, settleDeadline.timeIntervalSinceNow))) {
                 (chip.exists && chip.isHittable)
-                    || (source.value as? String ?? "pending") != "pending"
+                    || FileManager.default.fileExists(atPath: self.dropEventFile.path)
             }
             if chip.exists && chip.isHittable { return }
 
-            let dragOperation = source.value as? String ?? "unavailable"
-            if dragOperation == "none", attempt < maximumAttempts,
+            let observedPhase = try? String(contentsOf: dropEventFile, encoding: .utf8)
+            if observedPhase == nil, attempt < maximumAttempts,
                settleDeadline.timeIntervalSinceNow > 0
             {
                 continue
@@ -338,7 +342,7 @@ final class RapidUITestHarness {
             }
             XCTFail(
                 "dropped attachment chip did not settle within \(dropSettleTimeout)s "
-                    + "(drag operation: \(dragOperation), attempts: \(attempt))"
+                    + "(destination phase: \(observedPhase ?? "not observed"), attempts: \(attempt))"
             )
             return
         }

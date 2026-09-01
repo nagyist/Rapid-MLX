@@ -6,19 +6,8 @@ import AppKit
 // small, deterministic file-drag surface so the production app receives a real
 // macOS file-URL drag without depending on Finder's ambient window geometry.
 final class FileDragView: NSView, NSDraggingSource {
-    private enum DragOutcome: String {
-        case pending
-        case copy
-        case none
-    }
-
     let fileURL: URL
     private var startedDragging = false
-    private var dragOutcome = DragOutcome.pending {
-        didSet {
-            NSAccessibility.post(element: self, notification: .valueChanged)
-        }
-    }
 
     init(fileURL: URL) {
         self.fileURL = fileURL
@@ -31,8 +20,6 @@ final class FileDragView: NSView, NSDraggingSource {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
-
-    override func accessibilityValue() -> Any? { dragOutcome.rawValue }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.setFill()
@@ -47,7 +34,6 @@ final class FileDragView: NSView, NSDraggingSource {
 
     override func mouseDown(with event: NSEvent) {
         startedDragging = false
-        dragOutcome = .pending
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -63,13 +49,6 @@ final class FileDragView: NSView, NSDraggingSource {
         sourceOperationMaskFor context: NSDraggingContext
     ) -> NSDragOperation { .copy }
 
-    func draggingSession(
-        _ session: NSDraggingSession,
-        endedAt screenPoint: NSPoint,
-        operation: NSDragOperation
-    ) {
-        dragOutcome = operation.contains(.copy) ? .copy : .none
-    }
 }
 
 let app = NSApplication.shared

@@ -2483,7 +2483,10 @@ final class AutosizingTextView: NSTextView {
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        if Self.containsFileURLs(sender.draggingPasteboard) { return .copy }
+        if Self.containsFileURLs(sender.draggingPasteboard) {
+            recordUITestFileDrop("entered")
+            return .copy
+        }
         return super.draggingEntered(sender)
     }
 
@@ -2498,8 +2501,21 @@ final class AutosizingTextView: NSTextView {
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        if consumeFileDrop(from: sender.draggingPasteboard) { return true }
+        if consumeFileDrop(from: sender.draggingPasteboard) {
+            recordUITestFileDrop("performed")
+            return true
+        }
         return super.performDragOperation(sender)
+    }
+
+    /// Test-only destination signal for distinguishing an XCUI gesture that
+    /// never reached the compose field from a product drop that was observed
+    /// but failed to render. Production launches do not set this path.
+    private func recordUITestFileDrop(_ phase: String) {
+        guard let path = ProcessInfo.processInfo.environment["RAPID_XCUI_DROP_EVENT_FILE"] else {
+            return
+        }
+        try? phase.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
     /// Returns true when a file drop was consumed, regardless of whether the
