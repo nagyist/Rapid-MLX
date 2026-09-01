@@ -57,7 +57,8 @@ def test_start_server_requires_health_algorithm_receipt(monkeypatch) -> None:
     proc = MagicMock()
     proc.poll.return_value = None
     proc.wait.return_value = 0
-    monkeypatch.setattr(bench_dflash.subprocess, "Popen", lambda *args, **kwargs: proc)
+    popen = MagicMock(return_value=proc)
+    monkeypatch.setattr(bench_dflash.subprocess, "Popen", popen)
 
     def _get(url: str, timeout: float):
         del timeout
@@ -78,6 +79,9 @@ def test_start_server_requires_health_algorithm_receipt(monkeypatch) -> None:
     )
     try:
         assert handle.algorithm == "dflash2"
+        cmd = popen.call_args.args[0]
+        assert cmd[cmd.index("serve") + 1] == "target"
+        assert cmd[cmd.index("--dflash-drafter-path") + 1] == "draft"
     finally:
         handle.stop()
 
@@ -90,6 +94,35 @@ def test_start_server_requires_expected_algorithm_before_spawn(monkeypatch) -> N
         bench_dflash.start_server("target", 8765, True, draft_model="draft")
 
     popen.assert_not_called()
+
+
+def test_baseline_server_command_uses_pinned_target_and_explicit_mtp(
+    monkeypatch,
+) -> None:
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.wait.return_value = 0
+    popen = MagicMock(return_value=proc)
+    monkeypatch.setattr(bench_dflash.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        bench_dflash.httpx,
+        "get",
+        lambda *_args, **_kwargs: MagicMock(status_code=200),
+    )
+    config = '{"method":"mtp","model":"/cache/target","num_speculative_tokens":3}'
+
+    handle = bench_dflash.start_server(
+        "/cache/target",
+        8765,
+        False,
+        speculative_config=config,
+    )
+    try:
+        cmd = popen.call_args.args[0]
+        assert cmd[cmd.index("serve") + 1] == "/cache/target"
+        assert cmd[cmd.index("--speculative-config") + 1] == config
+    finally:
+        handle.stop()
 
 
 def test_expected_algorithm_is_inferred_for_known_alias_pair() -> None:
@@ -122,6 +155,54 @@ def test_local_drafter_receipt_keeps_target_pin_but_cannot_qualify() -> None:
     assert receipt.target_revision == "aa985c29ff5b334cbfdcbbc787d47e66e9d9e456"
     assert receipt.draft_revision is None
     assert receipt.immutable is False
+
+
+def test_main_uses_same_pinned_target_for_baseline_and_dflash(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[dict] = []
+
+    monkeypatch.setattr(
+        bench_dflash, "_materialize_target", lambda _pair: "/cache/target-snapshot"
+    )
+    monkeypatch.setattr(
+        bench_dflash, "_materialize_drafter", lambda _pair: "/cache/draft-snapshot"
+    )
+
+    def _bench(model, port, dflash, runs, max_tokens, **kwargs):
+        calls.append({"model": model, "dflash": dflash, **kwargs})
+        return bench_dflash.ModeResult(
+            median_tps={name: 10.0 for name in WORKLOADS},
+            raw_runs={name: [] for name in WORKLOADS},
+            algorithm="dflash2" if dflash else None,
+        )
+
+    monkeypatch.setattr(bench_dflash, "bench_one_mode", _bench)
+    monkeypatch.setattr(bench_dflash, "write_bench_json", lambda *_args: None)
+
+    assert (
+        bench_dflash.main(
+            [
+                "--model",
+                "qwen3.8-27b-4bit",
+                "--draft-model",
+                "z-lab/Qwen3.8-27B-DFlash2",
+                "--runs",
+                "1",
+                "--output",
+                str(tmp_path / "result.json"),
+            ]
+        )
+        == 1
+    )
+    assert [call["model"] for call in calls] == [
+        "/cache/target-snapshot",
+        "/cache/target-snapshot",
+    ]
+    baseline_config = calls[0]["speculative_config"]
+    assert '"method":"mtp"' in baseline_config
+    assert '"model":"/cache/target-snapshot"' in baseline_config
+    assert calls[1]["draft_model"] == "/cache/draft-snapshot"
 
 
 def test_expected_algorithm_requires_receipt_for_unknown_override() -> None:

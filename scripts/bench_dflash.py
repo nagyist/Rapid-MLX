@@ -194,6 +194,7 @@ def start_server(
     dflash: bool,
     draft_model: str | None = None,
     expected_algorithm: str | None = None,
+    speculative_config: str | None = None,
 ) -> ServerHandle:
     """Spin up ``rapid-mlx serve`` and wait for /v1/models to answer.
 
@@ -222,6 +223,8 @@ def start_server(
         cmd.append("--enable-dflash")
         if draft_model:
             cmd.extend(["--dflash-drafter-path", draft_model])
+    elif speculative_config is not None:
+        cmd.extend(["--speculative-config", speculative_config])
 
     logger.info("  starting server: port=%d dflash=%s", port, dflash)
     logf = open(log_path, "w")
@@ -440,6 +443,7 @@ class PairReceipt:
     draft_model: str
     draft_revision: str | None
     algorithm: str
+    baseline_mtp_tokens: int | None = None
 
     @property
     def immutable(self) -> bool:
@@ -511,6 +515,7 @@ def bench_one_mode(
     max_tokens: int,
     draft_model: str | None = None,
     expected_algorithm: str | None = None,
+    speculative_config: str | None = None,
 ) -> ModeResult:
     handle = start_server(
         model,
@@ -518,6 +523,7 @@ def bench_one_mode(
         dflash,
         draft_model=draft_model,
         expected_algorithm=expected_algorithm,
+        speculative_config=speculative_config,
     )
     try:
         # Discard warmup: Metal JIT + cache population + drafter load.
@@ -594,6 +600,12 @@ def _resolve_pair_receipt(
             profile.dflash_draft_revision if exact_registry_draft else None
         ),
         algorithm=algorithm,
+        baseline_mtp_tokens=(
+            profile.mtp_speculative_tokens
+            if profile is not None
+            and profile.mtp_continuous_batching_tier == "verified"
+            else None
+        ),
     )
 
 
@@ -605,6 +617,47 @@ def _resolve_expected_algorithm(
     """Compatibility wrapper for callers that only need algorithm identity."""
 
     return _resolve_pair_receipt(model, draft_model, explicit).algorithm
+
+
+def _materialize_target(pair: PairReceipt) -> str:
+    """Return one immutable target snapshot shared by both benchmark modes."""
+
+    if pair.target_revision is None:
+        return pair.target_model
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(
+        repo_id=pair.target_model,
+        revision=pair.target_revision,
+    )
+
+
+def _materialize_drafter(pair: PairReceipt) -> str:
+    """Return the pinned drafter snapshot, or the explicit local source."""
+
+    if pair.draft_revision is None:
+        return pair.draft_model
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(
+        repo_id=pair.draft_model,
+        revision=pair.draft_revision,
+    )
+
+
+def _baseline_speculative_config(pair: PairReceipt, target_source: str) -> str | None:
+    """Reproduce a verified alias MTP default against the pinned snapshot."""
+
+    if pair.baseline_mtp_tokens is None:
+        return None
+    return json.dumps(
+        {
+            "method": "mtp",
+            "model": target_source,
+            "num_speculative_tokens": pair.baseline_mtp_tokens,
+        },
+        separators=(",", ":"),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -661,6 +714,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    target_source = _materialize_target(pair)
+    draft_source = _materialize_drafter(pair)
+    baseline_speculative_config = _baseline_speculative_config(pair, target_source)
 
     logger.info("Bench DFlash: %s", args.model)
     if os.environ.get("RAPID_MLX_DFLASH_BYPASS_MOE_GATE") == "1":
@@ -671,21 +727,22 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("--- baseline (alias default policy) ---")
     base = bench_one_mode(
-        args.model,
+        target_source,
         args.port,
         dflash=False,
         runs=args.runs,
         max_tokens=args.max_tokens,
+        speculative_config=baseline_speculative_config,
     )
 
     logger.info("--- DFlash ---")
     dflash = bench_one_mode(
-        args.model,
+        target_source,
         args.port,
         dflash=True,
         runs=args.runs,
         max_tokens=args.max_tokens,
-        draft_model=args.draft_model,
+        draft_model=draft_source,
         expected_algorithm=pair.algorithm,
     )
 
