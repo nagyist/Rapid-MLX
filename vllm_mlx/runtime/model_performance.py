@@ -75,7 +75,6 @@ def _bucket_count(
         label = "+Inf" if math.isinf(bucket) else _format_bucket(bucket)
         if value <= bucket:
             counts[label] += 1
-    return counts
 
 
 def _format_bucket(value: float) -> str:

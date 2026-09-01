@@ -5,22 +5,24 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip("mlx")
-pytestmark = pytest.mark.requires_mlx
-
-
-from vllm_mlx.engine_core import EngineConfig, EngineCore
 from vllm_mlx.output_collector import RequestOutputCollector
-from vllm_mlx.request import Request, RequestStatus, SamplingParams
 from vllm_mlx.runtime.model_performance import ModelPerformanceLedger
-from vllm_mlx.scheduler import Scheduler, SchedulerConfig
+
+if TYPE_CHECKING:
+    from vllm_mlx.request import Request
+    from vllm_mlx.scheduler import Scheduler
 
 
 def _scheduler() -> Scheduler:
+    pytest.importorskip("mlx")
+
+    from vllm_mlx.scheduler import Scheduler, SchedulerConfig
+
     tokenizer = MagicMock()
     tokenizer.encode = lambda text: list(range(len(text.split())))
     tokenizer.decode = lambda tokens, **_kwargs: " ".join(map(str, tokens))
@@ -35,6 +37,8 @@ def _scheduler() -> Scheduler:
 
 
 def _running_request(scheduler: Scheduler, request_id: str) -> Request:
+    from vllm_mlx.request import Request, RequestStatus, SamplingParams
+
     request = Request(
         request_id,
         "ignored prompt",
@@ -133,6 +137,8 @@ def test_ledger_histograms_are_cumulative_and_memory_bounded():
 
 
 def test_scheduler_records_terminal_success_once():
+    pytest.importorskip("mlx")
+
     scheduler = _scheduler()
     request = _running_request(scheduler, "success")
     response = _terminal_response()
@@ -156,6 +162,8 @@ def test_scheduler_records_terminal_success_once():
 
 
 def test_scheduler_records_explicit_cancellation_once():
+    pytest.importorskip("mlx")
+
     scheduler = _scheduler()
     _running_request(scheduler, "cancelled")
 
@@ -171,6 +179,10 @@ def test_scheduler_records_explicit_cancellation_once():
 
 @pytest.mark.asyncio
 async def test_engine_loop_records_pending_failures():
+    pytest.importorskip("mlx")
+
+    from vllm_mlx.engine_core import EngineConfig, EngineCore
+
     engine = EngineCore(
         MagicMock(), MagicMock(), EngineConfig(model_name="model-under-test")
     )
