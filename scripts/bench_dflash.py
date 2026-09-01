@@ -434,6 +434,19 @@ class ModeResult:
 
 
 @dataclass(frozen=True)
+class PairReceipt:
+    target_model: str
+    target_revision: str | None
+    draft_model: str
+    draft_revision: str | None
+    algorithm: str
+
+    @property
+    def immutable(self) -> bool:
+        return bool(self.target_revision and self.draft_revision)
+
+
+@dataclass(frozen=True)
 class QualificationResult:
     code_median: float | None
     non_code_speedups: dict[str, float]
@@ -447,6 +460,7 @@ def _qualify(
     *,
     gate: float,
     non_code_floor: float,
+    immutable_receipt: bool = True,
 ) -> QualificationResult:
     """Apply the mixed-workload gate, failing closed on missing evidence."""
     code_speedups = [v for k, v in speedup.items() if k in _CODE_WORKLOADS]
@@ -458,7 +472,10 @@ def _qualify(
         key: value for key, value in non_code_speedups.items() if value < non_code_floor
     }
 
-    if missing:
+    if not immutable_receipt:
+        ship = False
+        decision = "DO NOT SHIP (missing immutable target/drafter revision receipt)"
+    elif missing:
         ship = False
         decision = f"DO NOT SHIP (missing valid workloads: {', '.join(missing)})"
     elif code_median is None:
@@ -537,28 +554,57 @@ def bench_one_mode(
         handle.stop()
 
 
+def _resolve_pair_receipt(
+    model: str,
+    draft_model: str | None,
+    explicit: str | None,
+) -> PairReceipt:
+    """Resolve and persist the effective immutable benchmark pair."""
+
+    from vllm_mlx.model_aliases import resolve_profile
+
+    profile = resolve_profile(model)
+    target_model = profile.hf_path if profile is not None else model
+    effective_draft = draft_model
+    if effective_draft is None and profile is not None and profile.supports_dflash:
+        effective_draft = profile.dflash_draft_model
+    if not effective_draft:
+        raise ValueError(
+            "cannot infer the DFlash drafter for this model; pass --draft-model"
+        )
+
+    algorithm = explicit
+    exact_registry_draft = (
+        profile is not None and effective_draft == profile.dflash_draft_model
+    )
+    if algorithm is None and exact_registry_draft:
+        algorithm = profile.dflash_algorithm
+    if algorithm not in {"dflash", "dflash2"}:
+        raise ValueError(
+            "cannot infer the DFlash algorithm for this model/drafter pair; "
+            "pass --expected-algorithm dflash or --expected-algorithm dflash2"
+        )
+    return PairReceipt(
+        target_model=target_model,
+        target_revision=(
+            profile.dflash_target_revision if profile is not None else None
+        ),
+        draft_model=effective_draft,
+        draft_revision=(
+            profile.dflash_draft_revision if exact_registry_draft else None
+        ),
+        algorithm=algorithm,
+    )
+
+
 def _resolve_expected_algorithm(
     model: str,
     draft_model: str | None,
     explicit: str | None,
 ) -> str:
-    """Preserve legacy alias invocations while keeping qualification fail-closed."""
+    """Compatibility wrapper for callers that only need algorithm identity."""
 
-    if explicit is not None:
-        return explicit
-    from vllm_mlx.model_aliases import resolve_profile
-
-    profile = resolve_profile(model)
-    if profile is not None and (
-        draft_model is None or draft_model == profile.dflash_draft_model
-    ):
-        algorithm = profile.dflash_algorithm
-        if algorithm in {"dflash", "dflash2"}:
-            return algorithm
-    raise ValueError(
-        "cannot infer the DFlash algorithm for this model/drafter pair; "
-        "pass --expected-algorithm dflash or --expected-algorithm dflash2"
-    )
+    return _resolve_pair_receipt(model, draft_model, explicit).algorithm
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -610,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        expected_algorithm = _resolve_expected_algorithm(
+        pair = _resolve_pair_receipt(
             args.model, args.draft_model, args.expected_algorithm
         )
     except ValueError as exc:
@@ -640,7 +686,7 @@ def main(argv: list[str] | None = None) -> int:
         runs=args.runs,
         max_tokens=args.max_tokens,
         draft_model=args.draft_model,
-        expected_algorithm=expected_algorithm,
+        expected_algorithm=pair.algorithm,
     )
 
     speedup: dict[str, float] = {}
@@ -663,6 +709,7 @@ def main(argv: list[str] | None = None) -> int:
         speedup,
         gate=args.gate,
         non_code_floor=non_code_floor,
+        immutable_receipt=pair.immutable,
     )
     code_median = qualification.code_median
     non_code_speedups = qualification.non_code_speedups
@@ -687,7 +734,10 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "model": args.model,
-        "draft_model": args.draft_model,
+        "target_model": pair.target_model,
+        "target_revision": pair.target_revision,
+        "draft_model": pair.draft_model,
+        "draft_revision": pair.draft_revision,
         "dflash_algorithm": dflash.algorithm,
         "max_tokens": args.max_tokens,
         "runs": args.runs,

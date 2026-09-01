@@ -75,6 +75,8 @@ def assess_method(profile: ModelProfile, method: str) -> SpecCapability:
             profile.supports_dflash
             and bool(profile.dflash_draft_model)
             and bool(profile.dflash_algorithm)
+            and bool(profile.dflash_target_revision)
+            and bool(profile.dflash_draft_revision)
             and (
                 not _is_experimental_quantization(profile)
                 or profile.dflash_algorithm == "dflash2"

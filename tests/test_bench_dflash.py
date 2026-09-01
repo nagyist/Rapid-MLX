@@ -41,6 +41,18 @@ def test_complete_mixed_workload_can_qualify() -> None:
     assert result.decision == "SHIP (supports_dflash=true)"
 
 
+def test_complete_workload_without_immutable_pair_receipt_cannot_qualify() -> None:
+    result = _qualify(
+        _passing_speedups(),
+        gate=1.3,
+        non_code_floor=1.0,
+        immutable_receipt=False,
+    )
+
+    assert result.ship is False
+    assert "immutable" in result.decision
+
+
 def test_start_server_requires_health_algorithm_receipt(monkeypatch) -> None:
     proc = MagicMock()
     proc.poll.return_value = None
@@ -87,6 +99,29 @@ def test_expected_algorithm_is_inferred_for_known_alias_pair() -> None:
         )
         == "dflash2"
     )
+
+
+def test_alias_pair_receipt_records_effective_repositories_and_revisions() -> None:
+    receipt = bench_dflash._resolve_pair_receipt(
+        "qwen3.8-27b-4bit", "z-lab/Qwen3.8-27B-DFlash2", None
+    )
+
+    assert receipt.target_model == "rapid-mlx/Qwen3.8-27B-4bit-MTP-MLX"
+    assert receipt.target_revision == "aa985c29ff5b334cbfdcbbc787d47e66e9d9e456"
+    assert receipt.draft_model == "z-lab/Qwen3.8-27B-DFlash2"
+    assert receipt.draft_revision == "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+    assert receipt.algorithm == "dflash2"
+    assert receipt.immutable is True
+
+
+def test_local_drafter_receipt_keeps_target_pin_but_cannot_qualify() -> None:
+    receipt = bench_dflash._resolve_pair_receipt(
+        "qwen3.8-27b-4bit", "/tmp/local-drafter", "dflash2"
+    )
+
+    assert receipt.target_revision == "aa985c29ff5b334cbfdcbbc787d47e66e9d9e456"
+    assert receipt.draft_revision is None
+    assert receipt.immutable is False
 
 
 def test_expected_algorithm_requires_receipt_for_unknown_override() -> None:

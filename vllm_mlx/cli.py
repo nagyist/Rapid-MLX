@@ -2584,7 +2584,7 @@ def _resolve_dflash_revisions(
     if profile is None or not drafter_repo:
         return None, None
     if getattr(profile, "dflash_draft_model", None) != drafter_repo:
-        return None, None
+        return getattr(profile, "dflash_target_revision", None), None
     return (
         getattr(profile, "dflash_target_revision", None),
         getattr(profile, "dflash_draft_revision", None),

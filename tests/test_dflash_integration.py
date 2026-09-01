@@ -200,7 +200,7 @@ def test_dflash_revision_pins_only_apply_to_exact_registry_pair() -> None:
         "a" * 40,
         "b" * 40,
     )
-    assert _resolve_dflash_revisions(profile, "operator/override") == (None, None)
+    assert _resolve_dflash_revisions(profile, "operator/override") == ("a" * 40, None)
 
 
 def test_programmatic_4bit_requires_explicit_experimental_opt_in(monkeypatch) -> None:
