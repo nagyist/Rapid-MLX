@@ -3443,6 +3443,13 @@ class Scheduler:
         # the #2858 preflight error can report "X% of Y GB" faithfully.
         self._metal_cap_base_bytes: int = 0
         self._metal_cap_bytes_resolved: bool = False
+        # Generation of the process-wide utilization ratchet this cap was
+        # resolved against; a mismatch re-resolves (see
+        # ``memory_budget.process_utilization_floor``).
+        self._metal_cap_floor_generation: int = -1
+        # The utilization the cap actually enforces after the ratchet —
+        # what error messages must report, which can exceed the config's.
+        self._metal_cap_effective_utilization: float = 0.0
         # D-METAL-CAP: cached per-token KV-cache size for the
         # projection-based admission gate. Auto-derived from the
         # model config on first use (operator override via
@@ -4565,12 +4572,27 @@ class Scheduler:
         Metal device probe failed). Callers MUST treat ``0`` as "do not
         check" rather than "no headroom".
         """
-        if self._metal_cap_bytes_resolved:
+        from .memory_budget import process_utilization_floor
+
+        floor, generation = process_utilization_floor()
+        if (
+            self._metal_cap_bytes_resolved
+            and generation == self._metal_cap_floor_generation
+        ):
             return self._metal_cap_bytes
+        self._metal_cap_floor_generation = generation
         cap = 0
         cap_base = 0
         util = float(getattr(self.config, "gpu_memory_utilization", 0.0) or 0.0)
         if util > 0.0:
+            # Codex round 2 BLOCKING #2: in multi-model mode the Metal
+            # allocator (and ``mx.get_active_memory()``) is process-wide,
+            # so once ANY resident engine ratchets the process limit up,
+            # this scheduler must enforce at least that utilization too —
+            # otherwise its stale lower cap rejects every request the
+            # moment another model becomes resident. Never enables a
+            # disabled cap (util == 0 stays disabled), never lowers.
+            util = max(util, floor)
             try:
                 if mx.metal.is_available():
                     info = mx.device_info()
@@ -4586,6 +4608,7 @@ class Scheduler:
                 cap_base = 0
         self._metal_cap_bytes = cap
         self._metal_cap_base_bytes = cap_base
+        self._metal_cap_effective_utilization = util
         self._metal_cap_bytes_resolved = True
         return cap
 
@@ -5324,15 +5347,22 @@ class Scheduler:
         once at engine startup — after the weights are materialized and the
         Metal limits are set, before the engine loop starts.
 
-        Deliberately STRICTER-to-fail than the admission gate: it raises
-        only when ``active >= cap`` — the condition under which
-        ``_enforce_metal_cap_at_admission`` rejects EVERY request
-        regardless of size (codex round 1 BLOCKING #1: gating on a nominal
-        request's projected KV as well would refuse memory-tight
-        configurations that can still serve short requests today). The
-        nominal ``PREFLIGHT_NOMINAL_TOKENS`` KV term is still computed,
-        but only to make the error message's "needs approximately" figure
-        honest about serving at least short requests.
+        The failure condition is EXACTLY "no valid request can ever
+        admit": ``active + smallest-request KV >= cap``, where the
+        smallest valid request is one prompt token plus one generated
+        token (its fixed baseline, two tokens of per-token growth, and
+        the minimum sliding-window slot allocation). Codex round 1
+        BLOCKING #1 established that gating on a NOMINAL 1024-token
+        request over-refuses memory-tight configs that genuinely serve
+        short requests; codex round 2 BLOCKING #1 established that
+        ``active >= cap`` alone under-refuses configs with positive but
+        insufficient room for even the smallest KV allocation. The
+        minimum-request bound is the fixed point of both: any config it
+        refuses rejects EVERY request in ``_enforce_metal_cap_at_admission``
+        (which projects at least this much KV for any request), and any
+        config it admits can serve at least a one-token exchange. The
+        nominal ``PREFLIGHT_NOMINAL_TOKENS`` figure is still computed,
+        but only for the error message's "needs approximately" number.
 
         Before concluding impossibility the allocator cache is cleared and
         active re-measured (codex round 1 BLOCKING #4): ``active`` at load
@@ -5355,7 +5385,22 @@ class Scheduler:
         active = self._current_metal_active_bytes()
         if active <= 0:
             return
-        if active >= cap:
+
+        def _request_kv_bytes(tokens: int) -> int:
+            per_tok = self._resolve_kv_bytes_per_token()
+            fixed_baseline = self._resolve_kv_fixed_baseline_bytes()
+            sliding_bytes = 0
+            if self._kv_sliding_slot_bytes > 0 and self._kv_sliding_window > 0:
+                sliding_bytes = self._kv_sliding_slot_bytes * rotating_cache_slots(
+                    self._kv_sliding_window, tokens
+                )
+            return fixed_baseline + per_tok * tokens + sliding_bytes
+
+        # Smallest valid request: one prompt token + one generated token.
+        # ``_estimate_request_kv_bytes`` projects at least this much for
+        # ANY request, so admission is impossible iff this cannot fit.
+        smallest_kv = _request_kv_bytes(2)
+        if active + smallest_kv >= cap:
             # Give reclaimable allocator-cache pages back before declaring
             # the configuration impossible — post-load ``active`` routinely
             # carries cache the allocator would drop under pressure anyway.
@@ -5364,22 +5409,14 @@ class Scheduler:
             except Exception:
                 pass
             active = self._current_metal_active_bytes()
-        if active < cap:
+        if active + smallest_kv < cap:
             return
-        per_tok = self._resolve_kv_bytes_per_token()
-        fixed_baseline = self._resolve_kv_fixed_baseline_bytes()
-        tokens = self.PREFLIGHT_NOMINAL_TOKENS
-        sliding_bytes = 0
-        if self._kv_sliding_slot_bytes > 0 and self._kv_sliding_window > 0:
-            sliding_bytes = self._kv_sliding_slot_bytes * rotating_cache_slots(
-                self._kv_sliding_window, tokens
-            )
-        min_kv = fixed_baseline + per_tok * tokens + sliding_bytes
+        min_kv = _request_kv_bytes(self.PREFLIGHT_NOMINAL_TOKENS)
         required = active + min_kv
 
         from .memory_budget import MetalPreflightError, format_preflight_error
 
-        util = float(getattr(self.config, "gpu_memory_utilization", 0.0) or 0.0)
+        util = self._metal_cap_effective_utilization
         message = format_preflight_error(
             required_bytes=required,
             active_bytes=active,
@@ -5559,17 +5596,26 @@ class Scheduler:
         # #2858: actionable rejection — report required vs available and
         # concrete remediations, not just the internal cap arithmetic.
         # Keeps the "D-METAL-CAP" and "reserved KV" tokens the existing
-        # regression tests and operator runbooks grep for.
+        # regression tests and operator runbooks grep for. The
+        # --gpu-memory-utilization suggestion is dropped once the enforced
+        # utilization has no room left (codex round 2 NIT).
+        raise_advice = (
+            " Retry after in-flight requests drain, reduce context "
+            "length or max_tokens, or lower concurrency."
+        )
+        if self._metal_cap_effective_utilization < 0.97:
+            raise_advice = (
+                " Retry after in-flight requests drain, reduce context "
+                "length or max_tokens, lower concurrency, or restart "
+                "with a higher --gpu-memory-utilization."
+            )
         raise BackpressureError(
             f"This request needs approximately "
             f"{(reserved_kv + projected_kv) / 1e9:.1f} GB of Metal memory "
             f"on top of {active / 1e9:.1f} GB already in use "
             f"(reserved KV {reserved_kv / 1e9:.1f} GB + projected KV "
             f"{projected_kv / 1e9:.1f} GB), but the current limit is "
-            f"{cap / 1e9:.1f} GB (D-METAL-CAP). Retry after in-flight "
-            f"requests drain, reduce context length or max_tokens, lower "
-            f"concurrency, or restart with a higher "
-            f"--gpu-memory-utilization."
+            f"{cap / 1e9:.1f} GB (D-METAL-CAP)." + raise_advice
         )
 
     def _resolve_pressure_evict_fraction(self) -> float:

@@ -1825,7 +1825,11 @@ class BatchedEngine(BaseEngine):
         def _resolve_and_set_metal_limits() -> float:
             import mlx.core as mx
 
-            from ..memory_budget import AUTO_UTILIZATION_FLOOR, plan_metal_limit
+            from ..memory_budget import (
+                AUTO_UTILIZATION_FLOOR,
+                note_resolved_utilization,
+                plan_metal_limit,
+            )
 
             requested = self._gpu_memory_utilization
             fallback = requested if requested is not None else AUTO_UTILIZATION_FLOOR
@@ -1847,6 +1851,14 @@ class BatchedEngine(BaseEngine):
                 device_budget_bytes=int(max_recommended),
                 requested_utilization=requested,
             )
+            # Publish the resolved utilization into the process-wide
+            # ratchet BEFORE applying limits (codex round 2 BLOCKING #2):
+            # every already-resident engine's scheduler re-resolves its
+            # admission cap against this floor, so raising the process
+            # limit for a new model can never strand an existing model
+            # behind a stale lower cap while process-wide ``active`` has
+            # grown past it.
+            note_resolved_utilization(plan.resolved_utilization)
             # Setter failures are contained HERE so the resolved
             # utilization always propagates (codex round 1 BLOCKING #2):
             # if ``mx.set_memory_limit`` succeeds but ``set_cache_limit``

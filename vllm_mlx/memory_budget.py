@@ -30,6 +30,7 @@ This module closes that loop with two pieces, both pure and unit-testable:
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 # Auto-mode bounds. The floor matches the historical global default so any
@@ -45,6 +46,37 @@ AUTO_UTILIZATION_CEILING = 0.97
 # absolute floor so tiny models still get a workable slice.
 _AUTO_HEADROOM_FRACTION = 0.08
 _AUTO_HEADROOM_MIN_BYTES = 512 * 1024**2
+
+
+# ── Process-wide utilization ratchet (codex round 2 BLOCKING #2) ──
+# In multi-model mode each BatchedEngine resolves its own budget, but the
+# Metal allocator and ``mx.get_active_memory()`` are process-wide: when a
+# second model auto-raises the limit, the FIRST model's scheduler must not
+# keep enforcing its earlier, lower cap against an ``active`` figure that
+# now includes the new model — that would reject every request to the
+# already-resident model. Every resolution notes the utilization here;
+# schedulers read the floor (with a generation counter so their cached cap
+# invalidates on each upward ratchet) and enforce
+# ``max(own configured utilization, process floor)``. The floor only ever
+# rises, mirroring the allocation limit itself.
+_process_floor_lock = threading.Lock()
+_process_utilization_floor: float = 0.0
+_process_floor_generation: int = 0
+
+
+def note_resolved_utilization(utilization: float) -> None:
+    """Record a resolved per-engine utilization into the process floor."""
+    global _process_utilization_floor, _process_floor_generation
+    with _process_floor_lock:
+        if utilization > _process_utilization_floor:
+            _process_utilization_floor = utilization
+            _process_floor_generation += 1
+
+
+def process_utilization_floor() -> tuple[float, int]:
+    """Return ``(floor, generation)`` for cache-invalidating readers."""
+    with _process_floor_lock:
+        return _process_utilization_floor, _process_floor_generation
 
 
 class MetalPreflightError(RuntimeError):

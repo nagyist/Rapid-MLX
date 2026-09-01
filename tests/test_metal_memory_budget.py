@@ -188,11 +188,31 @@ class TestSchedulerPreflight:
         assert "9.1 GB" in message
         assert "--gpu-memory-utilization" in message
 
+    def test_fails_when_smallest_request_cannot_fit(self):
+        """Codex round 2 BLOCKING #1: positive but insufficient headroom
+        for even a one-token exchange is still a deterministic-503 config
+        and must be refused."""
+        sched = _make_scheduler()
+        per_tok = 100_000
+        sched.config.metal_cap_kv_bytes_per_token = per_tok
+        cap = 10 * GB
+        # Room for one token of KV, but the smallest request needs two.
+        with (
+            patch.object(sched, "_resolve_metal_cap_bytes", return_value=cap),
+            patch.object(
+                sched,
+                "_current_metal_active_bytes",
+                return_value=cap - per_tok,
+            ),
+            pytest.raises(MetalPreflightError),
+        ):
+            sched.preflight_metal_admission()
+
     def test_passes_when_weights_just_under_cap(self):
-        """Codex round 1 BLOCKING #1: the gate is ``active >= cap`` ALONE.
-        A memory-tight config whose weights sit just under the cap can
-        still serve short requests, so preflight must NOT refuse it even
-        though a nominal request's projected KV would overflow."""
+        """Codex round 1 BLOCKING #1: a memory-tight config whose weights
+        leave room for the smallest valid request can still serve short
+        requests, so preflight must NOT refuse it even though a nominal
+        1024-token request's projected KV would overflow."""
         sched = _make_scheduler()
         per_tok = 100_000  # bytes per token, via the operator override path
         sched.config.metal_cap_kv_bytes_per_token = per_tok
@@ -226,6 +246,54 @@ class TestSchedulerPreflight:
             sched.preflight_metal_admission()
 
 
+class TestProcessUtilizationRatchet:
+    """Codex round 2 BLOCKING #2: a resident scheduler's cap must follow
+    the process-wide utilization ratchet upward."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_floor(self):
+        import vllm_mlx.memory_budget as mb
+
+        with mb._process_floor_lock:
+            saved = (mb._process_utilization_floor, mb._process_floor_generation)
+            mb._process_utilization_floor = 0.0
+            mb._process_floor_generation += 1
+        yield
+        with mb._process_floor_lock:
+            mb._process_utilization_floor = saved[0]
+            mb._process_floor_generation += 1
+
+    def _fake_device(self):
+        import vllm_mlx.scheduler as sched_mod
+
+        metal = MagicMock()
+        metal.is_available.return_value = True
+        device_info = MagicMock(return_value={"memory_size": 100 * GB})
+        return patch.multiple(
+            sched_mod.mx, metal=metal, device_info=device_info, create=True
+        )
+
+    def test_cap_follows_ratchet_upward(self):
+        from vllm_mlx.memory_budget import note_resolved_utilization
+
+        sched = _make_scheduler(gpu_memory_utilization=0.5)
+        with self._fake_device():
+            assert sched._resolve_metal_cap_bytes() == 50 * GB
+            note_resolved_utilization(0.9)
+            assert sched._resolve_metal_cap_bytes() == 90 * GB
+            # A LOWER later resolution must not lower the enforced cap.
+            note_resolved_utilization(0.6)
+            assert sched._resolve_metal_cap_bytes() == 90 * GB
+
+    def test_disabled_cap_stays_disabled(self):
+        from vllm_mlx.memory_budget import note_resolved_utilization
+
+        sched = _make_scheduler(gpu_memory_utilization=0.0)
+        with self._fake_device():
+            note_resolved_utilization(0.97)
+            assert sched._resolve_metal_cap_bytes() == 0
+
+
 class TestActionableAdmission503:
     def test_backpressure_message_carries_remediation(self):
         """The runtime D-METAL-CAP 503 must state required vs available and
@@ -249,3 +317,25 @@ class TestActionableAdmission503:
         assert "reserved KV" in message
         assert "current limit is" in message
         assert "--gpu-memory-utilization" in message
+
+    def test_no_utilization_advice_when_cap_maxed(self):
+        """Codex round 2 NIT: at an enforced utilization with no headroom
+        left, the 503 must not suggest raising --gpu-memory-utilization."""
+        sched = _make_scheduler(gpu_memory_utilization=1.0)
+        sched._metal_cap_effective_utilization = 1.0
+        req = Request(
+            request_id="req-503-max",
+            prompt="x" * 16,
+            prompt_token_ids=list(range(16)),
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+        req.num_prompt_tokens = 16
+        with (
+            patch.object(sched, "_resolve_metal_cap_bytes", return_value=100 * GB),
+            patch.object(sched, "_current_metal_active_bytes", return_value=100 * GB),
+            pytest.raises(BackpressureError) as exc_info,
+        ):
+            sched._enforce_metal_cap_at_admission(req)
+        message = str(exc_info.value)
+        assert "D-METAL-CAP" in message
+        assert "--gpu-memory-utilization" not in message
