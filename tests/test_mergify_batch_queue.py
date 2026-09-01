@@ -271,6 +271,9 @@ def test_ready_authorization_is_bound_to_the_exact_head_commit():
     assert 'currentLabels.has("dequeued")' in script
     assert 'name: "dequeued"' in script
     assert 'labels: ["merge-requeue-required", "merge-requeue-trigger"]' in script
+    assert "github.paginate" in script
+    assert "github.rest.issues.listEvents" in script
+    assert "readyLabeledAt > dequeuedLabeledAt" in script
     assert "authorized &&" in script
     assert "error.status !== 404" in script
     assert "checkout" not in script.lower()
@@ -286,6 +289,9 @@ def _run_authorization_script(
     fail_get: bool = False,
     fail_add: bool = False,
     remove_error_status: int | None = None,
+    ready_event_at: str = "2026-09-01T04:01:00Z",
+    dequeue_event_at: str = "2026-09-01T04:00:00Z",
+    fail_events: bool = False,
 ) -> dict[str, object]:
     """Execute the exact github-script body against deterministic API mocks."""
 
@@ -304,6 +310,9 @@ def _run_authorization_script(
             "failGet": fail_get,
             "failAdd": fail_add,
             "removeErrorStatus": remove_error_status,
+            "readyEventAt": ready_event_at,
+            "dequeueEventAt": dequeue_event_at,
+            "failEvents": fail_events,
         }
     )
     harness = f"""
@@ -320,7 +329,16 @@ const context = {{
     pull_request: {{ head: {{ sha: "head-sha" }} }},
   }},
 }};
-const github = {{ rest: {{
+const github = {{
+  paginate: async () => {{
+    calls.push(["events"]);
+    if (scenario.failEvents) throw Object.assign(new Error("events failure"), {{ status: 500 }});
+    return [
+      {{ event: "labeled", label: {{ name: scenario.eventLabel }}, created_at: scenario.readyEventAt }},
+      {{ event: "labeled", label: {{ name: "dequeued" }}, created_at: scenario.dequeueEventAt }},
+    ];
+  }},
+  rest: {{
   pulls: {{ get: async () => {{
     calls.push(["get"]);
     if (scenario.failGet) throw Object.assign(new Error("get failure"), {{ status: 500 }});
@@ -373,12 +391,20 @@ def test_dequeued_head_is_blocked_before_marker_removal_then_reauthorized():
     result = _run_authorization_script(labels=["merge-ready-mac", "dequeued"])
     operations = [call[0] for call in result["calls"]]
 
-    assert operations == ["status", "get", "add", "remove", "notice", "status"]
+    assert operations == [
+        "status",
+        "get",
+        "events",
+        "add",
+        "remove",
+        "notice",
+        "status",
+    ]
     assert [call[1] for call in result["calls"] if call[0] == "status"] == [
         "pending",
         "success",
     ]
-    assert result["calls"][2] == [
+    assert result["calls"][3] == [
         "add",
         ["merge-requeue-required", "merge-requeue-trigger"],
     ]
@@ -402,6 +428,7 @@ def test_consumed_trigger_can_be_reissued_from_persistent_recovery_marker():
     assert result["calls"] == [
         ["status", "pending"],
         ["get"],
+        ["events"],
         ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["status", "success"],
     ]
@@ -415,6 +442,35 @@ def test_status_failure_cannot_remove_the_dequeue_circuit_breaker():
     assert result["calls"] == [
         ["status", "pending"],
         ["threw", "status failure"],
+    ]
+
+
+def test_delayed_ready_event_cannot_authorize_a_later_dequeue():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"],
+        ready_event_at="2026-09-01T04:00:00Z",
+        dequeue_event_at="2026-09-01T04:01:00Z",
+    )
+
+    assert result["calls"] == [
+        ["status", "pending"],
+        ["get"],
+        ["events"],
+        ["status", "failure"],
+        ["failed", "Re-apply merge-ready after the latest dequeue"],
+    ]
+
+
+def test_recovery_event_lookup_failure_remains_pending():
+    result = _run_authorization_script(
+        labels=["merge-ready-mac", "dequeued"], fail_events=True
+    )
+
+    assert result["calls"] == [
+        ["status", "pending"],
+        ["get"],
+        ["events"],
+        ["threw", "events failure"],
     ]
 
 
@@ -436,6 +492,7 @@ def test_trigger_failure_keeps_both_queue_circuit_breakers():
     assert result["calls"] == [
         ["status", "pending"],
         ["get"],
+        ["events"],
         ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["threw", "add failure"],
     ]
@@ -449,6 +506,7 @@ def test_marker_failure_leaves_trigger_blocked_and_retryable():
     assert result["calls"] == [
         ["status", "pending"],
         ["get"],
+        ["events"],
         ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["remove"],
         ["threw", "remove failure"],
@@ -463,6 +521,7 @@ def test_concurrent_marker_removal_proceeds_to_final_authorization():
     assert result["calls"] == [
         ["status", "pending"],
         ["get"],
+        ["events"],
         ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["remove"],
         ["status", "success"],
@@ -485,6 +544,7 @@ def test_final_status_failure_leaves_trigger_blocked_and_retryable():
     assert result["calls"] == [
         ["status", "pending"],
         ["get"],
+        ["events"],
         ["add", ["merge-requeue-required", "merge-requeue-trigger"]],
         ["remove"],
         [

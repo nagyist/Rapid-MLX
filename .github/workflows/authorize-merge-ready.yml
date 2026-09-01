@@ -60,23 +60,53 @@ jobs:
             );
             const sameHead =
               livePull.head.sha === context.payload.pull_request.head.sha;
-            const authorized =
+            const baseAuthorized =
               sameHead &&
               present.length === 1 &&
               present[0] === context.payload.label.name;
+            const wasDequeued = currentLabels.has("dequeued");
+            const recoveryRequired =
+              wasDequeued || currentLabels.has("merge-requeue-required");
+            let recoveryEventFresh = true;
+            if (baseAuthorized && recoveryRequired) {
+              const events = await github.paginate(
+                github.rest.issues.listEvents,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  per_page: 100,
+                },
+              );
+              const latestLabeledAt = (name) =>
+                events
+                  .filter(
+                    (event) =>
+                      event.event === "labeled" && event.label?.name === name,
+                  )
+                  .map((event) => Date.parse(event.created_at))
+                  .filter(Number.isFinite)
+                  .reduce((latest, value) => Math.max(latest, value), -Infinity);
+              const readyLabeledAt = latestLabeledAt(context.payload.label.name);
+              const dequeuedLabeledAt = latestLabeledAt("dequeued");
+              // GitHub documents created_at for issue events. Require a strict
+              // ordering; same-second or missing events fail closed and can be
+              // resolved by re-applying the ready label once more.
+              recoveryEventFresh = readyLabeledAt > dequeuedLabeledAt;
+            }
+            const authorized = baseAuthorized && recoveryEventFresh;
             const state = authorized ? "success" : "failure";
             const description = authorized
               ? `Authorized ${present[0]} on this exact head`
-              : "Apply exactly one merge-ready label";
+              : recoveryRequired && !recoveryEventFresh
+                ? "Re-apply merge-ready after the latest dequeue"
+                : "Apply exactly one merge-ready label";
 
             // Mergify records a terminal dequeue for this exact head after a
             // batch outcome. Only a fresh, valid ready-label event may start
             // one diagnosed retry. A persistent recovery marker makes partial
             // provider action failure recoverable, while the consumed trigger
             // prevents either marker from retrying the head by itself.
-            const wasDequeued = currentLabels.has("dequeued");
-            const recoveryRequired =
-              wasDequeued || currentLabels.has("merge-requeue-required");
             if (authorized && recoveryRequired) {
               // Mint the one-shot token while the pending status blocks
               // Mergify (and, on first recovery, the dequeue marker does too).

@@ -146,7 +146,9 @@ The queue contract lives in `.mergify.yml`:
   terminal `dequeued` state after a diagnosed batch outcome. The marker
   deliberately blocks automatic retry. To authorize one explicit retry of the
   unchanged head, remove and re-apply its one ready label: the exact-head
-  authorization workflow records a head-bound `merge-requeue-required` marker,
+  authorization workflow verifies from the paginated issue-event history that
+  the latest ready-label event occurred strictly after the latest dequeue event,
+  then records a head-bound `merge-requeue-required` marker,
   clears the stale provider marker, and issues a bot-owned, one-shot
   `merge-requeue-trigger`. The matching action consumes the trigger while
   queueing the head again. The persistent recovery marker allows another fresh
