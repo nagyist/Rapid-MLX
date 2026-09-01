@@ -135,7 +135,12 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         // to settle (exists + hittable) and re-issues the drop if it is lost, so
         // the control is guaranteed before we send (#2481).
         let imageChip = harness.element("ChatView.Attachment.Remove.\(image.lastPathComponent)")
-        harness.dragFile(image, expectedChip: imageChip)
+        let recoveredAttempts = harness.dragFile(
+            image,
+            expectedChip: imageChip,
+            simulateMissedFirstGesture: true
+        )
+        XCTAssertEqual(recoveredAttempts, 2)
         harness.send("Dragged photo", expectedRequestCount: 1)
 
         let documentChip = harness.element("ChatView.Attachment.Remove.\(document.lastPathComponent)")

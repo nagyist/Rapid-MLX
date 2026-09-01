@@ -297,13 +297,18 @@ final class RapidUITestHarness {
     /// ``firstMatch`` cannot throw (#2481).
     /// Callers without an expected chip (the unsupported-file negative case)
     /// keep the original single-drop behaviour.
+    @discardableResult
     func dragFile(
         _ url: URL,
         expectedChip chip: XCUIElement? = nil,
-        dropSettleTimeout: TimeInterval = 10
-    ) {
+        dropSettleTimeout: TimeInterval = 10,
+        simulateMissedFirstGesture: Bool = false
+    ) -> Int {
         let dragSource = XCUIApplication(bundleIdentifier: "com.rapidmlx.rapid-uitest-host")
-        dragSource.launchEnvironment = ["RAPID_XCUI_DRAG_FILE": url.path]
+        dragSource.launchEnvironment = [
+            "RAPID_XCUI_DRAG_FILE": url.path,
+            "RAPID_XCUI_DROP_FIRST_GESTURE": simulateMissedFirstGesture ? "1" : "0",
+        ]
         dragSource.launch()
         defer { dragSource.terminate() }
         let source = dragSource.descendants(matching: .any)
@@ -323,7 +328,7 @@ final class RapidUITestHarness {
 
         guard let chip = chip else {
             source.click(forDuration: 1, thenDragTo: dropTarget)
-            return
+            return 1
         }
         let settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
         let maximumAttempts = 2
@@ -339,7 +344,7 @@ final class RapidUITestHarness {
                 (chip.exists && chip.isHittable)
                     || FileManager.default.fileExists(atPath: self.dropEventFile.path)
             }
-            if chip.exists && chip.isHittable { return }
+            if chip.exists && chip.isHittable { return attempt }
 
             let observedPhase = try? String(contentsOf: dropEventFile, encoding: .utf8)
             if FileDropRetryPolicy.shouldRetry(
@@ -353,14 +358,15 @@ final class RapidUITestHarness {
 
             let remaining = max(0, settleDeadline.timeIntervalSinceNow)
             if waitUntil(timeout: remaining, condition: { chip.exists && chip.isHittable }) {
-                return
+                return attempt
             }
             XCTFail(
                 "dropped attachment chip did not settle within \(dropSettleTimeout)s "
                     + "(drop phase: \(observedPhase ?? "not performed"), attempts: \(attempt))"
             )
-            return
+            return attempt
         }
+        return maximumAttempts
     }
 
     func pasteImage(_ url: URL) throws {

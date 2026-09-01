@@ -7,10 +7,13 @@ import AppKit
 // macOS file-URL drag without depending on Finder's ambient window geometry.
 final class FileDragView: NSView, NSDraggingSource {
     let fileURL: URL
+    private let dropsFirstGesture: Bool
     private var startedDragging = false
+    private var gestureCount = 0
 
-    init(fileURL: URL) {
+    init(fileURL: URL, dropsFirstGesture: Bool) {
         self.fileURL = fileURL
+        self.dropsFirstGesture = dropsFirstGesture
         super.init(frame: .zero)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
@@ -39,6 +42,8 @@ final class FileDragView: NSView, NSDraggingSource {
     override func mouseDragged(with event: NSEvent) {
         guard !startedDragging else { return }
         startedDragging = true
+        gestureCount += 1
+        if dropsFirstGesture && gestureCount == 1 { return }
         let item = NSDraggingItem(pasteboardWriter: fileURL as NSURL)
         item.setDraggingFrame(bounds, contents: NSWorkspace.shared.icon(forFile: fileURL.path))
         beginDraggingSession(with: [item], event: event, source: self)
@@ -68,7 +73,10 @@ if let path = ProcessInfo.processInfo.environment["RAPID_XCUI_DRAG_FILE"] {
         defer: false
     )
     panel.title = "Drag attachment"
-    panel.contentView = FileDragView(fileURL: URL(fileURLWithPath: path))
+    panel.contentView = FileDragView(
+        fileURL: URL(fileURLWithPath: path),
+        dropsFirstGesture: ProcessInfo.processInfo.environment["RAPID_XCUI_DROP_FIRST_GESTURE"] == "1"
+    )
     panel.level = .floating
     panel.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
