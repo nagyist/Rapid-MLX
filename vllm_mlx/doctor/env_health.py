@@ -531,6 +531,14 @@ def _runtime_python_path() -> Path:
                 interpreter = Path(found)
             return interpreter.absolute()
 
+        def _module_command_entry(command: list[str]) -> str | None:
+            for index, argument in enumerate(command[1:], start=1):
+                if argument == "-m":
+                    return command[index + 1] if index + 1 < len(command) else None
+                if not argument.startswith("-"):
+                    return None
+            return None
+
         def _runtime_candidate(cmdline: list[str], process: Any) -> Path | None:
             if hasattr(os, "getuid") and hasattr(process, "uids"):
                 try:
@@ -554,6 +562,10 @@ def _runtime_python_path() -> Path:
                 return None
             entry_argument = command[-1]
             entry = Path(entry_argument)
+            module_entry = _module_command_entry(command)
+            if module_entry is not None:
+                entry_argument = module_entry
+                entry = Path(module_entry)
             if entry.name == "rapid-mlx" and not entry.is_absolute():
                 if "/" in entry_argument:
                     entry = context_cwd / entry
@@ -568,11 +580,7 @@ def _runtime_python_path() -> Path:
                 if not _is_installed_rapid_mlx_entrypoint(entry):
                     return None
                 candidate = _python_from_entrypoint(entry, process)
-            elif (
-                len(command) >= 3
-                and command[1] == "-m"
-                and entry.name == "vllm_mlx.cli"
-            ) or (
+            elif (module_entry is not None and entry.name == "vllm_mlx.cli") or (
                 len(command) >= 2
                 and entry.name == "cli.py"
                 and entry.parent.name == "vllm_mlx"
@@ -773,6 +781,7 @@ for _audio_dist, _audio_module in (*_AUDIO_IMPORTS, *_AUDIO_DESKTOP_IMPORTS):
 _RUNTIME_PROBE_CACHE: dict[
     tuple[Path, Path | None, tuple[Path, ...]], dict[str, object] | None
 ] = {}
+_PROBE_RESULT_PREFIX = "__RAPID_MLX_IMPORT_RESULT__"
 _RUNTIME_IMPORT_SCRIPT = """\
 import importlib
 import importlib.util
@@ -780,6 +789,7 @@ import json
 import sys
 from pathlib import Path
 
+_PROBE_SENTINEL = "__RAPID_MLX_IMPORT_RESULT__"
 module_name = sys.argv[1]
 probe_paths = json.loads(sys.argv[2])
 exercise = module_name == "PIL.Image"
@@ -803,22 +813,25 @@ def _module_path_is_trusted(spec):
         locations.extend(spec.submodule_search_locations)
     return any(_path_is_trusted(location) for location in locations)
 
+def _emit_import_result(payload):
+    print(_PROBE_SENTINEL + json.dumps(payload))
+
 spec = importlib.util.find_spec(module_name)
 if spec is None or not _module_path_is_trusted(spec):
-    print(json.dumps({"importable": False, "trusted_origin": False}))
+    _emit_import_result({"importable": False, "trusted_origin": False})
 else:
     if exercise:
         import PIL.Image as Image
 
         Image.new("RGB", (1, 1))
-        print(json.dumps({"importable": True, "trusted_origin": True}))
+        _emit_import_result({"importable": True, "trusted_origin": True})
     else:
         try:
             importlib.import_module(module_name)
         except (Exception, SystemExit):
-            print(json.dumps({"importable": False, "trusted_origin": True}))
+            _emit_import_result({"importable": False, "trusted_origin": True})
             sys.exit(0)
-        print(json.dumps({"importable": True, "trusted_origin": True}))
+        _emit_import_result({"importable": True, "trusted_origin": True})
 """
 _RUNTIME_IMPORT_CACHE: dict[
     tuple[Path, str, str, bool],
@@ -907,7 +920,16 @@ def _runtime_module_importable(
             cwd="/",
             check=True,
         )
-        result_json = json.loads(result.stdout)
+        probe_lines = [
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith(_PROBE_RESULT_PREFIX)
+        ]
+        if not probe_lines:
+            importable = False
+            _RUNTIME_IMPORT_CACHE[cache_key] = importable
+            return importable
+        result_json = json.loads(probe_lines[-1].removeprefix(_PROBE_RESULT_PREFIX))
         if not isinstance(result_json, dict):
             importable = False
         else:

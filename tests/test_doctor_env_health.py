@@ -1059,6 +1059,53 @@ def test_relative_module_server_uses_process_executable(
     assert eh._runtime_python_path() == server_runtime.resolve()
 
 
+def test_module_command_accepts_python_flags_before_dash_m(
+    tmp_path,
+    monkeypatch,
+    allow_rapid_mlx_module_servers,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [
+                    str(doctor_exe),
+                    "-O",
+                    "-m",
+                    "vllm_mlx.cli",
+                    "serve",
+                    "test-model",
+                ],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(doctor_exe)
+
+        def environ(self):
+            return {"PATH": str(doctor_exe.parent)}
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_python_path() == doctor_exe.absolute()
+
+
 def test_running_server_same_interpreter_is_still_server_context(
     tmp_path,
     monkeypatch,
@@ -2110,6 +2157,25 @@ def test_remote_probe_accepts_trusted_single_file_module(
     assert package["importable"] is None
     assert eh._runtime_module_importable(runtime, "probe_single_file", sidecar_root)
     assert package["version"] is None
+
+
+def test_remote_import_probe_ignores_dependency_stdout_banners(
+    tmp_path,
+    monkeypatch,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    runtime = Path(sys.executable)
+    sidecar_root = tmp_path / "sidecar"
+    site_root = sidecar_root / "site-packages"
+    site_root.mkdir(parents=True)
+    (site_root / "probe_banner.py").write_text(
+        "print('dependency startup banner')\nprobe_loaded = True\n"
+    )
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._runtime_module_importable(runtime, "probe_banner", sidecar_root)
 
 
 def test_remote_probe_does_not_report_unbound_spec_on_bad_finder(tmp_path):
