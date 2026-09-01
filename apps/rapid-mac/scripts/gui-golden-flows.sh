@@ -1665,7 +1665,11 @@ start_model() {
     # user needs before clicking it.
     wait_identifier_enabled Readiness.Action "$OUT/readiness-start.json"
     local initial_action
+    local selected_alias
     initial_action="$(element_field "$OUT/readiness-start.json" Readiness.Action description)"
+    selected_alias="$(element_field "$OUT/readiness-start.json" ModelPickerBar.ModelMenu value)"
+    [[ -n "$selected_alias" ]] \
+        || die "the readiness action exposed no selected model alias"
     press "$OUT/readiness-start.json" Readiness.Action "$OUT/start-model.json"
     if [[ "$initial_action" == "Download" ]]; then
         local download_ready=0
@@ -1696,7 +1700,7 @@ start_model() {
     # bundled fake sidecar after a full release build. Keep the event-based
     # readiness proof, but allow 60 seconds before declaring startup broken.
     wait_fake_event_after_start \
-        ".event == \"server_started\" and .alias == \"$FAKE_ALIAS\"" \
+        ".event == \"server_started\" and .alias == \"$selected_alias\"" \
         "fake model did not become ready" \
         readiness
     wait_send_idle "$OUT/readiness-ready.json"

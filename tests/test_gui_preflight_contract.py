@@ -566,7 +566,7 @@ def test_fresh_install_fixture_contains_the_real_starter():
 
 
 def test_start_model_waits_for_an_interactive_readiness_action():
-    """A mounted SwiftUI button can still reject an AX press while disabled."""
+    """Start waits for an interactive action and its actually selected alias."""
     source = HARNESS.read_text()
     helper = source.split("start_model() {", 1)[1].split("\n}", 1)[0]
     assert "wait_identifier_enabled Readiness.Action" in helper
@@ -574,7 +574,12 @@ def test_start_model_waits_for_an_interactive_readiness_action():
         'press "$OUT/readiness-start.json" Readiness.Action'
     )
     assert "wait_fake_event_after_start" in helper
-    assert r"and .alias == \"$FAKE_ALIAS\"" in helper
+    assert (
+        'selected_alias="$(element_field "$OUT/readiness-start.json" '
+        'ModelPickerBar.ModelMenu value)"'
+    ) in helper
+    assert r"and .alias == \"$selected_alias\"" in helper
+    assert r"and .alias == \"$FAKE_ALIAS\"" not in helper
 
     driver = DRIVER.read_text()
     click = driver.split('case "click-center":', 1)[1].split(
@@ -582,6 +587,50 @@ def test_start_model_waits_for_an_interactive_readiness_action():
     )[0]
     assert "kAXPositionAttribute" in click and "kAXSizeAttribute" in click
     assert ".leftMouseDown" in click and ".leftMouseUp" in click
+
+
+def test_start_model_witnesses_the_selected_download_alias(tmp_path):
+    """Fresh install starts the downloaded pick, not the persona's fallback."""
+    source = HARNESS.read_text()
+    helper = "start_model() {" + source.split("start_model() {", 1)[1].split(
+        "\n}", 1
+    )[0] + "\n}"
+    capture = tmp_path / "predicate.txt"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            helper
+            + r'''
+set -euo pipefail
+OUT="$1"
+CAPTURE="$2"
+wait_identifier_enabled() { :; }
+element_field() {
+    if [[ "$2" == "Readiness.Action" ]]; then
+        printf 'Start\n'
+    else
+        printf 'lfm2.5-1b-4bit\n'
+    fi
+}
+press() { :; }
+wait_fake_event_after_start() { printf '%s\n' "$1" > "$CAPTURE"; }
+wait_send_idle() { :; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+start_model
+''',
+            "start-model-selected-alias",
+            str(tmp_path),
+            str(capture),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert capture.read_text().strip() == (
+        '.event == "server_started" and .alias == "lfm2.5-1b-4bit"'
+    )
 
 
 def test_direct_model_starts_follow_enabled_memory_confirmation_branches():
