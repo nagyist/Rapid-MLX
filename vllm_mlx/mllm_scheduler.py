@@ -1000,6 +1000,7 @@ class MLLMScheduler:
         """
         outputs = []
         finished_ids = set()
+        terminal_performance_requests: list[MLLMRequest] = []
 
         tokenizer = (
             self.processor.tokenizer
@@ -1264,7 +1265,7 @@ class MLLMScheduler:
                 self.total_prompt_tokens += request.num_prompt_tokens
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1
-                self._record_terminal_performance(request, "succeeded")
+                terminal_performance_requests.append(request)
 
                 logger.debug(
                     f"Request {request_id} finished: {finish_reason}, "
@@ -1302,6 +1303,11 @@ class MLLMScheduler:
                 )
             )
 
+        # Commit outcomes only after the entire response batch has processed.
+        # A later response can still fail decoding/finalization, in which case
+        # the process loop converts every pending request to a failure.
+        for request in terminal_performance_requests:
+            self._record_terminal_performance(request, "succeeded")
         return outputs, finished_ids
 
     def _cleanup_finished(self, finished_ids: set[str]) -> None:
@@ -1358,6 +1364,7 @@ class MLLMScheduler:
                 err_msg = str(e)
                 logger.error(f"Batch generation failed: {err_msg}")
                 error_ids = set(self.running.keys())
+                failed_requests = [self.running[rid] for rid in error_ids]
 
                 # Remove from batch generator BEFORE scheduler cleanup so
                 # stale requests don't poison subsequent batches.
@@ -1407,6 +1414,8 @@ class MLLMScheduler:
                         )
                     )
                 output.finished_request_ids = error_ids
+                for request in failed_requests:
+                    self._record_terminal_performance(request, "failed")
                 self._cleanup_finished(error_ids)
                 return output
 

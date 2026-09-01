@@ -209,3 +209,35 @@ def test_mllm_failed_request_records_partial_work():
     assert performance.completion_tokens == 2
     assert performance.ttft_seconds_count == 1
     assert performance.decode_observations == 1
+
+
+def test_mllm_does_not_commit_success_when_later_response_fails():
+    scheduler = _bare_scheduler()
+    first = MLLMRequest(request_id="first", prompt="hello")
+    second = MLLMRequest(request_id="second", prompt="hello")
+    scheduler.running = {"first": first, "second": second}
+    scheduler.uid_to_request_id = {1: "first", 2: "second"}
+    scheduler._detokenizer_pool["second"] = SimpleNamespace(
+        add_token=lambda _token: (_ for _ in ()).throw(RuntimeError("decode failed"))
+    )
+    first_response = SimpleNamespace(
+        uid=1,
+        token=11,
+        prompt_tokens=3,
+        finish_reason="stop",
+        token_is_stop_token=False,
+        logprobs=None,
+    )
+    second_response = SimpleNamespace(
+        uid=2,
+        token=12,
+        prompt_tokens=4,
+        finish_reason=None,
+        token_is_stop_token=False,
+        logprobs=None,
+    )
+
+    with pytest.raises(RuntimeError, match="decode failed"):
+        scheduler._process_batch_responses([first_response, second_response])
+
+    assert scheduler.performance.snapshot().requests_succeeded == 0
