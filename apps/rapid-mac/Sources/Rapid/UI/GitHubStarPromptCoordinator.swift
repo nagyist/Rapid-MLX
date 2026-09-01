@@ -295,13 +295,16 @@ enum GitHubStarCLI {
             try await withThrowingTaskGroup(of: Outcome.self) { group in
                 group.addTask {
                     let status = await child.waitUntilExit()
-                    // Once the deadline has passed, timeout is authoritative even
-                    // if SIGKILL makes the waiter observe a nonzero exit first.
-                    guard clock.now < deadline else { return .timedOut }
                     return .exited(status)
                 }
                 group.addTask {
                     try await clock.sleep(until: deadline)
+                    // Reap an already-exited child before declaring timeout. The
+                    // dispatch exit callback may be delayed even though `gh`
+                    // completed successfully before the deadline.
+                    if let status = child.terminationStatusIfExited() {
+                        return .exited(status)
+                    }
                     child.killIfRunning()
                     return .timedOut
                 }
@@ -372,6 +375,14 @@ private final class GitHubStarChild: @unchecked Sendable {
                 lock.unlock()
             }
         }
+    }
+
+    func terminationStatusIfExited() -> Int32? {
+        _ = reapExitedProcess(waitOptions: WNOHANG)
+        lock.lock()
+        let status = terminationStatus
+        lock.unlock()
+        return status
     }
 
     static func spawn(executableURL: URL, arguments: [String]) throws -> GitHubStarChild {

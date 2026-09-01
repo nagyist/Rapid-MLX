@@ -71,6 +71,8 @@ struct GitHubStarPromptTests {
             card.components(separatedBy: ".disabled(prompt.isStarring)").count - 1 == 3,
             "Star, Later, and close must all be disabled while the external mutation is in flight"
         )
+        #expect(coordinator.contains("if let status = child.terminationStatusIfExited()"))
+        #expect(!coordinator.contains("guard clock.now < deadline"))
         #expect(coordinator.contains("NSEvent.addLocalMonitorForEvents(matching: [.keyDown])"))
         #expect(!coordinator.contains("URLSession"), "eligibility must not probe GitHub or the network")
     }
