@@ -478,8 +478,12 @@ def probe_qwen4_fused_gdn_decode(dtype) -> int | None:
                 logger.info("Qwen4 fused GDN probe failed: %s", exc)
                 break
             except RuntimeError as exc:
-                logger.info("Qwen4 fused GDN kernel is unavailable: %s", exc)
-                break
+                logger.info(
+                    "Qwen4 fused GDN threadgroup_y=%d is unavailable: %s",
+                    threadgroup_y,
+                    exc,
+                )
+                continue
         _PROBE_COMPLETE = True
         return _PROBED_THREADGROUP_Y
 

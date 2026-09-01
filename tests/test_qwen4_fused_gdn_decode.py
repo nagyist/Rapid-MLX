@@ -225,6 +225,25 @@ def test_concurrent_probe_publishes_only_after_initialization():
     assert calls == 1
 
 
+def test_probe_tries_smaller_threadgroup_after_runtime_error():
+    successful_outputs = (object(), object(), object())
+    with (
+        patch.object(fused_gdn, "_PROBE_COMPLETE", False),
+        patch.object(fused_gdn, "_PROBED_THREADGROUP_Y", None),
+        patch.object(fused_gdn, "_PROBE_LOCK", Lock()),
+        patch.object(fused_gdn, "fused_gdn_runtime_supported", return_value=True),
+        patch.object(
+            fused_gdn,
+            "qwen4_fused_gdn_decode",
+            side_effect=[RuntimeError("threadgroup resources"), successful_outputs],
+        ) as execute,
+        patch.object(fused_gdn.mx, "eval"),
+    ):
+        assert fused_gdn.probe_qwen4_fused_gdn_decode(mx.bfloat16) == 16
+
+    assert [call.kwargs["threadgroup_y"] for call in execute.call_args_list] == [32, 16]
+
+
 def test_resident_switch_preserves_weights_and_defaults_stock():
     with patch.object(qwen4_exp, "_FUSED_GDN_DEFAULT", False):
         layer = qwen4_exp.GatedDeltaNet(tiny_args())
