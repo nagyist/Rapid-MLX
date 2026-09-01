@@ -288,7 +288,9 @@ def test_continuous_mtp_suppresses_alias_turboquant_auto_default() -> None:
     )
 
 
-def test_ordinary_mtp_keeps_alias_turboquant_auto_default() -> None:
+def test_ordinary_mtp_keeps_alias_turboquant_auto_default(
+    scheduler_config_stub,
+) -> None:
     from vllm_mlx.cli import _resolve_turboquant_with_mtp_policy
 
     args = SimpleNamespace(
