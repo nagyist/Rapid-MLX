@@ -1886,15 +1886,19 @@ class BatchedEngine(BaseEngine):
         )
         if max_recommended <= 0:
             return fallback
+        # Drop reclaimable allocator cache first (codex round 4 NIT):
+        # after a dynamic load/unload cycle ``get_active_memory``
+        # routinely includes cached pages that are not resident weights —
+        # budgeting them would ratchet the process limit toward the
+        # ceiling on memory that is actually free. Active allocations
+        # from resident models are unaffected by ``clear_cache``. A
+        # failing clear must not suppress the still-usable measurement
+        # (codex round 6 #1), so the two guard separately.
         try:
-            # Drop reclaimable allocator cache first (codex round 4
-            # NIT): after a dynamic load/unload cycle
-            # ``get_active_memory`` routinely includes cached pages
-            # that are not resident weights — budgeting them would
-            # ratchet the process limit toward the ceiling on memory
-            # that is actually free. Active allocations from resident
-            # models are unaffected by ``clear_cache``.
             mx.clear_cache()
+        except Exception:
+            pass
+        try:
             weights_bytes = int(mx.get_active_memory())
         except Exception:
             weights_bytes = 0

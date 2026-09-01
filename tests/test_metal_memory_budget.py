@@ -495,6 +495,21 @@ class TestBatchedEngineBudgetInstall:
             assert engine._resolve_and_set_metal_limits() == AUTO_UTILIZATION_FLOOR
             mx.set_memory_limit.assert_called_once_with(int(100 * GB * 0.90))
 
+    def test_resolve_measures_weights_even_when_clear_cache_fails(self):
+        """Codex round 6 #1: a failing ``clear_cache`` must not suppress a
+        still-usable weight measurement — a big model must keep its
+        auto-raised budget."""
+        import mlx.core as mx
+
+        engine = self._bare_engine(requested=None)
+        core_patch, metal_patch = self._patched_mx(active=95 * GB)
+        with core_patch, metal_patch:
+            mx.clear_cache.side_effect = RuntimeError("no cache to clear")
+            resolved = engine._resolve_and_set_metal_limits()
+            # 95GB weights + headroom on 100GB pins auto at the ceiling,
+            # not the no-measurement floor.
+            assert resolved == AUTO_UTILIZATION_CEILING
+
     def test_resolve_survives_setter_failure(self):
         """Codex round 1 BLOCKING #2: a setter failure must not poison the
         resolved utilization the admission cap enforces."""
