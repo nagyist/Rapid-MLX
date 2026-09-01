@@ -361,6 +361,7 @@ def _module_available(
                 Path(sys.executable).absolute(),
                 "PIL.Image" if module == "PIL" else module,
                 None,
+                trusted_roots=_TRUSTED_SYS_PATH_ROOTS,
                 exercise=module == "PIL",
             )
         return _iu.find_spec(module) is not None
@@ -631,13 +632,14 @@ def _runtime_python_path() -> Path:
                 not candidate.is_absolute()
                 or not candidate.is_file()
                 or not candidate.name.lower().startswith("python")
-                or not _is_trusted_runtime_executable(candidate)
-            ):
-                return None
-            if not _runtime_has_rapid_mlx_distribution(
-                candidate,
-                context_cwd,
-                context_env,
+                or not (
+                    _is_trusted_runtime_executable(candidate)
+                    or _runtime_has_rapid_mlx_distribution(
+                        candidate,
+                        context_cwd,
+                        context_env,
+                    )
+                )
             ):
                 return None
             return candidate
@@ -931,6 +933,7 @@ def _runtime_module_importable(
     module: str,
     sidecar_root: Path | None,
     *,
+    trusted_roots: tuple[Path, ...] = (),
     exercise: bool = False,
     isolated: bool = True,
 ) -> bool:
@@ -962,7 +965,7 @@ def _runtime_module_importable(
                     {
                         "trusted": [str(sidecar_root / "site-packages")]
                         if sidecar_root
-                        else [],
+                        else [str(root) for root in trusted_roots],
                     }
                 ),
             ]

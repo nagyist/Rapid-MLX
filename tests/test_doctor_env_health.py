@@ -52,7 +52,7 @@ def clean_runtime_probe_state(monkeypatch):
     original_import_probe = eh._runtime_module_importable
 
     def import_from_probe_when_available(
-        runtime, module, sidecar_root, *, exercise=False
+        runtime, module, sidecar_root, *, exercise=False, **kwargs
     ):
         probe = eh._probe_runtime(runtime, sidecar_root)
         package = eh._probe_package_by_module(probe, module) if probe else None
@@ -63,6 +63,7 @@ def clean_runtime_probe_state(monkeypatch):
             module,
             sidecar_root,
             exercise=exercise,
+            **kwargs,
         )
 
     monkeypatch.setattr(
@@ -245,6 +246,70 @@ def test_runtime_authentication_uses_filesystem_distribution_without_launch(tmp_
     untrusted_runtime.write_text("")
 
     assert eh._is_trusted_runtime_executable(untrusted_runtime) is False
+
+
+def test_system_layout_runtime_is_authenticated_by_isolated_distribution_probe(
+    tmp_path,
+    monkeypatch,
+):
+    doctor_exe = tmp_path / "doctor" / "bin" / "python"
+    doctor_exe.parent.mkdir(parents=True)
+    doctor_exe.write_text("")
+    system_runtime = tmp_path / "usr" / "local" / "bin" / "python3"
+    system_runtime.parent.mkdir(parents=True)
+    system_runtime.write_text("#!/bin/sh\nprintf '[\"rapid-mlx\"]\\n'\n")
+    system_runtime.chmod(0o755)
+
+    class FakeProcess:
+        def __init__(self):
+            self.info = {
+                "pid": os.getpid() + 1,
+                "cmdline": [
+                    str(system_runtime),
+                    "-m",
+                    "vllm_mlx.cli",
+                    "serve",
+                    "test-model",
+                ],
+                "create_time": 123.0,
+            }
+
+        def exe(self):
+            return str(system_runtime)
+
+        def environ(self):
+            return {"PATH": str(system_runtime.parent)}
+
+        def cwd(self):
+            return str(tmp_path)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+    fake_psutil = mock.Mock()
+    fake_psutil.process_iter.return_value = [FakeProcess()]
+    fake_psutil.NoSuchProcess = RuntimeError
+    fake_psutil.AccessDenied = RuntimeError
+    fake_psutil.ZombieProcess = RuntimeError
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(eh.sys, "executable", str(doctor_exe))
+
+    assert eh._filesystem_runtime_has_rapid_mlx_distribution(system_runtime) is False
+    assert eh._runtime_python_path() == system_runtime.absolute()
+
+
+def test_local_real_import_uses_trusted_dynamic_sys_path(tmp_path, monkeypatch):
+    module_root = tmp_path / "layered-site"
+    module_root.mkdir()
+    (module_root / "probe_dynamic_trusted.py").write_text("probe_loaded = True\n")
+    monkeypatch.syspath_prepend(module_root)
+    monkeypatch.setattr(
+        eh,
+        "_TRUSTED_SYS_PATH_ROOTS",
+        (module_root.resolve(),),
+    )
+
+    assert eh._module_available("probe_dynamic_trusted", real_import=True) is True
 
 
 def test_module_server_runtime_must_register_rapid_mlx_distribution(tmp_path):
@@ -1201,6 +1266,12 @@ def test_arbitrary_server_interpreter_requires_explicit_override(
     arbitrary_runtime = tmp_path / "uv" / "bin" / "python"
     arbitrary_runtime.parent.mkdir(parents=True)
     arbitrary_runtime.write_text("")
+    monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: False)
+    monkeypatch.setattr(
+        eh,
+        "_runtime_has_rapid_mlx_distribution",
+        lambda runtime, cwd, env: False,
+    )
     monkeypatch.setattr(eh, "_is_trusted_runtime_executable", lambda runtime: False)
 
     class FakeProcess:
