@@ -3072,6 +3072,66 @@ def test_generator_prompt_lookup_verifies_prompt_continuation(monkeypatch):
     assert mtp_cache.offset == 5
 
 
+def test_generator_prompt_lookup_falls_through_when_cache_cannot_recover(monkeypatch):
+    """A matching prompt never bypasses a failed full-width cache preflight."""
+    import vllm_mlx.spec_decode.mtp.generator as generator_mod
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import (
+        _safe_prompt_lookup_draft_count,
+        mtp_generate_step,
+    )
+
+    assert _safe_prompt_lookup_draft_count([object()], 2) == 0
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP", "1")
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP_MIN_NGRAM", "2")
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_NGRAM", "2")
+    monkeypatch.setenv("RAPID_MLX_MTP_PROMPT_LOOKUP_MAX_TOKENS", "2")
+    monkeypatch.setattr(generator_mod, "_safe_prompt_lookup_draft_count", lambda *_: 0)
+
+    timing: dict[str, float] = {}
+    list(
+        mtp_generate_step(
+            mx.array([7, 8, 20, 21], dtype=mx.uint32),
+            _CacheAdvancingQwen35Model(
+                backbone_outputs=[0, 0, 0, 7, 8, 20, 21, 22],
+                mtp_outputs=[0, 0, 0, 99, 20, 21],
+            ),
+            max_tokens=3,
+            max_k=1,
+            disable_auto_k=True,
+            prompt_cache=[_CountingKVCache(), _CountingKVCache()],
+            accept_counter=MTPAcceptCounter(),
+            timing_stats=timing,
+        )
+    )
+
+    assert timing["prompt_lookup_cache_fallthroughs"] == 1
+
+
+def test_generator_fails_closed_when_trim_breaks_its_contract():
+    """A short target-cache trim aborts rather than emitting from stale state."""
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    class ShortTrimCache(_CountingKVCache):
+        def trim(self, n):
+            self.trim_calls.append(n)
+            return 0
+
+    with pytest.raises(RuntimeError, match="violated speculative rollback"):
+        list(
+            mtp_generate_step(
+                mx.array([1], dtype=mx.uint32),
+                _CacheAdvancingQwen35Model([7, 12, 99], [11]),
+                prompt_cache=[ShortTrimCache(), _CountingKVCache()],
+                max_tokens=2,
+                max_k=1,
+                disable_auto_k=True,
+                accept_counter=MTPAcceptCounter(),
+            )
+        )
+
+
 def test_prompt_lookup_requires_an_audited_model_capability(monkeypatch):
     """An env opt-in cannot force unaudited MTP backends into prompt lookup."""
     from types import SimpleNamespace
