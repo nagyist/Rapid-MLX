@@ -213,7 +213,7 @@ enum RAMBucketedDefault {
             ]
             guard ModelCatalog.isSafeAlias(alias),
                   footprintMiB > 0,
-                  capabilityScoreX100 > 0,
+                  capabilityScoreX100 >= 0,
                   capabilityScoreX100 <= 10_000,
                   capabilityScoreX100 % 100 == 0,
                   decodeTokensPerSecondX100.map({ $0 > 0 }) ?? true,
