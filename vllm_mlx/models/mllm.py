@@ -154,7 +154,7 @@ VLM_EXTRA_INSTALL_HINT = (
     "Install it with:\n"
     "    pip install 'rapid-mlx[vision]'\n"
     "or directly (pinned to stay compatible with rapid-mlx's transformers pin):\n"
-    "    pip install 'mlx-vlm==0.6.16'"
+    "    pip install 'mlx-vlm==0.6.17'"
 )
 
 

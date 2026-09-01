@@ -142,6 +142,24 @@ def test_python_section_preserves_symlinked_application_environment(
     assert "Rapid-MLX application environment" in runtime_row.label
 
 
+def test_python_section_does_not_trust_symlink_target_directory(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    application_prefix = home / ".rapid-mlx"
+    base_runtime = tmp_path / "base" / "bin" / "python3"
+    base_runtime.parent.mkdir(parents=True)
+    base_runtime.write_text("")
+    monkeypatch.setattr(eh.Path, "home", lambda: home)
+    monkeypatch.setattr(eh.sys, "executable", str(base_runtime))
+    monkeypatch.setattr(eh.sys, "prefix", str(application_prefix))
+
+    kind = eh._runtime_environment(
+        base_runtime.absolute(),
+        Path(application_prefix),
+    )
+
+    assert kind == "virtual environment"
+
+
 @pytest.fixture(name="allow_rapid_mlx_module_servers")
 def allow_rapid_mlx_module_servers(monkeypatch):
     monkeypatch.setattr(

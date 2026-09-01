@@ -325,7 +325,7 @@ def _runtime_environment(
     if (
         exe in {application_bin / "python", application_bin / "python3"}
         or exe in {application_exe, application_python3}
-        or exe.parent in {application_bin, application_exe.parent}
+        or exe.parent == application_bin
     ):
         return "Rapid-MLX application environment"
     effective_prefix = prefix if prefix is not None else Path(sys.prefix).resolve()
