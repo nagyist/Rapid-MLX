@@ -33,6 +33,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -594,9 +595,8 @@ trusted_roots = [root for root in probe_paths["trusted"] if root]
 for site_root in trusted_roots:
     sys.path.insert(0, site_root)
 baseline_roots = list(sys.path)
-for site_root in probe_paths["context"]:
-    if site_root:
-        sys.path.insert(0, site_root)
+for site_root in reversed(probe_paths["context"]):
+    sys.path.insert(0, site_root)
 metadata_roots = [*baseline_roots, *probe_paths["context"]]
 trusted_roots = [
     str(Path(root).resolve()) for root in [*trusted_roots, *baseline_roots]
@@ -667,6 +667,8 @@ print(json.dumps({
 
 _RUNTIME_PACKAGES: dict[str, str] = dict(_DISTRIBUTION_MODULES)
 _RUNTIME_PROBE_CACHE: dict[Path, dict[str, object] | None] = {}
+_PROBE_RUNTIME_TOTAL_BUDGET_SECONDS = 20.0
+_PROBE_RUNTIME_DEADLINE: float | None = None
 _SECTION_PROBE_CACHE: dict[
     tuple[Path, tuple[tuple[str, str], ...]],
     dict[str, object] | None,
@@ -724,6 +726,14 @@ def _probe_runtime(
         cache = _SECTION_PROBE_CACHE
     if cache_key in cache:
         return cache[cache_key]
+    global _PROBE_RUNTIME_DEADLINE
+    now = time.monotonic()
+    if _PROBE_RUNTIME_DEADLINE is None:
+        _PROBE_RUNTIME_DEADLINE = now + _PROBE_RUNTIME_TOTAL_BUDGET_SECONDS
+    timeout = _PROBE_RUNTIME_DEADLINE - now
+    if timeout <= 0:
+        cache[cache_key] = None
+        return None
     try:
         env = {
             "HOME": os.environ.get("HOME", str(Path.home())),
@@ -749,7 +759,7 @@ def _probe_runtime(
             ],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=timeout,
             env=env,
             cwd="/",
             check=True,

@@ -24,6 +24,7 @@ import plistlib
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -39,6 +40,7 @@ from vllm_mlx.doctor import env_health as eh
 
 @pytest.fixture(autouse=True)
 def clean_runtime_probe_state(monkeypatch):
+    monkeypatch.setattr(eh, "_PROBE_RUNTIME_DEADLINE", None)
     monkeypatch.setitem(sys.modules, "psutil", None)
     yield
     eh._RUNTIME_PROBE_CACHE.clear()
@@ -209,6 +211,41 @@ def test_remote_probe_reads_sanitized_context_metadata_without_trusting_imports(
     assert package["discoverable"] is True
     assert package["trusted_origin"] is False
     assert package["importable"] is False
+
+
+def test_remote_probe_preserves_context_path_order(tmp_path, monkeypatch):
+    first_context = tmp_path / "first"
+    second_context = tmp_path / "second"
+    first_context.mkdir()
+    second_context.mkdir()
+    monkeypatch.setattr(
+        eh,
+        "_RUNTIME_CONTEXTS",
+        {
+            Path(sys.executable).resolve(): (
+                first_context,
+                {"PYTHONPATH": str(second_context)},
+            )
+        },
+    )
+    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+
+    probe = eh._probe_runtime(
+        Path(sys.executable).resolve(),
+        packages={},
+    )
+
+    assert probe is not None
+    path = cast("list[object]", probe["path"])
+    assert path[:2] == [str(first_context.resolve()), str(second_context.resolve())]
+
+
+def test_remote_probe_enforces_single_global_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(eh, "_PROBE_RUNTIME_DEADLINE", time.monotonic())
+    monkeypatch.setattr(eh, "_RUNTIME_PROBE_CACHE", {})
+    monkeypatch.setattr(eh, "_SECTION_PROBE_CACHE", {})
+
+    assert eh._probe_runtime(tmp_path / "missing-python") is None
 
 
 def test_apple_silicon_warn_on_non_arm64_mac():
