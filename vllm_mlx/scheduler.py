@@ -8638,6 +8638,7 @@ class Scheduler:
         for request_id in list(self.running):
             request = self.running.get(request_id)
             if request is not None:
+                self.performance.record_failed_performance(request)
                 request.set_finished(RequestStatus.FINISHED_ABORTED)
             aborted_ids.add(request_id)
             self.finished_req_ids.add(request_id)

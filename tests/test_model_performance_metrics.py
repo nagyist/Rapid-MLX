@@ -179,6 +179,35 @@ def test_ledger_dedupe_cache_is_bounded():
     assert ledger.record_failure("overflow") is False
 
 
+def test_distinct_request_lifetimes_may_reuse_the_same_id():
+    from types import SimpleNamespace
+
+    ledger = ModelPerformanceLedger("model-b")
+    first = SimpleNamespace(
+        request_id="reused",
+        arrival_time=1.0,
+        first_token_time=None,
+        num_prompt_tokens=2,
+        num_output_tokens=0,
+    )
+    second = SimpleNamespace(
+        request_id="reused",
+        arrival_time=2.0,
+        first_token_time=None,
+        num_prompt_tokens=3,
+        num_output_tokens=0,
+    )
+
+    ledger.record_finished_performance(first)
+    ledger.record_finished_performance(first)
+    ledger.record_cancelled_performance(second)
+
+    snapshot = ledger.snapshot()
+    assert snapshot.requests_succeeded == 1
+    assert snapshot.requests_cancelled == 1
+    assert snapshot.prompt_tokens == 5
+
+
 def test_ledger_histograms_are_cumulative_and_memory_bounded():
     ledger = ModelPerformanceLedger("model-a")
     for ttft, decode in ((0.05, 4.0), (0.3, 25.0), (1.2, 150.0)):
@@ -251,6 +280,22 @@ def test_scheduler_records_explicit_cancellation_once():
 
     scheduler.performance.record_cancelled_performance(scheduler.requests["cancelled"])
     assert scheduler.performance.snapshot().requests_cancelled == 1
+
+
+def test_scheduler_records_generation_recovery_failures():
+    pytest.importorskip("mlx")
+
+    scheduler = _scheduler()
+    _running_request(scheduler, "generation-failure")
+    scheduler.batch_generator.next.side_effect = RuntimeError("Metal OOM")
+
+    output = scheduler.step()
+
+    assert output.finished_request_ids == {"generation-failure"}
+    assert output.outputs[0].error is not None
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_failed == 1
+    assert performance.total_requests == 1
 
 
 @pytest.mark.asyncio

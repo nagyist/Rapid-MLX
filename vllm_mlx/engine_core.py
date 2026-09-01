@@ -1037,7 +1037,14 @@ class EngineCore:
                 for rid in list(self._finished_events.keys()):
                     if performance is not None:
                         try:
-                            performance.record_failure(rid)
+                            get_request = getattr(self.scheduler, "get_request", None)
+                            request = (
+                                get_request(rid) if get_request is not None else None
+                            )
+                            if request is not None:
+                                performance.record_failed_performance(request)
+                            else:
+                                performance.record_failure(rid)
                         except Exception:  # pragma: no cover — defensive
                             logger.debug("Failed to record engine failure for %s", rid)
                     collector = self._output_collectors.get(rid)

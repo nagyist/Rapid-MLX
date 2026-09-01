@@ -123,7 +123,9 @@ class ModelPerformanceLedger:
     def __init__(self, model_name: str | None = None):
         self._model_name = model_name or ""
         self._lock = threading.Lock()
-        self._seen_request_ids: OrderedDict[str, None] = OrderedDict()
+        self._seen_request_ids: OrderedDict[str | tuple[str, float], None] = (
+            OrderedDict()
+        )
         self._requests_succeeded = 0
         self._requests_cancelled = 0
         self._requests_failed = 0
@@ -164,6 +166,7 @@ class ModelPerformanceLedger:
                 completion_tokens=request.num_output_tokens,
                 ttft_seconds=self.ttft_for_request(request),
                 decode_tokens_per_second=self.decode_rate_for_request(request),
+                request_lifetime=request.arrival_time,
             )
         except Exception:
             logger.debug("Failed to record performance for %s", request.request_id)
@@ -177,6 +180,7 @@ class ModelPerformanceLedger:
                 completion_tokens=request.num_output_tokens,
                 ttft_seconds=self.ttft_for_request(request),
                 decode_tokens_per_second=self.decode_rate_for_request(request),
+                request_lifetime=request.arrival_time,
             )
         except Exception:
             logger.debug("Failed to record cancellation for %s", request.request_id)
@@ -193,15 +197,17 @@ class ModelPerformanceLedger:
         completion_tokens: int,
         ttft_seconds: float | None,
         decode_tokens_per_second: float | None,
+        request_lifetime: float | None = None,
     ) -> bool:
         """Record a completed request; return False when already accounted."""
         with self._lock:
-            if request_id in self._seen_request_ids:
-                self._seen_request_ids.move_to_end(request_id)
+            request_key = self._request_key(request_id, request_lifetime)
+            if request_key in self._seen_request_ids:
+                self._seen_request_ids.move_to_end(request_key)
                 return False
             prompt_tokens = max(0, int(prompt_tokens))
             completion_tokens = max(0, int(completion_tokens))
-            self._remember_request_id(request_id)
+            self._remember_request_id(request_key)
             self._requests_succeeded += 1
             self._prompt_tokens += prompt_tokens
             self._completion_tokens += completion_tokens
@@ -219,15 +225,17 @@ class ModelPerformanceLedger:
         completion_tokens: int,
         ttft_seconds: float | None,
         decode_tokens_per_second: float | None,
+        request_lifetime: float | None = None,
     ) -> bool:
         """Record an explicitly cancelled request exactly once."""
         with self._lock:
-            if request_id in self._seen_request_ids:
-                self._seen_request_ids.move_to_end(request_id)
+            request_key = self._request_key(request_id, request_lifetime)
+            if request_key in self._seen_request_ids:
+                self._seen_request_ids.move_to_end(request_key)
                 return False
             prompt_tokens = max(0, int(prompt_tokens))
             completion_tokens = max(0, int(completion_tokens))
-            self._remember_request_id(request_id)
+            self._remember_request_id(request_key)
             self._requests_cancelled += 1
             self._prompt_tokens += prompt_tokens
             self._completion_tokens += completion_tokens
@@ -237,15 +245,25 @@ class ModelPerformanceLedger:
             )
             return True
 
-    def record_failure(self, request_id: str) -> bool:
+    def record_failure(
+        self, request_id: str, *, request_lifetime: float | None = None
+    ) -> bool:
         """Record an engine/runtime failure exactly once."""
         with self._lock:
-            if request_id in self._seen_request_ids:
-                self._seen_request_ids.move_to_end(request_id)
+            request_key = self._request_key(request_id, request_lifetime)
+            if request_key in self._seen_request_ids:
+                self._seen_request_ids.move_to_end(request_key)
                 return False
-            self._remember_request_id(request_id)
+            self._remember_request_id(request_key)
             self._requests_failed += 1
             return True
+
+    def record_failed_performance(self, request: Request) -> bool:
+        """Record one failed request lifetime, even when its ID is later reused."""
+        return self.record_failure(
+            request.request_id,
+            request_lifetime=request.arrival_time,
+        )
 
     def snapshot(self) -> ModelPerformanceSnapshot:
         """Return a coherent copy of the counters."""
@@ -268,7 +286,15 @@ class ModelPerformanceLedger:
                 last_decode_tokens_per_second=self._last_decode_tokens_per_second,
             )
 
-    def _remember_request_id(self, request_id: str) -> None:
+    @staticmethod
+    def _request_key(
+        request_id: str, request_lifetime: float | None
+    ) -> str | tuple[str, float]:
+        return (
+            request_id if request_lifetime is None else (request_id, request_lifetime)
+        )
+
+    def _remember_request_id(self, request_id: str | tuple[str, float]) -> None:
         """Store a terminal request ID under a bounded memory limit."""
         self._seen_request_ids[request_id] = None
         if len(self._seen_request_ids) > SEEN_REQUEST_ID_LIMIT:
