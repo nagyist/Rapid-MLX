@@ -69,8 +69,6 @@ def _bucket_count(
     buckets: tuple[float, ...],
 ) -> None:
     """Add one finite, non-negative value to cumulative histogram buckets."""
-    if not math.isfinite(value) or value < 0:
-        return
     for bucket in buckets:
         label = "+Inf" if math.isinf(bucket) else _format_bucket(bucket)
         if value <= bucket:

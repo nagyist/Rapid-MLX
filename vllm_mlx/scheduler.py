@@ -8290,19 +8290,6 @@ class Scheduler:
         except Exception:
             logger.debug("Failed to record performance for %s", request.request_id)
 
-    def _record_cancelled_performance(self, request: Request) -> None:
-        """Best-effort performance accounting for an aborted request."""
-        try:
-            self.performance.record_cancelled(
-                request.request_id,
-                prompt_tokens=request.num_prompt_tokens,
-                completion_tokens=request.num_output_tokens,
-                ttft_seconds=self._ttft_for_request(request),
-                decode_tokens_per_second=self._decode_rate_for_request(request),
-            )
-        except Exception:
-            logger.debug("Failed to record cancellation for %s", request.request_id)
-
     def _safe_disk_checkpoint(self, request: Request, response: Any) -> None:
         """Wrap ``_maybe_disk_checkpoint`` in a never-raise contract.
 
@@ -8464,6 +8451,19 @@ class Scheduler:
             except Exception:  # pragma: no cover — defensive of the defensive
                 pass
             logger.warning("[kv_checkpoint] enforce_disk_cap failed: %r", _evict_err)
+
+    def _record_cancelled_performance(self, request: Request) -> None:
+        """Best-effort performance accounting for an aborted request."""
+        try:
+            self.performance.record_cancelled(
+                request.request_id,
+                prompt_tokens=request.num_prompt_tokens,
+                completion_tokens=request.num_output_tokens,
+                ttft_seconds=self._ttft_for_request(request),
+                decode_tokens_per_second=self._decode_rate_for_request(request),
+            )
+        except Exception:
+            logger.debug("Failed to record cancellation for %s", request.request_id)
 
     def _cleanup_finished(self, finished_ids: set[str]) -> None:
         """Clean up finished requests and store caches for reuse."""
