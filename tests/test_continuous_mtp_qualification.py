@@ -4,10 +4,65 @@
 import json
 import subprocess
 import sys
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
+
+
+class _StopServeError(Exception):
+    """Stop the real serve path immediately after scheduler construction."""
+
+
+def _parsed_serve_args(*argv: str):
+    """Return the real parser namespace without entering the serve runtime."""
+    from vllm_mlx import cli
+
+    captured = {}
+
+    def _capture(args) -> None:
+        captured["args"] = args
+
+    with (
+        mock.patch.object(cli, "serve_command", _capture),
+        mock.patch.object(sys, "argv", ["rapid-mlx", "serve", *argv]),
+    ):
+        cli.main()
+    return captured["args"]
+
+
+@contextmanager
+def _serve_cache_policy_context(cli, *, stop_at_scheduler: bool):
+    """Patch only external boundaries before the cache-policy serve block."""
+    patches = [
+        mock.patch.object(cli, "_check_disk_space", lambda *a, **k: None),
+        mock.patch.object(cli, "_check_memory_capacity", lambda *a, **k: None),
+        mock.patch.object(cli, "_ensure_model_downloaded", lambda *a, **k: None),
+        mock.patch.object(
+            cli, "_gather_kv_cache_dtype_inputs", lambda *a, **k: ({}, None)
+        ),
+        mock.patch(
+            "vllm_mlx._version_check.prompt_upgrade_if_available",
+            return_value=False,
+        ),
+        mock.patch(
+            "vllm_mlx.utils.tokenizer.load_model_with_fallback",
+            return_value=(object(), object()),
+        ),
+        mock.patch.object(sys.stdin, "isatty", return_value=False),
+    ]
+    if stop_at_scheduler:
+        patches.append(
+            mock.patch(
+                "vllm_mlx.scheduler.SchedulerConfig", side_effect=_StopServeError
+            )
+        )
+    with ExitStack() as stack:
+        for patcher in patches:
+            stack.enter_context(patcher)
+        yield
 
 
 def _args(model: str, payload: str | None, *, force: bool = False) -> SimpleNamespace:
@@ -50,6 +105,57 @@ def test_catalog_records_only_exact_measured_artifacts(alias: str, tier: str) ->
     profile = resolve_profile(alias)
     assert profile is not None
     assert profile.mtp_continuous_batching_tier == tier
+
+
+def test_alias_qualification_fails_closed_when_registry_raises(monkeypatch) -> None:
+    from vllm_mlx import cli, model_aliases
+
+    def _raise(_model: str):
+        raise RuntimeError("broken alias registry")
+
+    monkeypatch.setattr(model_aliases, "resolve_profile", _raise)
+
+    assert cli._alias_continuous_mtp_tier("qwen3.5-9b-4bit") == "unknown"
+
+
+def test_serve_rejects_continuous_mtp_cache_conflict_before_scheduler(
+    scheduler_config_stub, capsys
+) -> None:
+    from vllm_mlx import cli
+
+    args = _parsed_serve_args(
+        "qwen3.5-9b-4bit",
+        "--kv-cache-turboquant",
+        "k8v4",
+    )
+    with (
+        _serve_cache_policy_context(cli, stop_at_scheduler=False),
+        pytest.raises(SystemExit) as excinfo,
+    ):
+        cli.serve_command(args)
+
+    assert excinfo.value.code == 2
+    assert "continuous MTP requires an unquantized BF16 KV cache" in (
+        capsys.readouterr().out
+    )
+
+
+def test_reasoning_continuous_mtp_logs_bf16_cache_policy(
+    scheduler_config_stub, caplog
+) -> None:
+    import logging
+
+    from vllm_mlx import cli
+
+    args = _parsed_serve_args("qwen3.5-9b-4bit", "--reasoning")
+    caplog.set_level(logging.INFO, logger="vllm_mlx.cli")
+    with (
+        _serve_cache_policy_context(cli, stop_at_scheduler=True),
+        pytest.raises(_StopServeError),
+    ):
+        cli.serve_command(args)
+
+    assert "Continuous MTP cache policy: keeping BF16 KV cache" in caplog.text
 
 
 def test_verified_tier_can_request_continuous_mtp_without_force() -> None:
