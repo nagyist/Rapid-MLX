@@ -348,6 +348,8 @@ def test_waiting_cancellation_records_no_unprocessed_prompt_tokens():
 
 
 def test_mllm_waiting_cancellation_records_zero_prompt_tokens():
+    pytest.importorskip("mlx")
+
     from vllm_mlx.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
 
     processor = MagicMock()
@@ -369,6 +371,8 @@ def test_mllm_waiting_cancellation_records_zero_prompt_tokens():
 
 
 def test_mllm_reset_accounts_waiting_and_running_requests():
+    pytest.importorskip("mlx")
+
     from vllm_mlx.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
     from vllm_mlx.request import RequestStatus
 
