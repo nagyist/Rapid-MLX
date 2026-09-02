@@ -114,14 +114,43 @@ class _StickyCounterAccumulator:
             return baseline + raw
 
 
+class _ModelPerformanceAccumulator:
+    """Keep one model's counter/histogram series monotonic across reloads."""
+
+    def __init__(self) -> None:
+        # series key -> (ledger identity, last raw value, retired baseline)
+        self._state: dict[str, tuple[str, float, float]] = {}
+        self._lock = threading.Lock()
+
+    def advance(self, key: str, ledger_id: str, raw: float) -> float:
+        raw = max(0.0, float(raw))
+        with self._lock:
+            previous = self._state.get(key)
+            if previous is None:
+                baseline = 0.0
+            else:
+                previous_ledger_id, last_raw, baseline = previous
+                if ledger_id != previous_ledger_id:
+                    # A replacement scheduler starts a fresh ledger even when
+                    # the model label is unchanged. Retire the old raw total.
+                    baseline += last_raw
+                elif raw < last_raw:
+                    # Defensive support for an in-place ledger reset.
+                    baseline += last_raw
+            self._state[key] = (ledger_id, raw, baseline)
+            return baseline + raw
+
+
 # Module-level accumulator — one process, one cumulative cache series.
 _cache_counter_accumulator = _StickyCounterAccumulator()
+_model_performance_accumulator = _ModelPerformanceAccumulator()
 
 
 def _reset_accumulator_for_tests() -> None:
     """Test-only hook: clear the sticky-counter state between tests."""
-    global _cache_counter_accumulator
+    global _cache_counter_accumulator, _model_performance_accumulator
     _cache_counter_accumulator = _StickyCounterAccumulator()
+    _model_performance_accumulator = _ModelPerformanceAccumulator()
 
 
 def _escape_label_value(value: str) -> str:
@@ -214,8 +243,14 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
         return []
 
     model_name = str(performance.get("model_name") or "")
+    ledger_id = str(performance.get("ledger_id") or f"legacy:{model_name}")
     labels = {"model": model_name}
     lines: list[str] = []
+
+    def cumulative(key: str, raw: Any) -> float:
+        return _model_performance_accumulator.advance(
+            f"{model_name}\0{key}", ledger_id, _coerce_number(raw, 0.0)
+        )
 
     lines.extend(
         _fmt_metric_family(
@@ -226,7 +261,10 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 *[
                     (
                         int(
-                            _coerce_number(performance.get(f"requests_{outcome}"), 0.0)
+                            cumulative(
+                                f"requests:{outcome}",
+                                performance.get(f"requests_{outcome}"),
+                            )
                         ),
                         {**labels, "outcome": outcome},
                     )
@@ -242,7 +280,12 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 f"rapid_mlx_model_{token_kind}_tokens_total",
                 "counter",
                 f"Cumulative {token_kind} tokens processed by the model.",
-                int(_coerce_number(performance.get(f"{token_kind}_tokens"), 0.0)),
+                int(
+                    cumulative(
+                        f"tokens:{token_kind}",
+                        performance.get(f"{token_kind}_tokens"),
+                    )
+                ),
                 labels=labels,
             )
         )
@@ -255,7 +298,10 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "histogram",
                 "Time to first token, in seconds, by model.",
                 [
-                    (int(_coerce_number(count, 0.0)), {**labels, "le": str(bucket)})
+                    (
+                        int(cumulative(f"ttft:bucket:{bucket}", count)),
+                        {**labels, "le": str(bucket)},
+                    )
                     for bucket, count in ttft_buckets.items()
                 ],
                 sample_name="rapid_mlx_model_ttft_seconds_bucket",
@@ -266,7 +312,11 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "rapid_mlx_model_ttft_seconds_count",
                 [
                     (
-                        int(_coerce_number(performance.get("ttft_seconds_count"), 0.0)),
+                        int(
+                            cumulative(
+                                "ttft:count", performance.get("ttft_seconds_count")
+                            )
+                        ),
                         labels,
                     )
                 ],
@@ -278,7 +328,9 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         round(
-                            _coerce_number(performance.get("ttft_seconds_sum"), 0.0),
+                            cumulative(
+                                "ttft:sum", performance.get("ttft_seconds_sum")
+                            ),
                             6,
                         ),
                         labels,
@@ -295,7 +347,10 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "histogram",
                 "Post-first-token decode speed in tokens per second by model.",
                 [
-                    (int(_coerce_number(count, 0.0)), {**labels, "le": str(bucket)})
+                    (
+                        int(cumulative(f"decode:bucket:{bucket}", count)),
+                        {**labels, "le": str(bucket)},
+                    )
                     for bucket, count in decode_buckets.items()
                 ],
                 sample_name="rapid_mlx_model_decode_tokens_per_second_bucket",
@@ -307,7 +362,9 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         int(
-                            _coerce_number(performance.get("decode_observations"), 0.0)
+                            cumulative(
+                                "decode:count", performance.get("decode_observations")
+                            )
                         ),
                         labels,
                     )
@@ -320,8 +377,9 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         round(
-                            _coerce_number(
-                                performance.get("decode_tokens_per_second_sum"), 0.0
+                            cumulative(
+                                "decode:sum",
+                                performance.get("decode_tokens_per_second_sum"),
                             ),
                             6,
                         ),

@@ -20,6 +20,7 @@ import logging
 import math
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -97,6 +98,7 @@ class ModelPerformanceSnapshot:
     """An immutable Prometheus-ready view of one model's request outcomes."""
 
     model_name: str
+    ledger_id: str
     requests_succeeded: int
     requests_cancelled: int
     requests_failed: int
@@ -122,6 +124,11 @@ class ModelPerformanceLedger:
 
     def __init__(self, model_name: str | None = None):
         self._model_name = model_name or ""
+        # The exporter uses this process-local identity to distinguish a
+        # freshly loaded scheduler from another ledger for the same model.
+        # Model labels alone cannot reveal a reset when the replacement has
+        # already accumulated as many samples as its predecessor.
+        self._ledger_id = uuid.uuid4().hex
         self._lock = threading.Lock()
         self._seen_request_ids: OrderedDict[str | tuple[str, float], None] = (
             OrderedDict()
@@ -297,6 +304,7 @@ class ModelPerformanceLedger:
         with self._lock:
             return ModelPerformanceSnapshot(
                 model_name=self._model_name,
+                ledger_id=self._ledger_id,
                 requests_succeeded=self._requests_succeeded,
                 requests_cancelled=self._requests_cancelled,
                 requests_failed=self._requests_failed,
