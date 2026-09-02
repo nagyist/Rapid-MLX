@@ -2845,7 +2845,7 @@ def test_run_all_serializes_process_global_probe_state(monkeypatch):
     peak_active = 0
     state_lock = threading.Lock()
 
-    def fake_run():
+    def fake_run(_deadline):
         nonlocal active, peak_active
         with state_lock:
             active += 1
@@ -2863,6 +2863,34 @@ def test_run_all_serializes_process_global_probe_state(monkeypatch):
         thread.join()
 
     assert peak_active == 1
+
+
+def test_run_all_bounds_lock_contention_inside_caller_budget(monkeypatch):
+    entered = threading.Event()
+
+    def slow_first_run(_deadline):
+        entered.set()
+        time.sleep(0.08)
+        return eh.Report()
+
+    monkeypatch.setattr(eh, "_DOCTOR_BUDGET_S", 0.05)
+    monkeypatch.setattr(eh, "_DOCTOR_COMPLETION_HEADROOM_S", 0.01)
+    monkeypatch.setattr(eh, "_run_all_serialized", slow_first_run)
+    first = threading.Thread(target=eh.run_all)
+    first.start()
+    assert entered.wait(timeout=1)
+
+    started_at = time.monotonic()
+    second_report = eh.run_all()
+    elapsed = time.monotonic() - started_at
+    first.join()
+
+    assert elapsed < 0.07
+    assert second_report.sections
+    assert all(
+        "budget exhausted" in section.checks[0].label
+        for section in second_report.sections
+    )
 
 
 def test_runtime_process_scan_stops_when_doctor_budget_expires(tmp_path, monkeypatch):

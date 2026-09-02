@@ -2790,7 +2790,24 @@ _SECTION_TITLES = {
 }
 
 
-def _run_all_serialized() -> Report:
+def _budget_exhausted_report() -> Report:
+    report = Report()
+    for builder in _SECTION_BUILDERS:
+        skipped = Section(
+            _SECTION_TITLES.get(
+                builder, builder.__name__.replace("section_", "").title()
+            )
+        )
+        skipped.add(
+            "Skipped: doctor time budget exhausted",
+            CheckStatus.WARN,
+            detail="probe did not start before the shared deadline",
+        )
+        report.sections.append(skipped)
+    return report
+
+
+def _run_all_serialized(caller_deadline: float) -> Report:
     """Run every section and return the aggregate report.
 
     Each section builder is wrapped in a try/except so a single buggy probe
@@ -2801,9 +2818,7 @@ def _run_all_serialized() -> Report:
     global _DOCTOR_DEADLINE, _RUNTIME_SELECTION_DONE
     report = Report()
     try:
-        _DOCTOR_DEADLINE = time.monotonic() + (
-            _DOCTOR_BUDGET_S - _DOCTOR_COMPLETION_HEADROOM_S
-        )
+        _DOCTOR_DEADLINE = caller_deadline
         _RUNTIME_SELECTION_DONE = False
         _RUNTIME_PROBE_CACHE.clear()
         _RUNTIME_IMPORT_CACHE.clear()
@@ -2844,5 +2859,13 @@ def _run_all_serialized() -> Report:
 
 def run_all() -> Report:
     """Run one coherent probe set; serialize access to process-global caches."""
-    with _DOCTOR_RUN_LOCK:
-        return _run_all_serialized()
+    caller_deadline = time.monotonic() + (
+        _DOCTOR_BUDGET_S - _DOCTOR_COMPLETION_HEADROOM_S
+    )
+    remaining = max(0.0, caller_deadline - time.monotonic())
+    if not _DOCTOR_RUN_LOCK.acquire(timeout=remaining):
+        return _budget_exhausted_report()
+    try:
+        return _run_all_serialized(caller_deadline)
+    finally:
+        _DOCTOR_RUN_LOCK.release()
