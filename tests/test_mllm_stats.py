@@ -212,6 +212,14 @@ def test_mllm_failed_request_records_partial_work():
     assert performance.decode_observations == 1
 
 
+def test_mllm_best_effort_failure_does_not_assume_request_fields(caplog):
+    scheduler = _bare_scheduler()
+
+    scheduler._record_terminal_performance(object(), "failed")
+
+    assert scheduler.performance.snapshot().requests_failed == 0
+
+
 def test_mllm_waiting_failure_records_no_unprocessed_prompt_tokens():
     scheduler = _bare_scheduler()
     request = MLLMRequest(

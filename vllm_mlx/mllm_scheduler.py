@@ -416,7 +416,10 @@ class MLLMScheduler:
                 decode_tokens_per_second=decode_rate,
             )
         except Exception:
-            logger.debug("Failed to record MLLM performance for %s", request.request_id)
+            logger.debug(
+                "Failed to record MLLM performance for %s",
+                getattr(request, "request_id", "<unknown>"),
+            )
 
     def _match_user_stop(
         self, text: str, new_text_start_len: int, stop_params: list[str]
