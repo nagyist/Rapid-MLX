@@ -2213,6 +2213,16 @@ class MLLMScheduler:
 
     def reset(self) -> None:
         """Reset the scheduler state."""
+        # ``abort_request`` may only enqueue work when the step loop owns the
+        # scheduler. Account every visible lifetime before any queue/map is
+        # cleared; request-owned idempotency prevents a synchronous abort from
+        # double-counting the same object.
+        reset_requests = dict(self.requests)
+        reset_requests.update(self.running)
+        reset_requests.update({request.request_id: request for request in self.waiting})
+        for request in reset_requests.values():
+            self._record_terminal_performance(request, "cancelled")
+
         # Abort all requests
         for request_id in list(self.requests.keys()):
             self.abort_request(request_id)

@@ -193,6 +193,22 @@ def test_request_owned_idempotency_survives_low_level_cache_eviction():
     assert ledger.snapshot().requests_failed == SEEN_REQUEST_ID_LIMIT + 2
 
 
+def test_request_accounting_uses_compressed_model_prompt_tokens():
+    from types import SimpleNamespace
+
+    ledger = ModelPerformanceLedger("compressed-model")
+    request = SimpleNamespace(
+        request_id="compressed",
+        status=SimpleNamespace(name="RUNNING"),
+        num_prompt_tokens=100_000,
+        model_prompt_tokens=4_096,
+        num_output_tokens=2,
+    )
+
+    assert ledger.record_request_performance(request, "succeeded") is True
+    assert ledger.snapshot().prompt_tokens == 4_096
+
+
 def test_distinct_request_lifetimes_may_reuse_the_same_id():
     from types import SimpleNamespace
 
@@ -349,6 +365,38 @@ def test_mllm_waiting_cancellation_records_zero_prompt_tokens():
     performance = scheduler.performance.snapshot()
     assert performance.requests_cancelled == 1
     assert performance.prompt_tokens == 0
+
+
+def test_mllm_reset_accounts_waiting_and_running_requests():
+    from vllm_mlx.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
+    from vllm_mlx.request import RequestStatus
+
+    processor = MagicMock()
+    processor.tokenizer = MagicMock()
+    scheduler = MLLMScheduler(
+        MagicMock(),
+        processor,
+        MLLMSchedulerConfig(),
+        model_name="mllm-reset-test",
+    )
+    waiting_id = scheduler.add_request("queued prompt")
+    running_id = scheduler.add_request("active prompt")
+    waiting = scheduler.requests[waiting_id]
+    running = scheduler.requests[running_id]
+    waiting.num_prompt_tokens = 7
+    running.num_prompt_tokens = 5
+    scheduler.waiting.remove(running)
+    running.status = RequestStatus.RUNNING
+    scheduler.running[running_id] = running
+
+    scheduler.reset()
+
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_cancelled == 2
+    assert performance.prompt_tokens == 5
+    assert scheduler.requests == {}
+    assert not scheduler.waiting
+    assert scheduler.running == {}
 
 
 def test_scheduler_records_reconciled_orphan_cancellation():

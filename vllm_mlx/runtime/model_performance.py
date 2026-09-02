@@ -165,6 +165,9 @@ class ModelPerformanceLedger:
         status = getattr(request, "status", None)
         if getattr(status, "name", None) == "WAITING":
             return 0
+        model_prompt_tokens = int(getattr(request, "model_prompt_tokens", 0) or 0)
+        if model_prompt_tokens > 0:
+            return model_prompt_tokens
         return int(request.num_prompt_tokens)
 
     def record_finished_performance(self, request: Request) -> None:
