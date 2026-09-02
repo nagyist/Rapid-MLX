@@ -58,13 +58,22 @@ struct MemoryConfirmationRetryPolicy {
 
 enum FileDropRetryPolicy {
     static let minimumRetryBudget: TimeInterval = 3
+    // The synthetic gesture is blocking and normally consumes about one
+    // second before the retried drop can begin settling.
+    static let retryGestureBudget: TimeInterval = 1.5
     // `waitUntil` polls at 100 ms and its final poll can cross the requested
     // timeout. Keep several polling intervals outside the observation window
     // so a genuinely missed first gesture still owns the full retry budget.
     static let observationSchedulingSlack: TimeInterval = 0.5
 
     static func observationTimeout(remainingTime: TimeInterval) -> TimeInterval {
-        max(0, remainingTime - minimumRetryBudget - observationSchedulingSlack)
+        max(
+            0,
+            remainingTime
+                - retryGestureBudget
+                - minimumRetryBudget
+                - observationSchedulingSlack
+        )
     }
 
     static func shouldRetry(
