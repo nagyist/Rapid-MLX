@@ -115,30 +115,50 @@ class _StickyCounterAccumulator:
 
 
 class _ModelPerformanceAccumulator:
-    """Keep one model's counter/histogram series monotonic across reloads."""
+    """Atomically keep one model snapshot monotonic across scheduler reloads."""
 
     def __init__(self) -> None:
-        # series key -> (ledger identity, last raw value, retired baseline)
-        self._state: dict[str, tuple[str, float, float]] = {}
+        # model -> (active generation, retired baseline, active raw snapshot)
+        self._state: dict[
+            str, tuple[int, dict[str, float], dict[str, float]]
+        ] = {}
         self._lock = threading.Lock()
 
-    def advance(self, key: str, ledger_id: str, raw: float) -> float:
-        raw = max(0.0, float(raw))
+    def advance(
+        self, model_name: str, ledger_id: int, raw: dict[str, float]
+    ) -> dict[str, float]:
+        normalized = {key: max(0.0, float(value)) for key, value in raw.items()}
         with self._lock:
-            previous = self._state.get(key)
+            previous = self._state.get(model_name)
             if previous is None:
-                baseline = 0.0
+                active_id = ledger_id
+                baseline: dict[str, float] = {}
+                active_raw = normalized
             else:
-                previous_ledger_id, last_raw, baseline = previous
-                if ledger_id != previous_ledger_id:
-                    # A replacement scheduler starts a fresh ledger even when
-                    # the model label is unchanged. Retire the old raw total.
-                    baseline += last_raw
-                elif raw < last_raw:
-                    # Defensive support for an in-place ledger reset.
-                    baseline += last_raw
-            self._state[key] = (ledger_id, raw, baseline)
-            return baseline + raw
+                active_id, baseline, active_raw = previous
+                baseline = dict(baseline)
+                if ledger_id > active_id:
+                    # Retire every series from the old scheduler as one atomic
+                    # snapshot so a scrape cannot mix ledger generations.
+                    for key, value in active_raw.items():
+                        baseline[key] = baseline.get(key, 0.0) + value
+                    active_id = ledger_id
+                    active_raw = normalized
+                elif ledger_id == active_id:
+                    # Two scrapes can capture the same live ledger at different
+                    # instants and arrive out of order. Counters never decrease,
+                    # so retain the newest value for every component.
+                    active_raw = {
+                        key: max(active_raw.get(key, 0.0), value)
+                        for key, value in normalized.items()
+                    }
+                # A lower generation is a delayed scrape from a retired
+                # scheduler. Return the current view without mutating state.
+            self._state[model_name] = (active_id, baseline, active_raw)
+            return {
+                key: baseline.get(key, 0.0) + value
+                for key, value in active_raw.items()
+            }
 
 
 # Module-level accumulator — one process, one cumulative cache series.
@@ -243,14 +263,50 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
         return []
 
     model_name = str(performance.get("model_name") or "")
-    ledger_id = str(performance.get("ledger_id") or f"legacy:{model_name}")
+    ledger_id = int(_coerce_number(performance.get("ledger_id"), 0.0))
     labels = {"model": model_name}
     lines: list[str] = []
-
-    def cumulative(key: str, raw: Any) -> float:
-        return _model_performance_accumulator.advance(
-            f"{model_name}\0{key}", ledger_id, _coerce_number(raw, 0.0)
+    ttft_buckets = performance.get("ttft_bucket_counts")
+    decode_buckets = performance.get("decode_bucket_counts")
+    raw_counters = {
+        **{
+            f"requests:{outcome}": _coerce_number(
+                performance.get(f"requests_{outcome}"), 0.0
+            )
+            for outcome in ("succeeded", "cancelled", "failed")
+        },
+        **{
+            f"tokens:{kind}": _coerce_number(
+                performance.get(f"{kind}_tokens"), 0.0
+            )
+            for kind in ("prompt", "completion")
+        },
+        "ttft:count": _coerce_number(performance.get("ttft_seconds_count"), 0.0),
+        "ttft:sum": _coerce_number(performance.get("ttft_seconds_sum"), 0.0),
+        "decode:count": _coerce_number(
+            performance.get("decode_observations"), 0.0
+        ),
+        "decode:sum": _coerce_number(
+            performance.get("decode_tokens_per_second_sum"), 0.0
+        ),
+    }
+    if isinstance(ttft_buckets, dict):
+        raw_counters.update(
+            {
+                f"ttft:bucket:{bucket}": _coerce_number(count, 0.0)
+                for bucket, count in ttft_buckets.items()
+            }
         )
+    if isinstance(decode_buckets, dict):
+        raw_counters.update(
+            {
+                f"decode:bucket:{bucket}": _coerce_number(count, 0.0)
+                for bucket, count in decode_buckets.items()
+            }
+        )
+    cumulative = _model_performance_accumulator.advance(
+        model_name, ledger_id, raw_counters
+    )
 
     lines.extend(
         _fmt_metric_family(
@@ -261,10 +317,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 *[
                     (
                         int(
-                            cumulative(
-                                f"requests:{outcome}",
-                                performance.get(f"requests_{outcome}"),
-                            )
+                            cumulative[f"requests:{outcome}"]
                         ),
                         {**labels, "outcome": outcome},
                     )
@@ -281,16 +334,12 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "counter",
                 f"Cumulative {token_kind} tokens processed by the model.",
                 int(
-                    cumulative(
-                        f"tokens:{token_kind}",
-                        performance.get(f"{token_kind}_tokens"),
-                    )
+                    cumulative[f"tokens:{token_kind}"]
                 ),
                 labels=labels,
             )
         )
 
-    ttft_buckets = performance.get("ttft_bucket_counts")
     if isinstance(ttft_buckets, dict):
         lines.extend(
             _fmt_metric_family(
@@ -299,7 +348,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "Time to first token, in seconds, by model.",
                 [
                     (
-                        int(cumulative(f"ttft:bucket:{bucket}", count)),
+                        int(cumulative[f"ttft:bucket:{bucket}"]),
                         {**labels, "le": str(bucket)},
                     )
                     for bucket, count in ttft_buckets.items()
@@ -313,9 +362,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         int(
-                            cumulative(
-                                "ttft:count", performance.get("ttft_seconds_count")
-                            )
+                            cumulative["ttft:count"]
                         ),
                         labels,
                     )
@@ -328,9 +375,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         round(
-                            cumulative(
-                                "ttft:sum", performance.get("ttft_seconds_sum")
-                            ),
+                            cumulative["ttft:sum"],
                             6,
                         ),
                         labels,
@@ -339,7 +384,6 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
             )
         )
 
-    decode_buckets = performance.get("decode_bucket_counts")
     if isinstance(decode_buckets, dict):
         lines.extend(
             _fmt_metric_family(
@@ -348,7 +392,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "Post-first-token decode speed in tokens per second by model.",
                 [
                     (
-                        int(cumulative(f"decode:bucket:{bucket}", count)),
+                        int(cumulative[f"decode:bucket:{bucket}"]),
                         {**labels, "le": str(bucket)},
                     )
                     for bucket, count in decode_buckets.items()
@@ -362,9 +406,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         int(
-                            cumulative(
-                                "decode:count", performance.get("decode_observations")
-                            )
+                            cumulative["decode:count"]
                         ),
                         labels,
                     )
@@ -377,10 +419,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         round(
-                            cumulative(
-                                "decode:sum",
-                                performance.get("decode_tokens_per_second_sum"),
-                            ),
+                            cumulative["decode:sum"],
                             6,
                         ),
                         labels,

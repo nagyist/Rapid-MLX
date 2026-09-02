@@ -669,3 +669,26 @@ def test_metrics_preserves_model_counters_across_fresh_ledgers():
 
     reset_config()
     _reset_accumulator_for_tests()
+
+
+def test_model_accumulator_rejects_delayed_retired_ledger_snapshot():
+    from vllm_mlx.routes.metrics import _ModelPerformanceAccumulator
+
+    accumulator = _ModelPerformanceAccumulator()
+    old_snapshot = {"requests:succeeded": 1.0, "ttft:count": 1.0}
+    new_snapshot = {"requests:succeeded": 2.0, "ttft:count": 2.0}
+
+    assert accumulator.advance("model", 10, old_snapshot) == old_snapshot
+    current = accumulator.advance("model", 11, new_snapshot)
+    assert current == {"requests:succeeded": 3.0, "ttft:count": 3.0}
+
+    # Simulate an old scrape that captured generation 10 before the reload but
+    # reached the accumulator after generation 11 had already advanced it.
+    delayed = accumulator.advance("model", 10, old_snapshot)
+    assert delayed == current
+
+    # A stale snapshot from the active generation must not decrease any series.
+    stale_current = accumulator.advance(
+        "model", 11, {"requests:succeeded": 1.0, "ttft:count": 1.0}
+    )
+    assert stale_current == current

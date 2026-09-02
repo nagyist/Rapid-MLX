@@ -20,7 +20,6 @@ import logging
 import math
 import threading
 import time
-import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -63,6 +62,16 @@ DECODE_TOKENS_PER_SECOND_BUCKETS = (
 # enough recent IDs to absorb duplicate terminal/cancellation events.
 SEEN_REQUEST_ID_LIMIT = 65_536
 
+_LEDGER_GENERATION_LOCK = threading.Lock()
+_LEDGER_GENERATION = 0
+
+
+def _next_ledger_generation() -> int:
+    global _LEDGER_GENERATION
+    with _LEDGER_GENERATION_LOCK:
+        _LEDGER_GENERATION += 1
+        return _LEDGER_GENERATION
+
 
 def _empty_bucket_counts(buckets: tuple[float, ...]) -> dict[str, int]:
     """Return zeroed cumulative histogram buckets."""
@@ -98,7 +107,7 @@ class ModelPerformanceSnapshot:
     """An immutable Prometheus-ready view of one model's request outcomes."""
 
     model_name: str
-    ledger_id: str
+    ledger_id: int
     requests_succeeded: int
     requests_cancelled: int
     requests_failed: int
@@ -128,7 +137,7 @@ class ModelPerformanceLedger:
         # freshly loaded scheduler from another ledger for the same model.
         # Model labels alone cannot reveal a reset when the replacement has
         # already accumulated as many samples as its predecessor.
-        self._ledger_id = uuid.uuid4().hex
+        self._ledger_id = _next_ledger_generation()
         self._lock = threading.Lock()
         self._seen_request_ids: OrderedDict[str | tuple[str, float], None] = (
             OrderedDict()
