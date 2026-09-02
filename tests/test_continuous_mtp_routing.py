@@ -504,6 +504,7 @@ def test_live_installer_drives_join_detach_remove_and_compat_response(monkeypatc
         dynamic_membership = True
         lane_uids = (1, 2)
         pending_join_uids = ()
+        last_attached_uids = ()
         has_work = True
         closed = False
         has_pending_responses = False
@@ -712,7 +713,7 @@ def test_live_installer_retains_base_queue_when_initial_prepare_fails(monkeypatc
 
 
 @pytest.mark.requires_mlx
-def test_live_installer_retains_base_queue_when_dynamic_join_fails(monkeypatch):
+def test_live_installer_restores_base_queue_when_deferred_join_fails(monkeypatch):
     from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
     from vllm_mlx.spec_decode.mtp import continuous_runtime
     from vllm_mlx.spec_decode.mtp.continuous_driver import ContinuousMTPDriver
@@ -738,19 +739,38 @@ def test_live_installer_retains_base_queue_when_dynamic_join_fails(monkeypatch):
     class _Driver:
         dynamic_membership = True
         lane_uids = (1, 2)
-        pending_join_uids = ()
         has_work = True
         closed = False
         has_pending_responses = False
 
+        def __init__(self):
+            self.pending = ()
+            self.removed = []
+
+        @property
+        def pending_join_uids(self):
+            return self.pending
+
+        @property
+        def last_attached_uids(self):
+            return ()
+
         def next(self):
+            if self.pending:
+                raise RuntimeError("simulated deferred prepare failure")
             return []
 
         def take_terminal_detaches(self):
             return ()
 
-        def queue_lanes(self, *_args, **_kwargs):
-            raise RuntimeError("simulated join failure")
+        def queue_lanes(self, specs, **_kwargs):
+            self.pending = tuple(spec.uid for spec in specs)
+            return self.pending
+
+        def remove_uids(self, uids):
+            self.removed.append(tuple(uids))
+            self.pending = tuple(uid for uid in self.pending if uid not in uids)
+            return ()
 
     driver = _Driver()
     monkeypatch.setattr(
@@ -787,8 +807,11 @@ def test_live_installer_retains_base_queue_when_dynamic_join_fails(monkeypatch):
     batch_gen._unprocessed_sequences.append(joining)
 
     batch_gen.next()
+    assert list(batch_gen._unprocessed_sequences) == []
+    batch_gen.next()
 
     assert list(batch_gen._unprocessed_sequences) == [joining]
+    assert driver.removed == [(3,)]
 
 
 @pytest.mark.requires_mlx

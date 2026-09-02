@@ -987,6 +987,10 @@ def _install_continuous_mtp_router(
         )
 
     driver: ContinuousMTPDriver | None = None
+    # Dynamic joins leave the base queue before their cache preparation runs at
+    # the next driver boundary.  Retain the exact source tuples until that
+    # boundary succeeds so a deferred admission failure can restore ownership.
+    staged_join_sequences: dict[int, Any] = {}
 
     def _stage_initial() -> None:
         nonlocal driver
@@ -1036,6 +1040,7 @@ def _install_continuous_mtp_router(
             return
         joining_specs: list[SelfMTPLaneSpec] = []
         joining_stops: dict[int, frozenset[int]] = {}
+        joining_sequences: dict[int, Any] = {}
         for sequence, metadata in _queued_candidates():
             if len(joining_specs) >= room:
                 break
@@ -1063,6 +1068,7 @@ def _install_continuous_mtp_router(
             )
             joining_specs.append(spec)
             joining_stops[spec.uid] = metadata.stop_tokens
+            joining_sequences[spec.uid] = sequence
         if not joining_specs:
             return
         try:
@@ -1076,13 +1082,46 @@ def _install_continuous_mtp_router(
                 exc,
             )
             return
-        _remove_queued({spec.uid for spec in joining_specs})
+        joining_uids = {spec.uid for spec in joining_specs}
+        _remove_queued(joining_uids)
+        staged_join_sequences.update(joining_sequences)
 
     def _continuous_next(self):
         nonlocal driver
         continuous_responses = []
+        deferred_join_failed = False
         if driver is not None and driver.has_work:
-            continuous_responses = driver.next()
+            pending_before = tuple(driver.pending_join_uids)
+            try:
+                continuous_responses = driver.next()
+            except Exception as exc:
+                # ``queue_lanes`` validates synchronously but prepares caches
+                # at the following driver boundary.  If that deferred step
+                # fails before attachment, retract the staged specs and put the
+                # original mlx-lm queue tuples back at the front in FIFO order.
+                still_pending = set(driver.pending_join_uids)
+                failed_join_uids = tuple(
+                    uid for uid in pending_before if uid in still_pending
+                )
+                if not failed_join_uids:
+                    raise
+                driver.remove_uids(failed_join_uids)
+                restored = [
+                    staged_join_sequences.pop(uid)
+                    for uid in failed_join_uids
+                    if uid in staged_join_sequences
+                ]
+                batch_gen._unprocessed_sequences.extendleft(reversed(restored))
+                logger.warning(
+                    "[MTP-continuous] deferred lane preparation failed; restored "
+                    "vendored/plain queue ownership: %s",
+                    exc,
+                )
+                continuous_responses = []
+                deferred_join_failed = True
+            else:
+                for uid in driver.last_attached_uids:
+                    staged_join_sequences.pop(uid, None)
             # Completed lanes deliver their KV/MTP caches by value on the
             # response above; the driver's terminal-detach retention is then
             # redundant.  Drain it every cycle so finished requests' caches are
@@ -1103,7 +1142,7 @@ def _install_continuous_mtp_router(
             driver = None
             batch_gen._continuous_mtp_driver = None
             _stage_initial()
-        else:
+        elif not deferred_join_failed:
             _stage_joins()
 
         raw = original_next()
@@ -1119,6 +1158,7 @@ def _install_continuous_mtp_router(
                 driver.discard_all()
             except Exception as exc:  # noqa: BLE001 - close remains best effort
                 logger.debug("[MTP-continuous] close detach skipped: %s", exc)
+        staged_join_sequences.clear()
         if callable(original_close):
             return original_close()
         return None
@@ -1127,6 +1167,8 @@ def _install_continuous_mtp_router(
         removed_packages = ()
         if driver is not None:
             removed_packages = driver.remove_uids(uids)
+            for uid in uids:
+                staged_join_sequences.pop(uid, None)
         base = {}
         if callable(original_remove):
             base = original_remove(uids, *args, **kwargs)
