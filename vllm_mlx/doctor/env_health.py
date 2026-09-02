@@ -32,6 +32,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -247,6 +248,7 @@ _DOCTOR_BUDGET_S = 5.0
 # the end-to-end command exceed its own contract.
 _DOCTOR_COMPLETION_HEADROOM_S = 0.1
 _DOCTOR_DEADLINE: float | None = None
+_DOCTOR_RUN_LOCK = threading.Lock()
 _RUNTIME_CONTEXTS: dict[Path, tuple[Path, dict[str, str]]] = {}
 _RUNTIME_DISTRIBUTION_CACHE: dict[Path, bool] = {}
 _TRUSTED_SYS_PATH_ROOTS: tuple[Path, ...] = ()
@@ -886,10 +888,10 @@ _RUNTIME_IMPORT_TIMEOUTS: set[tuple[Path, str, str, bool, bool, tuple[str, ...]]
 
 
 def _bounded_timeout(default_s: float) -> float:
-    """Return the remaining doctor budget without yielding a zero timeout."""
+    """Return a positive timeout that never meaningfully exceeds the budget."""
     if _DOCTOR_DEADLINE is None:
         return default_s
-    return max(0.05, min(default_s, _DOCTOR_DEADLINE - time.monotonic()))
+    return max(0.001, min(default_s, _DOCTOR_DEADLINE - time.monotonic()))
 
 
 def _import_probe_cache_key(
@@ -2788,7 +2790,7 @@ _SECTION_TITLES = {
 }
 
 
-def run_all() -> Report:
+def _run_all_serialized() -> Report:
     """Run every section and return the aggregate report.
 
     Each section builder is wrapped in a try/except so a single buggy probe
@@ -2838,3 +2840,9 @@ def run_all() -> Report:
     finally:
         _DOCTOR_DEADLINE = None
     return report
+
+
+def run_all() -> Report:
+    """Run one coherent probe set; serialize access to process-global caches."""
+    with _DOCTOR_RUN_LOCK:
+        return _run_all_serialized()

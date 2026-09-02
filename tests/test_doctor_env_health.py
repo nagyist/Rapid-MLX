@@ -24,6 +24,7 @@ import plistlib
 import shlex
 import subprocess
 import sys
+import threading
 import time
 
 try:
@@ -2830,6 +2831,38 @@ def test_run_all_skips_remaining_sections_after_shared_deadline(monkeypatch):
     assert report.sections[1].checks[0].status is eh.CheckStatus.WARN
     assert "budget exhausted" in report.sections[1].checks[0].label
     assert eh._DOCTOR_DEADLINE is None
+
+
+def test_bounded_timeout_uses_only_one_millisecond_after_deadline(monkeypatch):
+    monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", 10.0)
+    monkeypatch.setattr(eh.time, "monotonic", lambda: 10.5)
+
+    assert eh._bounded_timeout(2.0) == 0.001
+
+
+def test_run_all_serializes_process_global_probe_state(monkeypatch):
+    active = 0
+    peak_active = 0
+    state_lock = threading.Lock()
+
+    def fake_run():
+        nonlocal active, peak_active
+        with state_lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        time.sleep(0.02)
+        with state_lock:
+            active -= 1
+        return eh.Report()
+
+    monkeypatch.setattr(eh, "_run_all_serialized", fake_run)
+    threads = [threading.Thread(target=eh.run_all) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert peak_active == 1
 
 
 def test_runtime_process_scan_stops_when_doctor_budget_expires(tmp_path, monkeypatch):
