@@ -258,6 +258,27 @@ def test_atomic_upload_decline_has_no_disk_or_network_side_effect(
     assert exact_body in output.getvalue()
 
 
+def test_atomic_upload_rejects_cleartext_explicit_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RAPID_MLX_HOME", str(tmp_path))
+    sent = []
+    monkeypatch.setattr(
+        atomic_upload,
+        "post_submission",
+        lambda *args, **kwargs: sent.append(args),
+    )
+
+    with pytest.raises(SubmitError, match="must be an https:// URL"):
+        atomic_upload.upload_run(
+            _text_run(),
+            assume_yes=True,
+            url="http://collector.example/submit",
+        )
+    assert sent == []
+    assert not (tmp_path / "bench-install-id").exists()
+
+
 def test_atomic_upload_sends_validated_run_and_requires_matching_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
