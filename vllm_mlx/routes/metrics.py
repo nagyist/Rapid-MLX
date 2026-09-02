@@ -374,9 +374,7 @@ def _render_retained_model_performance() -> list[str]:
     """Render every process-owned model ledger as shared metric families."""
     lines: list[str] = []
     for index, snapshot in enumerate(get_model_performance_snapshots()):
-        rendered = _render_model_performance(
-            {"model_performance": snapshot.__dict__}
-        )
+        rendered = _render_model_performance({"model_performance": snapshot.__dict__})
         if index:
             # HELP/TYPE declarations belong to the family, not each label set.
             rendered = [

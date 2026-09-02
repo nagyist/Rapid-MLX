@@ -389,9 +389,9 @@ def get_model_performance_ledger(
 
 
 def get_model_performance_snapshots() -> list[ModelPerformanceSnapshot]:
-    """Return coherent snapshots for every model observed by this process."""
+    """Return deterministic snapshots for every model observed by this process."""
     with _MODEL_LEDGER_REGISTRY_LOCK:
-        ledgers = list(_MODEL_LEDGER_REGISTRY.values())
+        ledgers = [ledger for _, ledger in sorted(_MODEL_LEDGER_REGISTRY.items())]
     return [ledger.snapshot() for ledger in ledgers]
 
 

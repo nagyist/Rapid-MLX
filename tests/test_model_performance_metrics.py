@@ -559,8 +559,7 @@ def test_metrics_renders_model_performance_series():
         in body
     )
     assert (
-        'rapid_mlx_model_requests_total{model="gemma-4-12b",outcome="failed"} 1'
-        in body
+        'rapid_mlx_model_requests_total{model="gemma-4-12b",outcome="failed"} 1' in body
     )
     assert 'outcome="total"' not in body
     outcome_samples = [
@@ -573,8 +572,7 @@ def test_metrics_renders_model_performance_series():
     assert 'rapid_mlx_model_completion_tokens_total{model="gemma-4-12b"} 9' in body
     assert 'rapid_mlx_model_ttft_seconds_bucket{model="gemma-4-12b",le="0.1"} 1' in body
     assert (
-        'rapid_mlx_model_ttft_seconds_bucket{model="gemma-4-12b",le="+Inf"} 3'
-        in body
+        'rapid_mlx_model_ttft_seconds_bucket{model="gemma-4-12b",le="+Inf"} 3' in body
     )
     assert (
         'rapid_mlx_model_decode_tokens_per_second_bucket{model="gemma-4-12b",le="50"} 1'
@@ -584,8 +582,7 @@ def test_metrics_renders_model_performance_series():
     assert 'rapid_mlx_model_ttft_seconds_count{model="gemma-4-12b"} 3' in body
     assert 'rapid_mlx_model_ttft_seconds_sum{model="gemma-4-12b"} 1.37' in body
     assert (
-        'rapid_mlx_model_decode_tokens_per_second_last{model="gemma-4-12b"} 20'
-        in body
+        'rapid_mlx_model_decode_tokens_per_second_last{model="gemma-4-12b"} 20' in body
     )
 
     reset_config()
@@ -614,9 +611,7 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
     cfg = reset_config()
     _reset_accumulator_for_tests()
     cfg.engine = SimpleNamespace(
-        get_stats=lambda: {
-            "model_performance": current["ledger"].snapshot().__dict__
-        }
+        get_stats=lambda: {"model_performance": current["ledger"].snapshot().__dict__}
     )
     app = FastAPI()
     app.include_router(router)
@@ -666,10 +661,11 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
         in second_body
     )
     assert (
-        'rapid_mlx_model_ttft_seconds_count{model="reloadable-model"} 3'
-        in second_body
+        'rapid_mlx_model_ttft_seconds_count{model="reloadable-model"} 3' in second_body
     )
-    assert 'rapid_mlx_model_ttft_seconds_sum{model="reloadable-model"} 1.1' in second_body
+    assert (
+        'rapid_mlx_model_ttft_seconds_sum{model="reloadable-model"} 1.1' in second_body
+    )
     assert (
         'rapid_mlx_model_decode_tokens_per_second_count{model="reloadable-model"} 3'
         in second_body
@@ -678,7 +674,9 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
         'rapid_mlx_model_decode_tokens_per_second_sum{model="reloadable-model"} 45.0'
         in second_body
     )
-    assert 'rapid_mlx_model_ttft_seconds_max{model="reloadable-model"} 0.8' in second_body
+    assert (
+        'rapid_mlx_model_ttft_seconds_max{model="reloadable-model"} 0.8' in second_body
+    )
     assert (
         'rapid_mlx_model_decode_tokens_per_second_max{model="reloadable-model"} 30.0'
         in second_body
