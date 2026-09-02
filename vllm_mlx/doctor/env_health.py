@@ -1313,6 +1313,8 @@ def _dir_size_gb(path: Path, *, budget_s: float = _CACHE_WALK_BUDGET_S) -> float
     if not path.exists():
         return None
     deadline = _time.monotonic() + budget_s
+    if _DOCTOR_DEADLINE is not None:
+        deadline = min(deadline, _DOCTOR_DEADLINE)
     total = 0
     try:
         for root, _dirs, files in os.walk(path, followlinks=False):

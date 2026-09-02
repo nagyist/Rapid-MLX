@@ -3450,6 +3450,26 @@ def test_dir_size_walk_aborts_inside_flat_directory(tmp_path: Path):
     )
 
 
+def test_dir_size_walk_cannot_outlive_shared_doctor_deadline(tmp_path, monkeypatch):
+    (tmp_path / "first.bin").write_bytes(b"x")
+    (tmp_path / "second.bin").write_bytes(b"x")
+    clock = [100.0]
+    stat_calls = 0
+
+    def fake_getsize(_path):
+        nonlocal stat_calls
+        stat_calls += 1
+        clock[0] += 0.02
+        return 1
+
+    monkeypatch.setattr(eh.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", 100.01)
+    monkeypatch.setattr(eh.os.path, "getsize", fake_getsize)
+
+    assert eh._dir_size_gb(tmp_path, budget_s=1.5) is None
+    assert stat_calls == 1
+
+
 def test_hf_cache_non_directory_marks_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
