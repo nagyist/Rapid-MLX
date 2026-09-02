@@ -58,9 +58,9 @@ struct MemoryConfirmationRetryPolicy {
 
 enum FileDropRetryPolicy {
     static let minimumRetryBudget: TimeInterval = 3
-    // The synthetic gesture is blocking and normally consumes about one
-    // second before the retried drop can begin settling.
-    static let retryGestureBudget: TimeInterval = 1.5
+    // XCUI's blocking synthetic drag takes about 3.5 seconds on both Studio
+    // and hosted runners before the retried drop can begin settling.
+    static let retryGestureBudget: TimeInterval = 4
     // `waitUntil` polls at 100 ms and its final poll can cross the requested
     // timeout. Keep several polling intervals outside the observation window
     // so a genuinely missed first gesture still owns the full retry budget.
@@ -381,7 +381,7 @@ final class RapidUITestHarness {
             source.click(forDuration: 1, thenDragTo: dropTarget)
             return 1
         }
-        let settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
+        var settleDeadline: Date?
         let maximumAttempts = 2
         for attempt in 1...maximumAttempts {
             do {
@@ -391,6 +391,16 @@ final class RapidUITestHarness {
                 return attempt
             }
             source.click(forDuration: 1, thenDragTo: dropTarget)
+            if settleDeadline == nil {
+                // `dropSettleTimeout` describes post-gesture observation and
+                // retry time; do not spend it while XCUI is blocking inside
+                // the first synthetic drag.
+                settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
+            }
+            guard let settleDeadline else {
+                XCTFail("drop settle deadline was not initialized")
+                return attempt
+            }
             // Simulation delays model post-gesture observation latency. Anchor
             // them after the blocking drag returns so its duration cannot
             // accidentally satisfy the delay before the probe begins.

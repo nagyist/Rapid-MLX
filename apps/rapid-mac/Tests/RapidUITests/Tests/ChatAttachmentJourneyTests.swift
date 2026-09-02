@@ -16,7 +16,11 @@ final class ChatAttachmentJourneyTests: XCTestCase {
     func testFileDropRetryPolicyIsBoundedAndCompletionAware() {
         XCTAssertEqual(
             FileDropRetryPolicy.observationTimeout(remainingTime: 10),
-            5
+            2.5
+        )
+        XCTAssertEqual(
+            FileDropRetryPolicy.observationTimeout(remainingTime: 12),
+            4.5
         )
         XCTAssertEqual(
             FileDropRetryPolicy.observationTimeout(remainingTime: 2),
@@ -175,6 +179,7 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         let recoveredAttempts = harness.dragFile(
             image,
             expectedChip: imageChip,
+            dropSettleTimeout: 12,
             simulateMissedFirstGesture: true
         )
         XCTAssertEqual(recoveredAttempts, 2)
@@ -184,6 +189,7 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         let delayedChipAttempts = harness.dragFile(
             document,
             expectedChip: documentChip,
+            dropSettleTimeout: 12,
             simulateChipVisibilityDelay: 4,
             simulateCompletionVisibilityDelay: 3
         )
