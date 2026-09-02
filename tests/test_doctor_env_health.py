@@ -3509,6 +3509,22 @@ def test_network_probe_ok():
     assert hf_row.status is eh.CheckStatus.OK
 
 
+def test_network_probe_bounds_blocked_dns_in_subprocess(monkeypatch):
+    monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", time.monotonic() + 0.25)
+    seen_timeout = None
+
+    def blocked_resolver(*_args, **kwargs):
+        nonlocal seen_timeout
+        seen_timeout = kwargs["timeout"]
+        raise subprocess.TimeoutExpired(cmd="dns-probe", timeout=seen_timeout)
+
+    status, detail = eh._probe_hf(run=blocked_resolver)
+
+    assert status is eh.CheckStatus.WARN
+    assert "timed out" in detail
+    assert seen_timeout is not None and 0 < seen_timeout <= 0.25
+
+
 # ---------------------------------------------------------------------------
 # Section: Shell integration
 # ---------------------------------------------------------------------------

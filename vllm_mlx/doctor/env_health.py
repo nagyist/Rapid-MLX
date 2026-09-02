@@ -34,9 +34,7 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -2376,34 +2374,62 @@ def section_hf_cache() -> Section:
 # doctor runtime under the 5 s contract even when the resolver hangs.
 _HF_PROBE_URL = "https://huggingface.co"
 _HF_PROBE_TIMEOUT_S = 2.0
+_HF_PROBE_SCRIPT = r"""
+import json
+import sys
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+timeout = float(sys.argv[2])
+request = urllib.request.Request(url, method="HEAD")
+try:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        print(json.dumps({"code": response.status}))
+except urllib.error.HTTPError as exc:
+    print(json.dumps({"code": exc.code}))
+except (urllib.error.URLError, TimeoutError) as exc:
+    print(json.dumps({"error": type(exc).__name__}))
+"""
 
 
-def _probe_hf(timeout: float = _HF_PROBE_TIMEOUT_S) -> tuple[CheckStatus, str]:
-    """Return (status, detail) for the huggingface.co HEAD probe."""
-    req = urllib.request.Request(_HF_PROBE_URL, method="HEAD")  # noqa: S310 — https only
+def _probe_hf(
+    timeout: float = _HF_PROBE_TIMEOUT_S,
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[CheckStatus, str]:
+    """Return HEAD reachability while bounding DNS resolution in a child."""
+    parent_timeout = _bounded_timeout(timeout)
+    child_timeout = max(0.001, parent_timeout - min(0.1, parent_timeout / 2))
     try:
-        with urllib.request.urlopen(  # noqa: S310
-            req, timeout=_bounded_timeout(timeout)
-        ) as resp:
-            return (
-                CheckStatus.OK,
-                f"HEAD {_HF_PROBE_URL} → HTTP {resp.status}",
-            )
-    except urllib.error.HTTPError as e:
-        # HF returns 405 to HEAD on some routes — still "reachable".
-        if e.code in (200, 301, 302, 405):
-            return CheckStatus.OK, f"HEAD {_HF_PROBE_URL} → HTTP {e.code}"
-        return CheckStatus.WARN, f"HTTP {e.code} (rate-limited?)"
-    except (urllib.error.URLError, TimeoutError) as e:
-        # Spec rule: network timeout is a WARNING, never a FAIL — we don't
-        # want CI runners in air-gapped environments to fail a doctor run
-        # just because they can't talk to the public internet.
-        return (
-            CheckStatus.WARN,
-            f"unreachable ({type(e).__name__}: {e})",
+        result = run(  # noqa: S603 — fixed interpreter and script
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _HF_PROBE_SCRIPT,
+                _HF_PROBE_URL,
+                str(child_timeout),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=parent_timeout,
+            check=True,
         )
-    except OSError as e:
-        return CheckStatus.WARN, f"OSError: {e}"
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("network probe returned a non-object")
+        code = payload.get("code")
+        if code in (200, 301, 302, 405):
+            return CheckStatus.OK, f"HEAD {_HF_PROBE_URL} → HTTP {code}"
+        if isinstance(code, int):
+            return CheckStatus.WARN, f"HTTP {code} (rate-limited?)"
+        error = payload.get("error")
+        return CheckStatus.WARN, f"unreachable ({error or 'network error'})"
+    except subprocess.TimeoutExpired:
+        return CheckStatus.WARN, "unreachable (network probe timed out)"
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, ValueError):
+        return CheckStatus.WARN, "unreachable (network probe failed)"
 
 
 def section_network(
