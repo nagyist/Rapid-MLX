@@ -120,23 +120,35 @@ class _ModelPerformanceAccumulator:
     def __init__(self) -> None:
         # model -> (active generation, retired baseline, active raw snapshot)
         self._state: dict[
-            str, tuple[int, dict[str, float], dict[str, float]]
+            str,
+            tuple[
+                int, dict[str, float], dict[str, float], dict[str, float]
+            ],
         ] = {}
         self._lock = threading.Lock()
 
     def advance(
-        self, model_name: str, ledger_id: int, raw: dict[str, float]
-    ) -> dict[str, float]:
+        self,
+        model_name: str,
+        ledger_id: int,
+        raw: dict[str, float],
+        maxima: dict[str, float] | None = None,
+    ) -> tuple[dict[str, float], dict[str, float]]:
         normalized = {key: max(0.0, float(value)) for key, value in raw.items()}
+        normalized_maxima = {
+            key: max(0.0, float(value)) for key, value in (maxima or {}).items()
+        }
         with self._lock:
             previous = self._state.get(model_name)
             if previous is None:
                 active_id = ledger_id
                 baseline: dict[str, float] = {}
                 active_raw = normalized
+                process_maxima = normalized_maxima
             else:
-                active_id, baseline, active_raw = previous
+                active_id, baseline, active_raw, process_maxima = previous
                 baseline = dict(baseline)
+                process_maxima = dict(process_maxima)
                 if ledger_id > active_id:
                     # Retire every series from the old scheduler as one atomic
                     # snapshot so a scrape cannot mix ledger generations.
@@ -154,11 +166,19 @@ class _ModelPerformanceAccumulator:
                     }
                 # A lower generation is a delayed scrape from a retired
                 # scheduler. Return the current view without mutating state.
-            self._state[model_name] = (active_id, baseline, active_raw)
-            return {
+                for key, value in normalized_maxima.items():
+                    process_maxima[key] = max(process_maxima.get(key, 0.0), value)
+            self._state[model_name] = (
+                active_id,
+                baseline,
+                active_raw,
+                process_maxima,
+            )
+            cumulative = {
                 key: baseline.get(key, 0.0) + value
                 for key, value in active_raw.items()
             }
+            return cumulative, dict(process_maxima)
 
 
 # Module-level accumulator — one process, one cumulative cache series.
@@ -304,8 +324,13 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 for bucket, count in decode_buckets.items()
             }
         )
-    cumulative = _model_performance_accumulator.advance(
-        model_name, ledger_id, raw_counters
+    raw_maxima = {
+        key: _coerce_number(performance[key])
+        for key in ("ttft_seconds_max", "decode_tokens_per_second_max")
+        if performance.get(key) is not None
+    }
+    cumulative, process_maxima = _model_performance_accumulator.advance(
+        model_name, ledger_id, raw_counters, raw_maxima
     )
 
     lines.extend(
@@ -445,7 +470,11 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
             "Most recent terminal request's post-first-token decode speed.",
         ),
     ):
-        value = performance.get(value_key)
+        value = (
+            process_maxima.get(value_key)
+            if value_key in ("ttft_seconds_max", "decode_tokens_per_second_max")
+            else performance.get(value_key)
+        )
         if value is not None:
             lines.extend(
                 _fmt_metric(

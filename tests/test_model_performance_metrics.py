@@ -631,8 +631,8 @@ def test_metrics_preserves_model_counters_across_fresh_ledgers():
         "second",
         prompt_tokens=3,
         completion_tokens=4,
-        ttft_seconds=0.4,
-        decode_tokens_per_second=20,
+        ttft_seconds=0.1,
+        decode_tokens_per_second=5,
     )
     current["ledger"] = replacement
     second_body = client.get("/metrics").text
@@ -657,13 +657,18 @@ def test_metrics_preserves_model_counters_across_fresh_ledgers():
         'rapid_mlx_model_ttft_seconds_count{model="reloadable-model"} 2'
         in second_body
     )
-    assert 'rapid_mlx_model_ttft_seconds_sum{model="reloadable-model"} 0.6' in second_body
+    assert 'rapid_mlx_model_ttft_seconds_sum{model="reloadable-model"} 0.3' in second_body
     assert (
         'rapid_mlx_model_decode_tokens_per_second_count{model="reloadable-model"} 2'
         in second_body
     )
     assert (
-        'rapid_mlx_model_decode_tokens_per_second_sum{model="reloadable-model"} 30.0'
+        'rapid_mlx_model_decode_tokens_per_second_sum{model="reloadable-model"} 15.0'
+        in second_body
+    )
+    assert 'rapid_mlx_model_ttft_seconds_max{model="reloadable-model"} 0.2' in second_body
+    assert (
+        'rapid_mlx_model_decode_tokens_per_second_max{model="reloadable-model"} 10.0'
         in second_body
     )
 
@@ -678,17 +683,17 @@ def test_model_accumulator_rejects_delayed_retired_ledger_snapshot():
     old_snapshot = {"requests:succeeded": 1.0, "ttft:count": 1.0}
     new_snapshot = {"requests:succeeded": 2.0, "ttft:count": 2.0}
 
-    assert accumulator.advance("model", 10, old_snapshot) == old_snapshot
-    current = accumulator.advance("model", 11, new_snapshot)
+    assert accumulator.advance("model", 10, old_snapshot)[0] == old_snapshot
+    current = accumulator.advance("model", 11, new_snapshot)[0]
     assert current == {"requests:succeeded": 3.0, "ttft:count": 3.0}
 
     # Simulate an old scrape that captured generation 10 before the reload but
     # reached the accumulator after generation 11 had already advanced it.
-    delayed = accumulator.advance("model", 10, old_snapshot)
+    delayed = accumulator.advance("model", 10, old_snapshot)[0]
     assert delayed == current
 
     # A stale snapshot from the active generation must not decrease any series.
     stale_current = accumulator.advance(
         "model", 11, {"requests:succeeded": 1.0, "ttft:count": 1.0}
-    )
+    )[0]
     assert stale_current == current
