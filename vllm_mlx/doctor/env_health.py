@@ -29,7 +29,6 @@ import plistlib
 import re
 import shlex
 import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -2725,30 +2724,66 @@ def _agent_integrations(home: Path) -> list[tuple[str, Path, str | None]]:
     return integrations
 
 
+_TCP_PROBE_SCRIPT = r"""
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+timeout = float(sys.argv[3])
+try:
+    connection = socket.create_connection((host, port), timeout=timeout)
+    connection.close()
+    print("1")
+except OSError:
+    print("0")
+"""
+
+
 def _server_reachable(
     url: str,
     *,
-    connect: Callable[..., object] = socket.create_connection,
+    connect: Callable[..., object] | None = None,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> bool:
-    """Perform a short TCP reachability check; do not interpret engine APIs."""
+    """Perform a deadline-bounded TCP check without interpreting engine APIs."""
     try:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return False
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        connection = connect((parsed.hostname, port), timeout=_bounded_timeout(0.25))
-        close = getattr(connection, "close", None)
-        if close:
-            close()
-        return True
-    except (OSError, TypeError, ValueError):
+        timeout = _bounded_timeout(0.25)
+        if connect is not None:
+            connection = connect((parsed.hostname, port), timeout=timeout)
+            close = getattr(connection, "close", None)
+            if close:
+                close()
+            return True
+        child_timeout = max(0.001, timeout - min(0.05, timeout / 2))
+        result = run(  # noqa: S603 — fixed interpreter and script
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _TCP_PROBE_SCRIPT,
+                parsed.hostname,
+                str(port),
+                str(child_timeout),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "1"
+    except (OSError, TypeError, ValueError, subprocess.TimeoutExpired):
         return False
 
 
 def section_agent_integrations(
     *,
     home: Path | None = None,
-    connect: Callable[..., object] = socket.create_connection,
+    connect: Callable[..., object] | None = None,
 ) -> Section:
     """Report whether installed agent configs point to a reachable server."""
     section = Section("Agent Integrations")

@@ -705,6 +705,21 @@ def test_agent_integrations_report_config_and_server_reachability(tmp_path):
     ]
 
 
+def test_agent_reachability_bounds_blocked_dns_in_subprocess(monkeypatch):
+    monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", time.monotonic() + 0.25)
+    seen_timeout = None
+
+    def blocked_resolver(*_args, **kwargs):
+        nonlocal seen_timeout
+        seen_timeout = kwargs["timeout"]
+        raise subprocess.TimeoutExpired(cmd="tcp-probe", timeout=seen_timeout)
+
+    assert not eh._server_reachable(
+        "http://resolver-stall.invalid:8000", run=blocked_resolver
+    )
+    assert seen_timeout is not None and 0 < seen_timeout <= 0.25
+
+
 @pytest.mark.parametrize("claude_config", ["not json", "null", "[]"])
 def test_agent_integrations_warn_for_malformed_or_inactive_config(
     tmp_path, claude_config
