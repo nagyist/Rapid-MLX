@@ -210,6 +210,23 @@ def test_request_accounting_uses_compressed_model_prompt_tokens():
     assert ledger.snapshot().prompt_tokens == 4_096
 
 
+def test_request_accounting_rejects_unknown_outcome_without_marking_request():
+    from types import SimpleNamespace
+
+    ledger = ModelPerformanceLedger("invalid-outcome-model")
+    request = SimpleNamespace(
+        request_id="invalid-outcome",
+        num_prompt_tokens=3,
+        num_output_tokens=2,
+    )
+
+    with pytest.raises(ValueError, match="unsupported terminal outcome: unknown"):
+        ledger.record_request_performance(request, "unknown")
+
+    assert request._performance_recorded is False
+    assert ledger.snapshot().total_requests == 0
+
+
 def test_distinct_request_lifetimes_may_reuse_the_same_id():
     from types import SimpleNamespace
 
@@ -675,6 +692,13 @@ def test_metrics_renders_model_performance_series():
 
     reset_config()
     _reset_accumulator_for_tests()
+
+
+def test_model_performance_renderer_ignores_missing_or_malformed_payload():
+    from vllm_mlx.routes.metrics import _render_model_performance
+
+    assert _render_model_performance({}) == []
+    assert _render_model_performance({"model_performance": "malformed"}) == []
 
 
 def test_metrics_preserves_unseen_events_across_scheduler_reloads():
