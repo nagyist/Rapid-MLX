@@ -720,6 +720,18 @@ def test_agent_reachability_bounds_blocked_dns_in_subprocess(monkeypatch):
     assert seen_timeout is not None and 0 < seen_timeout <= 0.25
 
 
+@pytest.mark.parametrize(("stdout", "expected"), [("1\n", True), ("0\n", False)])
+def test_agent_reachability_maps_child_result(stdout, expected):
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout)
+
+    assert (
+        eh._server_reachable(
+            "http://127.0.0.1:8000", run=lambda *_args, **_kwargs: result
+        )
+        is expected
+    )
+
+
 @pytest.mark.parametrize("claude_config", ["not json", "null", "[]"])
 def test_agent_integrations_warn_for_malformed_or_inactive_config(
     tmp_path, claude_config
@@ -3587,6 +3599,33 @@ def test_network_probe_bounds_blocked_dns_in_subprocess(monkeypatch):
     assert status is eh.CheckStatus.WARN
     assert "timed out" in detail
     assert seen_timeout is not None and 0 < seen_timeout <= 0.25
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected_detail"),
+    [
+        ('{"code": 429}\n', "HTTP 429"),
+        ('{"error": "URLError"}\n', "unreachable (URLError)"),
+        ("[]\n", "network probe failed"),
+    ],
+)
+def test_network_probe_maps_child_results(stdout, expected_detail):
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout)
+
+    status, detail = eh._probe_hf(run=lambda *_args, **_kwargs: result)
+
+    assert status is eh.CheckStatus.WARN
+    assert expected_detail in detail
+
+
+def test_network_probe_maps_child_process_failure():
+    def failed_child(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd="hf-probe")
+
+    status, detail = eh._probe_hf(run=failed_child)
+
+    assert status is eh.CheckStatus.WARN
+    assert "network probe failed" in detail
 
 
 # ---------------------------------------------------------------------------
