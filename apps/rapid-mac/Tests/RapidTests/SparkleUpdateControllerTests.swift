@@ -86,4 +86,34 @@ struct SparkleUpdateControllerTests {
         #expect(!controller.checkForUpdates())
         #expect(!controller.isStarted)
     }
+
+    @MainActor
+    @Test("foreground check rejects a stale enabled mirror when Sparkle is busy")
+    func authoritativeBusyStateRejectsStaleMirror() {
+        var mirroredCanCheck = true
+        var dispatches = 0
+
+        #expect(!SparkleUpdateController.dispatchForegroundCheck(
+            authoritativeCanCheck: { false },
+            synchronizeMirror: { mirroredCanCheck = $0 },
+            perform: { dispatches += 1 }
+        ))
+        #expect(!mirroredCanCheck)
+        #expect(dispatches == 0)
+    }
+
+    @MainActor
+    @Test("foreground check dispatches after authoritative acceptance")
+    func authoritativeReadyStateDispatches() {
+        var mirroredCanCheck = false
+        var dispatches = 0
+
+        #expect(SparkleUpdateController.dispatchForegroundCheck(
+            authoritativeCanCheck: { true },
+            synchronizeMirror: { mirroredCanCheck = $0 },
+            perform: { dispatches += 1 }
+        ))
+        #expect(mirroredCanCheck)
+        #expect(dispatches == 1)
+    }
 }
