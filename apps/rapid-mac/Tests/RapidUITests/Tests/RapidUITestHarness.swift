@@ -59,6 +59,10 @@ struct MemoryConfirmationRetryPolicy {
 enum FileDropRetryPolicy {
     static let minimumRetryBudget: TimeInterval = 3
 
+    static func observationTimeout(remainingTime: TimeInterval) -> TimeInterval {
+        max(0, remainingTime - minimumRetryBudget)
+    }
+
     static func shouldRetry(
         completedDrop: Bool,
         attempt: Int,
@@ -382,7 +386,13 @@ final class RapidUITestHarness {
             // independently. First wait briefly for either authoritative
             // signal, then spend the rest of the original budget on an
             // observed drop's chip.
-            _ = waitUntil(timeout: min(2, max(0, settleDeadline.timeIntervalSinceNow))) {
+            // Observe until only the bounded retry budget remains. A fixed,
+            // shorter probe can mistake a scheduler-delayed completion marker
+            // for a missed gesture and duplicate an already-consumed drop.
+            let observationTimeout = FileDropRetryPolicy.observationTimeout(
+                remainingTime: settleDeadline.timeIntervalSinceNow
+            )
+            _ = waitUntil(timeout: observationTimeout) {
                 chipIsSettled()
                     || FileManager.default.fileExists(atPath: self.dropEventFile.path)
             }

@@ -120,6 +120,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     )
     assert 'matching(identifier: "RapidUITests.FileDragSource")' in harness
     assert "let maximumAttempts = 2" in harness
+    assert "FileDropRetryPolicy.observationTimeout(" in harness
+    assert "remainingTime - minimumRetryBudget" in harness
     assert "FileDropRetryPolicy.shouldRetry(" in harness
     assert "func testFileDropRetryPolicyIsBoundedAndCompletionAware()" in chat_source
     assert "func testDropEventFileClearIsIdempotent()" in chat_source
