@@ -166,6 +166,7 @@ struct AtomicModelCatalogTests {
     func operationsDriveSelection() throws {
         let entries = try #require(ModelCatalog.parseAtomicModelEntriesJSON(Self.payload))
         let image = try #require(entries.first { $0.alias == "image" })
+        let video = try #require(entries.first { $0.alias == "video" })
         let tts = try #require(entries.first { $0.alias == "tts" })
         let stt = try #require(entries.first { $0.alias == "stt" })
         #expect(ModelSelectionPurpose.imageGeneration.accepts(image))
@@ -179,6 +180,16 @@ struct AtomicModelCatalogTests {
         #expect(ModelSelectionPurpose.textToSpeech.accepts(tts))
         #expect(ModelSelectionPurpose.speechToText.accepts(stt))
         #expect(!ModelSelectionPurpose.chat.accepts(stt))
+        #expect(ModelSelectionPurpose.textToVideo.accepts(video))
+        #expect(!ModelSelectionPurpose.imageToVideo.accepts(video))
+
+        let atomicImageVideo = ModelEntry(
+            alias: "future-i2v", hfRepo: "org/future-i2v", sizeOnDisk: nil,
+            cached: false, kind: .video, taskTypes: [.videoGeneration],
+            operationModes: [.imageToVideo]
+        )
+        #expect(ModelSelectionPurpose.imageToVideo.accepts(atomicImageVideo))
+        #expect(!ModelSelectionPurpose.textToVideo.accepts(atomicImageVideo))
 
         let genericAtomicTTS = ModelEntry(
             alias: "future-tts", hfRepo: "org/future-tts", sizeOnDisk: nil,

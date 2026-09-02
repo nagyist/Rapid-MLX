@@ -131,6 +131,12 @@ enum ModelSelectionPurpose: Sendable, Hashable {
                     // assets. Keep the current Qwen3-only product contract
                     // until atomic runtime requirements are representable.
                     && entry.audioFamily == "qwen3_tts"
+            case .textToVideo:
+                return entry.taskTypes.contains(.videoGeneration)
+                    && entry.operationModes.contains(.textToVideo)
+            case .imageToVideo:
+                return entry.taskTypes.contains(.videoGeneration)
+                    && entry.operationModes.contains(.imageToVideo)
             }
         }
         switch self {
