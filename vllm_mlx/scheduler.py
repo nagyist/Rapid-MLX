@@ -999,13 +999,26 @@ def _install_continuous_mtp_router(
             return
         specs = [lane.spec for lane in routed.cohort]
         selected = {spec.uid for spec in specs}
+        try:
+            candidate_driver = ContinuousMTPDriver.create(
+                specs,
+                runtime,
+                stop_tokens={lane.spec.uid: lane.stop_tokens for lane in routed.cohort},
+                response_factory=_response_factory,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional route fails closed
+            # Admission is transactional: until preparation succeeds, the
+            # ordinary queue remains the owner of every selected request.  The
+            # base generator can therefore process them on this same call
+            # instead of losing the cohort after an allocation/prepare failure.
+            logger.warning(
+                "[MTP-continuous] cohort preparation failed; retaining "
+                "vendored/plain queue ownership: %s",
+                exc,
+            )
+            return
         _remove_queued(selected)
-        driver = ContinuousMTPDriver.create(
-            specs,
-            runtime,
-            stop_tokens={lane.spec.uid: lane.stop_tokens for lane in routed.cohort},
-            response_factory=_response_factory,
-        )
+        driver = candidate_driver
         batch_gen._continuous_mtp_driver = driver
         logger.info(
             "[MTP-continuous] admitted continuous cohort "
@@ -1052,8 +1065,18 @@ def _install_continuous_mtp_router(
             joining_stops[spec.uid] = metadata.stop_tokens
         if not joining_specs:
             return
+        try:
+            driver.queue_lanes(joining_specs, stop_tokens=joining_stops)
+        except Exception as exc:  # noqa: BLE001 - optional route fails closed
+            # A staged join owns no continuous cache yet.  Keep the base queue
+            # authoritative when validation or allocation rejects the join.
+            logger.warning(
+                "[MTP-continuous] lane join failed; retaining vendored/plain "
+                "queue ownership: %s",
+                exc,
+            )
+            return
         _remove_queued({spec.uid for spec in joining_specs})
-        driver.queue_lanes(joining_specs, stop_tokens=joining_stops)
 
     def _continuous_next(self):
         nonlocal driver

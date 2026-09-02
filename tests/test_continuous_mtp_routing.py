@@ -660,6 +660,138 @@ def test_live_installer_drives_join_detach_remove_and_compat_response(monkeypatc
 
 
 @pytest.mark.requires_mlx
+def test_live_installer_retains_base_queue_when_initial_prepare_fails(monkeypatch):
+    from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
+    from vllm_mlx.spec_decode.mtp import continuous_runtime
+    from vllm_mlx.spec_decode.mtp.continuous_driver import ContinuousMTPDriver
+    from vllm_mlx.spec_decode.mtp.continuous_engine import (
+        ContinuousSelfMTPCapabilities,
+    )
+
+    runtime = SimpleNamespace(
+        capabilities=ContinuousSelfMTPCapabilities(
+            target_return_hidden=True,
+            mtp_return_hidden=True,
+            confirmed_target_forward=True,
+            ragged_rollback=True,
+            atomic_cache_commit=True,
+            dynamic_membership=True,
+        )
+    )
+    monkeypatch.setattr(
+        continuous_runtime,
+        "assemble_continuous_self_mtp_runtime",
+        lambda *_args, **_kwargs: runtime,
+    )
+
+    def fail_create(_cls, *_args, **_kwargs):
+        raise RuntimeError("simulated prepare failure")
+
+    monkeypatch.setattr(ContinuousMTPDriver, "create", classmethod(fail_create))
+    batch_gen = _SchedulerBatchGenerator(raw_next=([], [SimpleNamespace(uid=99)]))
+    sequences = [_scheduler_sequence(1), _scheduler_sequence(2)]
+    batch_gen._unprocessed_sequences.extend(sequences)
+    config = SchedulerConfig(
+        spec_decode="mtp",
+        mtp_continuous_batching=True,
+        max_num_seqs=4,
+        completion_batch_size=4,
+    )
+    assert _install_continuous_mtp_router(
+        batch_gen,
+        _Model(),
+        config,
+        requests={"req-1": _scheduler_request(), "req-2": _scheduler_request()},
+        uid_to_request_id={1: "req-1", 2: "req-2"},
+        free_bytes_getter=lambda: 16 * 1024**3,
+    )
+
+    assert batch_gen.next()[1][0].uid == 99
+    assert list(batch_gen._unprocessed_sequences) == sequences
+    assert batch_gen._continuous_mtp_driver is None
+
+
+@pytest.mark.requires_mlx
+def test_live_installer_retains_base_queue_when_dynamic_join_fails(monkeypatch):
+    from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
+    from vllm_mlx.spec_decode.mtp import continuous_runtime
+    from vllm_mlx.spec_decode.mtp.continuous_driver import ContinuousMTPDriver
+    from vllm_mlx.spec_decode.mtp.continuous_engine import (
+        ContinuousSelfMTPCapabilities,
+    )
+
+    capabilities = ContinuousSelfMTPCapabilities(
+        target_return_hidden=True,
+        mtp_return_hidden=True,
+        confirmed_target_forward=True,
+        ragged_rollback=True,
+        atomic_cache_commit=True,
+        dynamic_membership=True,
+    )
+    runtime = SimpleNamespace(capabilities=capabilities)
+    monkeypatch.setattr(
+        continuous_runtime,
+        "assemble_continuous_self_mtp_runtime",
+        lambda *_args, **_kwargs: runtime,
+    )
+
+    class _Driver:
+        dynamic_membership = True
+        lane_uids = (1, 2)
+        pending_join_uids = ()
+        has_work = True
+        closed = False
+        has_pending_responses = False
+
+        def next(self):
+            return []
+
+        def take_terminal_detaches(self):
+            return ()
+
+        def queue_lanes(self, *_args, **_kwargs):
+            raise RuntimeError("simulated join failure")
+
+    driver = _Driver()
+    monkeypatch.setattr(
+        ContinuousMTPDriver,
+        "create",
+        classmethod(lambda _cls, *_args, **_kwargs: driver),
+    )
+    batch_gen = _SchedulerBatchGenerator()
+    batch_gen._unprocessed_sequences.extend(
+        [_scheduler_sequence(1), _scheduler_sequence(2)]
+    )
+    requests = {
+        "req-1": _scheduler_request(),
+        "req-2": _scheduler_request(),
+        "req-3": _scheduler_request(),
+    }
+    config = SchedulerConfig(
+        spec_decode="mtp",
+        mtp_continuous_batching=True,
+        mtp_allow_dynamic_membership=True,
+        max_num_seqs=4,
+        completion_batch_size=4,
+    )
+    assert _install_continuous_mtp_router(
+        batch_gen,
+        _Model(),
+        config,
+        requests=requests,
+        uid_to_request_id={1: "req-1", 2: "req-2", 3: "req-3"},
+        free_bytes_getter=lambda: 16 * 1024**3,
+    )
+    batch_gen.next()
+    joining = _scheduler_sequence(3)
+    batch_gen._unprocessed_sequences.append(joining)
+
+    batch_gen.next()
+
+    assert list(batch_gen._unprocessed_sequences) == [joining]
+
+
+@pytest.mark.requires_mlx
 def test_live_installer_handles_empty_pressure_and_optional_base_hooks(monkeypatch):
     from vllm_mlx.scheduler import SchedulerConfig, _install_continuous_mtp_router
     from vllm_mlx.spec_decode.mtp import continuous_runtime
