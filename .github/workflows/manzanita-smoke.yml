@@ -1,0 +1,29 @@
+name: Manzanita macOS runner smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/manzanita-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  swift-build:
+    runs-on: manzanita-macos-15-xcode-16
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Record runner environment
+        run: |
+          sw_vers
+          uname -m
+          sysctl -n machdep.cpu.brand_string
+          xcodebuild -version
+          swift --version
+
+      - name: Compile Rapid macOS app
+        run: swift build --package-path apps/rapid-mac
