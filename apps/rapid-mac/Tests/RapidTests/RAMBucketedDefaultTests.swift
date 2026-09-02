@@ -257,6 +257,25 @@ struct RAMBucketedDefaultTests {
         #expect(RAMBucketedDefault.parseRecommendationPolicy(unsupportedData) == nil)
     }
 
+    @Test("Footprint rounding matches the policy producer at half-even ties")
+    func footprintRoundingMatchesPolicyProducer() throws {
+        var policy = try #require(
+            JSONSerialization.jsonObject(with: policyData()) as? [String: Any]
+        )
+        var tiers = try #require(policy["tiers"] as? [[String: Any]])
+        var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
+        picks[0]["footprint_mib"] = 1_280 // 1.25 GiB -> 1.2 (ties to even)
+        tiers[0]["picks"] = picks
+        policy["tiers"] = tiers
+
+        let parsed = try #require(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try addressedPolicyData(policy)
+            )
+        )
+        #expect(parsed[0].primary.footprintGB == 1.2)
+    }
+
     @Test("Atomic policy rejects unknown fields at every schema boundary")
     func atomicPolicyRejectsUnknownFields() throws {
         let original = try #require(

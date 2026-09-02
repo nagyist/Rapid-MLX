@@ -257,7 +257,10 @@ enum RAMBucketedDefault {
             }
             return Pick(
                 alias: alias,
-                footprintGB: (Double(footprintMiB) / 1024 * 10).rounded() / 10,
+                // Match Python's round-half-to-even so the shared atomic
+                // policy renders the same footprint on every surface.
+                footprintGB: (Double(footprintMiB) / 1024 * 10)
+                    .rounded(.toNearestOrEven) / 10,
                 capabilityPct: capabilityScoreX100 / 100,
                 tokensPerSec: decodeTokensPerSecondX100.map { Double($0) / 100 },
                 launchFlags: [],
