@@ -21,6 +21,7 @@ import logging
 import math
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -63,6 +64,7 @@ DECODE_TOKENS_PER_SECOND_BUCKETS = (
 # enough recent IDs to absorb duplicate terminal/cancellation events.
 SEEN_REQUEST_ID_LIMIT = 65_536
 MODEL_LEDGER_REGISTRY_LIMIT = 128
+RETIRED_MODEL_SNAPSHOT_LIMIT = 128
 
 
 def _empty_bucket_counts(buckets: tuple[float, ...]) -> dict[str, int]:
@@ -244,7 +246,8 @@ class ModelPerformanceLedger:
                 ttft_seconds=ttft_seconds,
                 decode_tokens_per_second=decode_tokens_per_second,
             )
-            return True
+        _touch_model_performance_ledger(self)
+        return True
 
     def record_success(
         self,
@@ -419,8 +422,38 @@ class ModelPerformanceLedger:
 # process-owned ledger per model so terminal events completed between scrapes
 # survive an unload/reload of that model.
 _MODEL_LEDGER_REGISTRY: OrderedDict[str, ModelPerformanceLedger] = OrderedDict()
-_RETIRED_MODEL_SNAPSHOTS: dict[str, ModelPerformanceSnapshot] = {}
+_RETIRED_MODEL_SNAPSHOTS: OrderedDict[
+    str,
+    tuple[
+        ModelPerformanceSnapshot,
+        weakref.ReferenceType[ModelPerformanceLedger],
+    ],
+] = OrderedDict()
 _MODEL_LEDGER_REGISTRY_LOCK = threading.Lock()
+
+
+def _retire_oldest_model_ledger_locked() -> None:
+    if len(_MODEL_LEDGER_REGISTRY) <= MODEL_LEDGER_REGISTRY_LIMIT:
+        return
+    key, ledger = _MODEL_LEDGER_REGISTRY.popitem(last=False)
+    _RETIRED_MODEL_SNAPSHOTS[key] = (ledger.snapshot(), weakref.ref(ledger))
+    _RETIRED_MODEL_SNAPSHOTS.move_to_end(key)
+    if len(_RETIRED_MODEL_SNAPSHOTS) > RETIRED_MODEL_SNAPSHOT_LIMIT:
+        _RETIRED_MODEL_SNAPSHOTS.popitem(last=False)
+
+
+def _touch_model_performance_ledger(ledger: ModelPerformanceLedger) -> None:
+    """Make a writing ledger visible, including after an LRU retirement."""
+    key = ledger.model_name
+    with _MODEL_LEDGER_REGISTRY_LOCK:
+        current = _MODEL_LEDGER_REGISTRY.get(key)
+        if current is ledger:
+            _MODEL_LEDGER_REGISTRY.move_to_end(key)
+            return
+        _RETIRED_MODEL_SNAPSHOTS.pop(key, None)
+        _MODEL_LEDGER_REGISTRY[key] = ledger
+        _MODEL_LEDGER_REGISTRY.move_to_end(key)
+        _retire_oldest_model_ledger_locked()
 
 
 def get_model_performance_ledger(
@@ -430,13 +463,13 @@ def get_model_performance_ledger(
     with _MODEL_LEDGER_REGISTRY_LOCK:
         ledger = _MODEL_LEDGER_REGISTRY.get(key)
         if ledger is None:
-            ledger = ModelPerformanceLedger(
-                key, baseline=_RETIRED_MODEL_SNAPSHOTS.pop(key, None)
+            retired = _RETIRED_MODEL_SNAPSHOTS.pop(key, None)
+            retained_ledger = retired[1]() if retired is not None else None
+            ledger = retained_ledger or ModelPerformanceLedger(
+                key, baseline=retired[0] if retired is not None else None
             )
             _MODEL_LEDGER_REGISTRY[key] = ledger
-            if len(_MODEL_LEDGER_REGISTRY) > MODEL_LEDGER_REGISTRY_LIMIT:
-                retired_key, retired_ledger = _MODEL_LEDGER_REGISTRY.popitem(last=False)
-                _RETIRED_MODEL_SNAPSHOTS[retired_key] = retired_ledger.snapshot()
+            _retire_oldest_model_ledger_locked()
         else:
             _MODEL_LEDGER_REGISTRY.move_to_end(key)
         return ledger
@@ -445,10 +478,10 @@ def get_model_performance_ledger(
 def get_model_performance_snapshots() -> list[ModelPerformanceSnapshot]:
     """Return deterministic snapshots for every model observed by this process."""
     with _MODEL_LEDGER_REGISTRY_LOCK:
-        retired = dict(_RETIRED_MODEL_SNAPSHOTS)
+        retired = [entry[0] for entry in _RETIRED_MODEL_SNAPSHOTS.values()]
         ledgers = [ledger for _, ledger in sorted(_MODEL_LEDGER_REGISTRY.items())]
     active = [ledger.snapshot() for ledger in ledgers]
-    return [*sorted(retired.values(), key=lambda item: item.model_name), *active]
+    return [*sorted(retired, key=lambda item: item.model_name), *active]
 
 
 def _reset_model_performance_registry_for_tests() -> None:

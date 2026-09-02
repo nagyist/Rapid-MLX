@@ -13,6 +13,7 @@ import pytest
 from vllm_mlx.output_collector import RequestOutputCollector
 from vllm_mlx.runtime.model_performance import (
     MODEL_LEDGER_REGISTRY_LIMIT,
+    RETIRED_MODEL_SNAPSHOT_LIMIT,
     SEEN_REQUEST_ID_LIMIT,
     ModelPerformanceLedger,
 )
@@ -794,6 +795,7 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
 def test_process_model_registry_is_lru_bounded():
     from vllm_mlx.runtime.model_performance import (
         _MODEL_LEDGER_REGISTRY,
+        _RETIRED_MODEL_SNAPSHOTS,
         get_model_performance_ledger,
         get_model_performance_snapshots,
     )
@@ -821,16 +823,29 @@ def test_process_model_registry_is_lru_bounded():
         for snapshot in retained
     )
 
-    revived = get_model_performance_ledger("model-0")
-    assert revived.snapshot().requests_succeeded == 1
-    revived.record_success(
-        "after-retirement",
-        prompt_tokens=5,
-        completion_tokens=4,
-        ttft_seconds=0.4,
-        decode_tokens_per_second=20,
+    from types import SimpleNamespace
+
+    post_eviction = SimpleNamespace(
+        request_id="after-retirement",
+        status=SimpleNamespace(name="RUNNING"),
+        num_prompt_tokens=5,
+        num_output_tokens=4,
     )
-    continuity = revived.snapshot()
+    assert first.record_request_performance(post_eviction, "succeeded") is True
+    revived = get_model_performance_ledger("model-0")
+    assert revived is first
+    continuity = first.snapshot()
     assert continuity.requests_succeeded == 2
     assert continuity.prompt_tokens == 8
     assert len(_MODEL_LEDGER_REGISTRY) == MODEL_LEDGER_REGISTRY_LIMIT
+
+    for index in range(
+        MODEL_LEDGER_REGISTRY_LIMIT + 1,
+        MODEL_LEDGER_REGISTRY_LIMIT + RETIRED_MODEL_SNAPSHOT_LIMIT + 3,
+    ):
+        get_model_performance_ledger(f"model-{index}")
+    assert len(_MODEL_LEDGER_REGISTRY) == MODEL_LEDGER_REGISTRY_LIMIT
+    assert len(_RETIRED_MODEL_SNAPSHOTS) == RETIRED_MODEL_SNAPSHOT_LIMIT
+    assert len(get_model_performance_snapshots()) <= (
+        MODEL_LEDGER_REGISTRY_LIMIT + RETIRED_MODEL_SNAPSHOT_LIMIT
+    )
