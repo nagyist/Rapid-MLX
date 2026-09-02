@@ -793,17 +793,44 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
 
 def test_process_model_registry_is_lru_bounded():
     from vllm_mlx.runtime.model_performance import (
+        _MODEL_LEDGER_REGISTRY,
         get_model_performance_ledger,
         get_model_performance_snapshots,
     )
 
-    for index in range(MODEL_LEDGER_REGISTRY_LIMIT + 1):
+    first = get_model_performance_ledger("model-0")
+    first.record_success(
+        "before-retirement",
+        prompt_tokens=3,
+        completion_tokens=2,
+        ttft_seconds=0.2,
+        decode_tokens_per_second=10,
+    )
+    for index in range(1, MODEL_LEDGER_REGISTRY_LIMIT + 1):
         get_model_performance_ledger(f"model-{index}")
 
     retained = get_model_performance_snapshots()
-    assert len(retained) == MODEL_LEDGER_REGISTRY_LIMIT
-    assert all(snapshot.model_name != "model-0" for snapshot in retained)
+    assert len(_MODEL_LEDGER_REGISTRY) == MODEL_LEDGER_REGISTRY_LIMIT
+    assert len(retained) == MODEL_LEDGER_REGISTRY_LIMIT + 1
+    retired = next(
+        snapshot for snapshot in retained if snapshot.model_name == "model-0"
+    )
+    assert retired.requests_succeeded == 1
     assert any(
         snapshot.model_name == f"model-{MODEL_LEDGER_REGISTRY_LIMIT}"
         for snapshot in retained
     )
+
+    revived = get_model_performance_ledger("model-0")
+    assert revived.snapshot().requests_succeeded == 1
+    revived.record_success(
+        "after-retirement",
+        prompt_tokens=5,
+        completion_tokens=4,
+        ttft_seconds=0.4,
+        decode_tokens_per_second=20,
+    )
+    continuity = revived.snapshot()
+    assert continuity.requests_succeeded == 2
+    assert continuity.prompt_tokens == 8
+    assert len(_MODEL_LEDGER_REGISTRY) == MODEL_LEDGER_REGISTRY_LIMIT

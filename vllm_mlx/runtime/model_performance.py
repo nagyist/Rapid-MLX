@@ -122,28 +122,44 @@ class ModelPerformanceSnapshot:
 class ModelPerformanceLedger:
     """Thread-safe, process-lifetime performance observations for one model."""
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        baseline: ModelPerformanceSnapshot | None = None,
+    ):
         self._model_name = model_name or ""
         self._lock = threading.Lock()
         self._seen_request_ids: OrderedDict[str | tuple[str, float], None] = (
             OrderedDict()
         )
-        self._requests_succeeded = 0
-        self._requests_cancelled = 0
-        self._requests_failed = 0
-        self._prompt_tokens = 0
-        self._completion_tokens = 0
-        self._ttft_bucket_counts = _empty_bucket_counts(TTFT_SECONDS_BUCKETS)
-        self._ttft_observations = 0
-        self._ttft_seconds_sum = 0.0
-        self._ttft_seconds_max: float | None = None
-        self._decode_bucket_counts = _empty_bucket_counts(
-            DECODE_TOKENS_PER_SECOND_BUCKETS
+        self._requests_succeeded = baseline.requests_succeeded if baseline else 0
+        self._requests_cancelled = baseline.requests_cancelled if baseline else 0
+        self._requests_failed = baseline.requests_failed if baseline else 0
+        self._prompt_tokens = baseline.prompt_tokens if baseline else 0
+        self._completion_tokens = baseline.completion_tokens if baseline else 0
+        self._ttft_bucket_counts = (
+            dict(baseline.ttft_bucket_counts)
+            if baseline
+            else _empty_bucket_counts(TTFT_SECONDS_BUCKETS)
         )
-        self._decode_observations = 0
-        self._decode_tokens_per_second_sum = 0.0
-        self._decode_tokens_per_second_max: float | None = None
-        self._last_decode_tokens_per_second: float | None = None
+        self._ttft_observations = baseline.ttft_seconds_count if baseline else 0
+        self._ttft_seconds_sum = baseline.ttft_seconds_sum if baseline else 0.0
+        self._ttft_seconds_max = baseline.ttft_seconds_max if baseline else None
+        self._decode_bucket_counts = (
+            dict(baseline.decode_bucket_counts)
+            if baseline
+            else _empty_bucket_counts(DECODE_TOKENS_PER_SECOND_BUCKETS)
+        )
+        self._decode_observations = baseline.decode_observations if baseline else 0
+        self._decode_tokens_per_second_sum = (
+            baseline.decode_tokens_per_second_sum if baseline else 0.0
+        )
+        self._decode_tokens_per_second_max = (
+            baseline.decode_tokens_per_second_max if baseline else None
+        )
+        self._last_decode_tokens_per_second = (
+            baseline.last_decode_tokens_per_second if baseline else None
+        )
 
     def decode_rate_for_request(self, request: Request) -> float | None:
         """Return inverse-TPOT decode speed, or None when not measurable."""
@@ -403,6 +419,7 @@ class ModelPerformanceLedger:
 # process-owned ledger per model so terminal events completed between scrapes
 # survive an unload/reload of that model.
 _MODEL_LEDGER_REGISTRY: OrderedDict[str, ModelPerformanceLedger] = OrderedDict()
+_RETIRED_MODEL_SNAPSHOTS: dict[str, ModelPerformanceSnapshot] = {}
 _MODEL_LEDGER_REGISTRY_LOCK = threading.Lock()
 
 
@@ -413,10 +430,13 @@ def get_model_performance_ledger(
     with _MODEL_LEDGER_REGISTRY_LOCK:
         ledger = _MODEL_LEDGER_REGISTRY.get(key)
         if ledger is None:
-            ledger = ModelPerformanceLedger(key)
+            ledger = ModelPerformanceLedger(
+                key, baseline=_RETIRED_MODEL_SNAPSHOTS.pop(key, None)
+            )
             _MODEL_LEDGER_REGISTRY[key] = ledger
             if len(_MODEL_LEDGER_REGISTRY) > MODEL_LEDGER_REGISTRY_LIMIT:
-                _MODEL_LEDGER_REGISTRY.popitem(last=False)
+                retired_key, retired_ledger = _MODEL_LEDGER_REGISTRY.popitem(last=False)
+                _RETIRED_MODEL_SNAPSHOTS[retired_key] = retired_ledger.snapshot()
         else:
             _MODEL_LEDGER_REGISTRY.move_to_end(key)
         return ledger
@@ -425,10 +445,13 @@ def get_model_performance_ledger(
 def get_model_performance_snapshots() -> list[ModelPerformanceSnapshot]:
     """Return deterministic snapshots for every model observed by this process."""
     with _MODEL_LEDGER_REGISTRY_LOCK:
+        retired = dict(_RETIRED_MODEL_SNAPSHOTS)
         ledgers = [ledger for _, ledger in sorted(_MODEL_LEDGER_REGISTRY.items())]
-    return [ledger.snapshot() for ledger in ledgers]
+    active = [ledger.snapshot() for ledger in ledgers]
+    return [*sorted(retired.values(), key=lambda item: item.model_name), *active]
 
 
 def _reset_model_performance_registry_for_tests() -> None:
     with _MODEL_LEDGER_REGISTRY_LOCK:
         _MODEL_LEDGER_REGISTRY.clear()
+        _RETIRED_MODEL_SNAPSHOTS.clear()
