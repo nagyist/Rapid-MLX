@@ -121,7 +121,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert 'matching(identifier: "RapidUITests.FileDragSource")' in harness
     assert "let maximumAttempts = 2" in harness
     assert "FileDropRetryPolicy.observationTimeout(" in harness
-    assert "remainingTime - minimumRetryBudget" in harness
+    assert "remainingTime - minimumRetryBudget - observationSchedulingSlack" in harness
     assert "FileDropRetryPolicy.shouldRetry(" in harness
     assert "simulateCompletionVisibilityDelay: TimeInterval = 0" in harness
     assert "completionIsVisible()" in harness

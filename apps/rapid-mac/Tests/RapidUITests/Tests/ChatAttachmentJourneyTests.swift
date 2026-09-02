@@ -16,7 +16,7 @@ final class ChatAttachmentJourneyTests: XCTestCase {
     func testFileDropRetryPolicyIsBoundedAndCompletionAware() {
         XCTAssertEqual(
             FileDropRetryPolicy.observationTimeout(remainingTime: 10),
-            7
+            6.5
         )
         XCTAssertEqual(
             FileDropRetryPolicy.observationTimeout(remainingTime: 2),
