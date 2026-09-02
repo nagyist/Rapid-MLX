@@ -352,6 +352,41 @@ def test_scheduler_records_generation_recovery_failures():
     assert performance.decode_observations == 1
 
 
+def test_mllm_global_failure_does_not_charge_queued_prompt_tokens():
+    pytest.importorskip("mlx")
+
+    from vllm_mlx.mllm_scheduler import (
+        MLLMRequest,
+        MLLMScheduler,
+        MLLMSchedulerConfig,
+    )
+    from vllm_mlx.request import RequestStatus
+
+    processor = MagicMock()
+    processor.tokenizer = MagicMock()
+    scheduler = MLLMScheduler(
+        MagicMock(),
+        processor,
+        MLLMSchedulerConfig(),
+        model_name="model-under-test",
+    )
+    running = MLLMRequest(request_id="running", prompt="started")
+    running.status = RequestStatus.RUNNING
+    running.num_prompt_tokens = 5
+    waiting = MLLMRequest(request_id="waiting", prompt="not started")
+    waiting.num_prompt_tokens = 7
+    scheduler.requests = {running.request_id: running, waiting.request_id: waiting}
+    scheduler.running = {running.request_id: running}
+    scheduler.waiting.append(waiting)
+
+    output = scheduler._fail_all_inflight(RuntimeError("Metal OOM"))
+
+    assert output.finished_request_ids == {"running", "waiting"}
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_failed == 2
+    assert performance.prompt_tokens == 5
+
+
 @pytest.mark.asyncio
 async def test_engine_loop_records_pending_failures():
     pytest.importorskip("mlx")

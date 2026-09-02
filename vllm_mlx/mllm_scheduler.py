@@ -1568,8 +1568,12 @@ class MLLMScheduler:
         for request_id in request_ids:
             request = self.requests.get(request_id) or self.running.get(request_id)
             if request is not None:
-                request.status = RequestStatus.FINISHED_ABORTED
+                # Account while the pre-terminal status still distinguishes
+                # queued requests (zero model work) from requests that reached
+                # prefill.  Marking every request aborted first would charge a
+                # waiting request's entire tokenized prompt to the model.
                 self._record_terminal_performance(request, "failed")
+                request.status = RequestStatus.FINISHED_ABORTED
         if self.batch_generator is not None:
             try:
                 self.batch_generator.close()
