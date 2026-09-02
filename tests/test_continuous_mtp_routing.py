@@ -512,9 +512,13 @@ def test_live_installer_drives_join_detach_remove_and_compat_response(monkeypatc
         def __init__(self):
             self.calls = []
             self.fail_discard = False
+            self.fail_join = False
+            self.fail_next = False
 
         def next(self):
             self.calls.append("next")
+            if self.fail_next:
+                raise RuntimeError("driver step failed")
             return [SimpleNamespace(uid=1, token=31)]
 
         def take_terminal_detaches(self):
@@ -527,6 +531,8 @@ def test_live_installer_drives_join_detach_remove_and_compat_response(monkeypatc
 
         def queue_lanes(self, specs, *, stop_tokens):
             self.calls.append(("join", tuple(spec.uid for spec in specs), stop_tokens))
+            if self.fail_join:
+                raise RuntimeError("join preparation rejected")
             return tuple(spec.uid for spec in specs)
 
         def discard_all(self):
@@ -642,11 +648,24 @@ def test_live_installer_drives_join_detach_remove_and_compat_response(monkeypatc
 
     driver.lane_uids = (1, 2, 4, 5)
     batch_gen.next()
+    driver.lane_uids = (1, 2)
+    driver.last_attached_uids = (4, 5)
+    driver.fail_join = True
+    queued_before_failed_join = list(batch_gen._unprocessed_sequences)
+    batch_gen.next()
+    assert list(batch_gen._unprocessed_sequences) == queued_before_failed_join
+    driver.fail_join = False
+    driver.last_attached_uids = ()
     driver.dynamic_membership = False
     batch_gen.next()
     driver.closed = True
     batch_gen.next()
     assert "resume" in driver.calls
+
+    driver.fail_next = True
+    with pytest.raises(RuntimeError, match="driver step failed"):
+        batch_gen.next()
+    driver.fail_next = False
 
     removed = batch_gen.remove([1], return_prompt_caches=True)
     assert removed[1] == ("target-cache", [10, 11])
