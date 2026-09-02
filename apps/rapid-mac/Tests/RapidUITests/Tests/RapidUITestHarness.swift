@@ -373,17 +373,6 @@ final class RapidUITestHarness {
             return 1
         }
         let settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
-        let chipObservationStart = Date().addingTimeInterval(simulateChipVisibilityDelay)
-        let completionObservationStart = Date().addingTimeInterval(
-            simulateCompletionVisibilityDelay
-        )
-        let chipIsSettled = {
-            Date() >= chipObservationStart && chip.exists && chip.isHittable
-        }
-        let completionIsVisible = {
-            Date() >= completionObservationStart
-                && FileManager.default.fileExists(atPath: self.dropEventFile.path)
-        }
         let maximumAttempts = 2
         for attempt in 1...maximumAttempts {
             do {
@@ -393,6 +382,22 @@ final class RapidUITestHarness {
                 return attempt
             }
             source.click(forDuration: 1, thenDragTo: dropTarget)
+            // Simulation delays model post-gesture observation latency. Anchor
+            // them after the blocking drag returns so its duration cannot
+            // accidentally satisfy the delay before the probe begins.
+            let chipObservationStart = Date().addingTimeInterval(
+                simulateChipVisibilityDelay
+            )
+            let completionObservationStart = Date().addingTimeInterval(
+                simulateCompletionVisibilityDelay
+            )
+            let chipIsSettled = {
+                Date() >= chipObservationStart && chip.exists && chip.isHittable
+            }
+            let completionIsVisible = {
+                Date() >= completionObservationStart
+                    && FileManager.default.fileExists(atPath: self.dropEventFile.path)
+            }
 
             // The drop-completion marker and the product render arrive
             // independently. First wait briefly for either authoritative
