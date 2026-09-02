@@ -339,7 +339,8 @@ final class RapidUITestHarness {
         expectedChip chip: XCUIElement? = nil,
         dropSettleTimeout: TimeInterval = 10,
         simulateMissedFirstGesture: Bool = false,
-        simulateChipVisibilityDelay: TimeInterval = 0
+        simulateChipVisibilityDelay: TimeInterval = 0,
+        simulateCompletionVisibilityDelay: TimeInterval = 0
     ) -> Int {
         let dragSource = XCUIApplication(bundleIdentifier: "com.rapidmlx.rapid-uitest-host")
         dragSource.launchEnvironment = [
@@ -369,8 +370,15 @@ final class RapidUITestHarness {
         }
         let settleDeadline = Date().addingTimeInterval(dropSettleTimeout)
         let chipObservationStart = Date().addingTimeInterval(simulateChipVisibilityDelay)
+        let completionObservationStart = Date().addingTimeInterval(
+            simulateCompletionVisibilityDelay
+        )
         let chipIsSettled = {
             Date() >= chipObservationStart && chip.exists && chip.isHittable
+        }
+        let completionIsVisible = {
+            Date() >= completionObservationStart
+                && FileManager.default.fileExists(atPath: self.dropEventFile.path)
         }
         let maximumAttempts = 2
         for attempt in 1...maximumAttempts {
@@ -394,13 +402,15 @@ final class RapidUITestHarness {
             )
             _ = waitUntil(timeout: observationTimeout) {
                 chipIsSettled()
-                    || FileManager.default.fileExists(atPath: self.dropEventFile.path)
+                    || completionIsVisible()
             }
             if chipIsSettled() { return attempt }
 
             let observedPhase: String?
             do {
-                observedPhase = try DropEventFile.completedPhase(at: dropEventFile)
+                observedPhase = completionIsVisible()
+                    ? try DropEventFile.completedPhase(at: dropEventFile)
+                    : nil
             } catch {
                 XCTFail("could not read valid UI-test drop marker after gesture: \(error)")
                 return attempt

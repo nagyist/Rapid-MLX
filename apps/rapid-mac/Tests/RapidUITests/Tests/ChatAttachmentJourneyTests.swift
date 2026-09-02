@@ -184,7 +184,8 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         let delayedChipAttempts = harness.dragFile(
             document,
             expectedChip: documentChip,
-            simulateChipVisibilityDelay: 3
+            simulateChipVisibilityDelay: 4,
+            simulateCompletionVisibilityDelay: 3
         )
         XCTAssertEqual(delayedChipAttempts, 1)
         harness.send("Dragged document", expectedRequestCount: 2)

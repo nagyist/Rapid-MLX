@@ -123,6 +123,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "FileDropRetryPolicy.observationTimeout(" in harness
     assert "remainingTime - minimumRetryBudget" in harness
     assert "FileDropRetryPolicy.shouldRetry(" in harness
+    assert "simulateCompletionVisibilityDelay: TimeInterval = 0" in harness
+    assert "completionIsVisible()" in harness
     assert "func testFileDropRetryPolicyIsBoundedAndCompletionAware()" in chat_source
     assert "func testDropEventFileClearIsIdempotent()" in chat_source
     assert "func testDropEventFileCompletionFailsClosed()" in chat_source
@@ -140,6 +142,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     )
     assert "XCTAssertEqual(recoveredAttempts, 2)" in chat_source
     assert "XCTAssertEqual(delayedChipAttempts, 1)" in chat_source
+    assert "simulateCompletionVisibilityDelay: 3" in chat_source
     assert 'let dropTarget = element("rapid.chat.compose")' in harness
     assert "click(forDuration: 1, thenDragTo: dropTarget)" in harness
     assert "func testDragPasteAndRemovalPreserveWireIdentity()" in chat_source
