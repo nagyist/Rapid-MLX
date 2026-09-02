@@ -8,10 +8,11 @@ decoded after that first token.  This ledger keeps the small amount of additiona
 state needed by :mod:`vllm_mlx.routes.metrics` without changing request
 semantics.
 
-The object is per ``Scheduler`` rather than process-global.  A sidecar serves one
-primary engine at a time; the Prometheus series carry the model label, and the
-later Desktop inspector is responsible for retaining observations across sidecar
-restarts if it wants longer-term history.
+Schedulers obtain their ledger from a process-owned, per-model registry. Model
+reloads therefore retain terminal events even when they occur between Prometheus
+scrapes, while a sidecar process restart starts fresh counters in the standard
+Prometheus fashion. The series carry the model label so operators can separate
+models without coupling metric ownership to a replaceable scheduler instance.
 """
 
 from __future__ import annotations
@@ -62,16 +63,6 @@ DECODE_TOKENS_PER_SECOND_BUCKETS = (
 # enough recent IDs to absorb duplicate terminal/cancellation events.
 SEEN_REQUEST_ID_LIMIT = 65_536
 
-_LEDGER_GENERATION_LOCK = threading.Lock()
-_LEDGER_GENERATION = 0
-
-
-def _next_ledger_generation() -> int:
-    global _LEDGER_GENERATION
-    with _LEDGER_GENERATION_LOCK:
-        _LEDGER_GENERATION += 1
-        return _LEDGER_GENERATION
-
 
 def _empty_bucket_counts(buckets: tuple[float, ...]) -> dict[str, int]:
     """Return zeroed cumulative histogram buckets."""
@@ -107,7 +98,6 @@ class ModelPerformanceSnapshot:
     """An immutable Prometheus-ready view of one model's request outcomes."""
 
     model_name: str
-    ledger_id: int
     requests_succeeded: int
     requests_cancelled: int
     requests_failed: int
@@ -133,11 +123,6 @@ class ModelPerformanceLedger:
 
     def __init__(self, model_name: str | None = None):
         self._model_name = model_name or ""
-        # The exporter uses this process-local identity to distinguish a
-        # freshly loaded scheduler from another ledger for the same model.
-        # Model labels alone cannot reveal a reset when the replacement has
-        # already accumulated as many samples as its predecessor.
-        self._ledger_id = _next_ledger_generation()
         self._lock = threading.Lock()
         self._seen_request_ids: OrderedDict[str | tuple[str, float], None] = (
             OrderedDict()
@@ -313,7 +298,6 @@ class ModelPerformanceLedger:
         with self._lock:
             return ModelPerformanceSnapshot(
                 model_name=self._model_name,
-                ledger_id=self._ledger_id,
                 requests_succeeded=self._requests_succeeded,
                 requests_cancelled=self._requests_cancelled,
                 requests_failed=self._requests_failed,
@@ -383,3 +367,27 @@ class ModelPerformanceLedger:
                 or decode_tokens_per_second > self._decode_tokens_per_second_max
             ):
                 self._decode_tokens_per_second_max = decode_tokens_per_second
+
+
+# Scheduler instances are replaceable; Prometheus counters are not. Keep one
+# process-owned ledger per model so terminal events completed between scrapes
+# survive an unload/reload of that model.
+_MODEL_LEDGER_REGISTRY: dict[str, ModelPerformanceLedger] = {}
+_MODEL_LEDGER_REGISTRY_LOCK = threading.Lock()
+
+
+def get_model_performance_ledger(
+    model_name: str | None = None,
+) -> ModelPerformanceLedger:
+    key = model_name or ""
+    with _MODEL_LEDGER_REGISTRY_LOCK:
+        ledger = _MODEL_LEDGER_REGISTRY.get(key)
+        if ledger is None:
+            ledger = ModelPerformanceLedger(key)
+            _MODEL_LEDGER_REGISTRY[key] = ledger
+        return ledger
+
+
+def _reset_model_performance_registry_for_tests() -> None:
+    with _MODEL_LEDGER_REGISTRY_LOCK:
+        _MODEL_LEDGER_REGISTRY.clear()

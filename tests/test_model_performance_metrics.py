@@ -591,7 +591,7 @@ def test_metrics_renders_model_performance_series():
     _reset_accumulator_for_tests()
 
 
-def test_metrics_preserves_model_counters_across_fresh_ledgers():
+def test_metrics_preserves_unseen_events_across_scheduler_reloads():
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -599,8 +599,13 @@ def test_metrics_preserves_model_counters_across_fresh_ledgers():
 
     from vllm_mlx.config import reset_config
     from vllm_mlx.routes.metrics import _reset_accumulator_for_tests, router
+    from vllm_mlx.runtime.model_performance import (
+        _reset_model_performance_registry_for_tests,
+        get_model_performance_ledger,
+    )
 
-    first = ModelPerformanceLedger("reloadable-model")
+    _reset_model_performance_registry_for_tests()
+    first = get_model_performance_ledger("reloadable-model")
     first.record_success(
         "first",
         prompt_tokens=7,
@@ -626,7 +631,17 @@ def test_metrics_preserves_model_counters_across_fresh_ledgers():
         in first_body
     )
 
-    replacement = ModelPerformanceLedger("reloadable-model")
+    # This request finishes after the last scrape but before the scheduler is
+    # replaced. Process-owned ledger state must retain it without a final scrape.
+    first.record_success(
+        "between-scrapes",
+        prompt_tokens=6,
+        completion_tokens=1,
+        ttft_seconds=0.8,
+        decode_tokens_per_second=30,
+    )
+    replacement = get_model_performance_ledger("reloadable-model")
+    assert replacement is first
     replacement.record_success(
         "second",
         prompt_tokens=3,
@@ -638,62 +653,40 @@ def test_metrics_preserves_model_counters_across_fresh_ledgers():
     second_body = client.get("/metrics").text
 
     assert (
-        'rapid_mlx_model_requests_total{model="reloadable-model",outcome="succeeded"} 2'
+        'rapid_mlx_model_requests_total{model="reloadable-model",outcome="succeeded"} 3'
         in second_body
     )
     assert (
-        'rapid_mlx_model_prompt_tokens_total{model="reloadable-model"} 10'
+        'rapid_mlx_model_prompt_tokens_total{model="reloadable-model"} 16'
         in second_body
     )
     assert (
-        'rapid_mlx_model_completion_tokens_total{model="reloadable-model"} 6'
+        'rapid_mlx_model_completion_tokens_total{model="reloadable-model"} 7'
         in second_body
     )
     assert (
-        'rapid_mlx_model_ttft_seconds_bucket{model="reloadable-model",le="+Inf"} 2'
+        'rapid_mlx_model_ttft_seconds_bucket{model="reloadable-model",le="+Inf"} 3'
         in second_body
     )
     assert (
-        'rapid_mlx_model_ttft_seconds_count{model="reloadable-model"} 2'
+        'rapid_mlx_model_ttft_seconds_count{model="reloadable-model"} 3'
         in second_body
     )
-    assert 'rapid_mlx_model_ttft_seconds_sum{model="reloadable-model"} 0.3' in second_body
+    assert 'rapid_mlx_model_ttft_seconds_sum{model="reloadable-model"} 1.1' in second_body
     assert (
-        'rapid_mlx_model_decode_tokens_per_second_count{model="reloadable-model"} 2'
+        'rapid_mlx_model_decode_tokens_per_second_count{model="reloadable-model"} 3'
         in second_body
     )
     assert (
-        'rapid_mlx_model_decode_tokens_per_second_sum{model="reloadable-model"} 15.0'
+        'rapid_mlx_model_decode_tokens_per_second_sum{model="reloadable-model"} 45.0'
         in second_body
     )
-    assert 'rapid_mlx_model_ttft_seconds_max{model="reloadable-model"} 0.2' in second_body
+    assert 'rapid_mlx_model_ttft_seconds_max{model="reloadable-model"} 0.8' in second_body
     assert (
-        'rapid_mlx_model_decode_tokens_per_second_max{model="reloadable-model"} 10.0'
+        'rapid_mlx_model_decode_tokens_per_second_max{model="reloadable-model"} 30.0'
         in second_body
     )
 
     reset_config()
     _reset_accumulator_for_tests()
-
-
-def test_model_accumulator_rejects_delayed_retired_ledger_snapshot():
-    from vllm_mlx.routes.metrics import _ModelPerformanceAccumulator
-
-    accumulator = _ModelPerformanceAccumulator()
-    old_snapshot = {"requests:succeeded": 1.0, "ttft:count": 1.0}
-    new_snapshot = {"requests:succeeded": 2.0, "ttft:count": 2.0}
-
-    assert accumulator.advance("model", 10, old_snapshot)[0] == old_snapshot
-    current = accumulator.advance("model", 11, new_snapshot)[0]
-    assert current == {"requests:succeeded": 3.0, "ttft:count": 3.0}
-
-    # Simulate an old scrape that captured generation 10 before the reload but
-    # reached the accumulator after generation 11 had already advanced it.
-    delayed = accumulator.advance("model", 10, old_snapshot)[0]
-    assert delayed == current
-
-    # A stale snapshot from the active generation must not decrease any series.
-    stale_current = accumulator.advance(
-        "model", 11, {"requests:succeeded": 1.0, "ttft:count": 1.0}
-    )[0]
-    assert stale_current == current
+    _reset_model_performance_registry_for_tests()

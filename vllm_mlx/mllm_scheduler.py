@@ -54,7 +54,7 @@ from .request import (  # noqa: E402
     RequestStatus,
     SamplingParams,
 )
-from .runtime.model_performance import ModelPerformanceLedger  # noqa: E402
+from .runtime.model_performance import get_model_performance_ledger  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +388,7 @@ class MLLMScheduler:
         # rationale. Observability only — abort semantics unchanged.
         self.num_requests_cancelled = 0
         self.num_requests_cancelled_via_disconnect = 0
-        self.performance = ModelPerformanceLedger(model_name)
+        self.performance = get_model_performance_ledger(model_name)
 
     def _request_timings(
         self, request: MLLMRequest

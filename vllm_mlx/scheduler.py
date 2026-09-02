@@ -131,7 +131,7 @@ from .repetition_guard import (
     detect_repeated_token_suffix,
 )
 from .request import Request, RequestOutput, RequestStatus, SamplingParams
-from .runtime.model_performance import ModelPerformanceLedger
+from .runtime.model_performance import get_model_performance_ledger
 from .utils.decode import IncrementalDecoder
 from .utils.mamba_cache import ensure_mamba_support
 
@@ -3516,7 +3516,7 @@ class Scheduler:
         self.config = config or SchedulerConfig()
         self._tool_logits_processor_factory = tool_logits_processor_factory
         self.model_config = model_config
-        self.performance = ModelPerformanceLedger(
+        self.performance = get_model_performance_ledger(
             model_name=getattr(self.config, "model_name", None)
         )
         if os.environ.get("RAPID_DUMP_SCHED_CONFIG"):

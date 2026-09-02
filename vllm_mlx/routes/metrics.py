@@ -114,83 +114,14 @@ class _StickyCounterAccumulator:
             return baseline + raw
 
 
-class _ModelPerformanceAccumulator:
-    """Atomically keep one model snapshot monotonic across scheduler reloads."""
-
-    def __init__(self) -> None:
-        # model -> (active generation, retired baseline, active raw snapshot)
-        self._state: dict[
-            str,
-            tuple[
-                int, dict[str, float], dict[str, float], dict[str, float]
-            ],
-        ] = {}
-        self._lock = threading.Lock()
-
-    def advance(
-        self,
-        model_name: str,
-        ledger_id: int,
-        raw: dict[str, float],
-        maxima: dict[str, float] | None = None,
-    ) -> tuple[dict[str, float], dict[str, float]]:
-        normalized = {key: max(0.0, float(value)) for key, value in raw.items()}
-        normalized_maxima = {
-            key: max(0.0, float(value)) for key, value in (maxima or {}).items()
-        }
-        with self._lock:
-            previous = self._state.get(model_name)
-            if previous is None:
-                active_id = ledger_id
-                baseline: dict[str, float] = {}
-                active_raw = normalized
-                process_maxima = normalized_maxima
-            else:
-                active_id, baseline, active_raw, process_maxima = previous
-                baseline = dict(baseline)
-                process_maxima = dict(process_maxima)
-                if ledger_id > active_id:
-                    # Retire every series from the old scheduler as one atomic
-                    # snapshot so a scrape cannot mix ledger generations.
-                    for key, value in active_raw.items():
-                        baseline[key] = baseline.get(key, 0.0) + value
-                    active_id = ledger_id
-                    active_raw = normalized
-                elif ledger_id == active_id:
-                    # Two scrapes can capture the same live ledger at different
-                    # instants and arrive out of order. Counters never decrease,
-                    # so retain the newest value for every component.
-                    active_raw = {
-                        key: max(active_raw.get(key, 0.0), value)
-                        for key, value in normalized.items()
-                    }
-                # A lower generation is a delayed scrape from a retired
-                # scheduler. Return the current view without mutating state.
-                for key, value in normalized_maxima.items():
-                    process_maxima[key] = max(process_maxima.get(key, 0.0), value)
-            self._state[model_name] = (
-                active_id,
-                baseline,
-                active_raw,
-                process_maxima,
-            )
-            cumulative = {
-                key: baseline.get(key, 0.0) + value
-                for key, value in active_raw.items()
-            }
-            return cumulative, dict(process_maxima)
-
-
 # Module-level accumulator — one process, one cumulative cache series.
 _cache_counter_accumulator = _StickyCounterAccumulator()
-_model_performance_accumulator = _ModelPerformanceAccumulator()
 
 
 def _reset_accumulator_for_tests() -> None:
     """Test-only hook: clear the sticky-counter state between tests."""
-    global _cache_counter_accumulator, _model_performance_accumulator
+    global _cache_counter_accumulator
     _cache_counter_accumulator = _StickyCounterAccumulator()
-    _model_performance_accumulator = _ModelPerformanceAccumulator()
 
 
 def _escape_label_value(value: str) -> str:
@@ -283,55 +214,8 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
         return []
 
     model_name = str(performance.get("model_name") or "")
-    ledger_id = int(_coerce_number(performance.get("ledger_id"), 0.0))
     labels = {"model": model_name}
     lines: list[str] = []
-    ttft_buckets = performance.get("ttft_bucket_counts")
-    decode_buckets = performance.get("decode_bucket_counts")
-    raw_counters = {
-        **{
-            f"requests:{outcome}": _coerce_number(
-                performance.get(f"requests_{outcome}"), 0.0
-            )
-            for outcome in ("succeeded", "cancelled", "failed")
-        },
-        **{
-            f"tokens:{kind}": _coerce_number(
-                performance.get(f"{kind}_tokens"), 0.0
-            )
-            for kind in ("prompt", "completion")
-        },
-        "ttft:count": _coerce_number(performance.get("ttft_seconds_count"), 0.0),
-        "ttft:sum": _coerce_number(performance.get("ttft_seconds_sum"), 0.0),
-        "decode:count": _coerce_number(
-            performance.get("decode_observations"), 0.0
-        ),
-        "decode:sum": _coerce_number(
-            performance.get("decode_tokens_per_second_sum"), 0.0
-        ),
-    }
-    if isinstance(ttft_buckets, dict):
-        raw_counters.update(
-            {
-                f"ttft:bucket:{bucket}": _coerce_number(count, 0.0)
-                for bucket, count in ttft_buckets.items()
-            }
-        )
-    if isinstance(decode_buckets, dict):
-        raw_counters.update(
-            {
-                f"decode:bucket:{bucket}": _coerce_number(count, 0.0)
-                for bucket, count in decode_buckets.items()
-            }
-        )
-    raw_maxima = {
-        key: _coerce_number(performance[key])
-        for key in ("ttft_seconds_max", "decode_tokens_per_second_max")
-        if performance.get(key) is not None
-    }
-    cumulative, process_maxima = _model_performance_accumulator.advance(
-        model_name, ledger_id, raw_counters, raw_maxima
-    )
 
     lines.extend(
         _fmt_metric_family(
@@ -342,7 +226,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 *[
                     (
                         int(
-                            cumulative[f"requests:{outcome}"]
+                            _coerce_number(performance.get(f"requests_{outcome}"), 0.0)
                         ),
                         {**labels, "outcome": outcome},
                     )
@@ -358,13 +242,12 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 f"rapid_mlx_model_{token_kind}_tokens_total",
                 "counter",
                 f"Cumulative {token_kind} tokens processed by the model.",
-                int(
-                    cumulative[f"tokens:{token_kind}"]
-                ),
+                int(_coerce_number(performance.get(f"{token_kind}_tokens"), 0.0)),
                 labels=labels,
             )
         )
 
+    ttft_buckets = performance.get("ttft_bucket_counts")
     if isinstance(ttft_buckets, dict):
         lines.extend(
             _fmt_metric_family(
@@ -373,7 +256,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "Time to first token, in seconds, by model.",
                 [
                     (
-                        int(cumulative[f"ttft:bucket:{bucket}"]),
+                        int(_coerce_number(count, 0.0)),
                         {**labels, "le": str(bucket)},
                     )
                     for bucket, count in ttft_buckets.items()
@@ -386,9 +269,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "rapid_mlx_model_ttft_seconds_count",
                 [
                     (
-                        int(
-                            cumulative["ttft:count"]
-                        ),
+                        int(_coerce_number(performance.get("ttft_seconds_count"), 0.0)),
                         labels,
                     )
                 ],
@@ -400,7 +281,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         round(
-                            cumulative["ttft:sum"],
+                            _coerce_number(performance.get("ttft_seconds_sum"), 0.0),
                             6,
                         ),
                         labels,
@@ -409,6 +290,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
             )
         )
 
+    decode_buckets = performance.get("decode_bucket_counts")
     if isinstance(decode_buckets, dict):
         lines.extend(
             _fmt_metric_family(
@@ -417,7 +299,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 "Post-first-token decode speed in tokens per second by model.",
                 [
                     (
-                        int(cumulative[f"decode:bucket:{bucket}"]),
+                        int(_coerce_number(count, 0.0)),
                         {**labels, "le": str(bucket)},
                     )
                     for bucket, count in decode_buckets.items()
@@ -431,7 +313,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         int(
-                            cumulative["decode:count"]
+                            _coerce_number(performance.get("decode_observations"), 0.0)
                         ),
                         labels,
                     )
@@ -444,7 +326,9 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 [
                     (
                         round(
-                            cumulative["decode:sum"],
+                            _coerce_number(
+                                performance.get("decode_tokens_per_second_sum"), 0.0
+                            ),
                             6,
                         ),
                         labels,
@@ -470,11 +354,7 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
             "Most recent terminal request's post-first-token decode speed.",
         ),
     ):
-        value = (
-            process_maxima.get(value_key)
-            if value_key in ("ttft_seconds_max", "decode_tokens_per_second_max")
-            else performance.get(value_key)
-        )
+        value = performance.get(value_key)
         if value is not None:
             lines.extend(
                 _fmt_metric(
