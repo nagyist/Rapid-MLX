@@ -2791,6 +2791,7 @@ def test_incompatible_mlx_vlm_does_not_mark_dflash_ok():
 
 def test_run_all_bounds_remote_probe_budget_and_clears_deadline(monkeypatch):
     seen_deadlines = []
+    started_at = time.monotonic()
 
     def inspect_deadline():
         seen_deadlines.append(eh._DOCTOR_DEADLINE)
@@ -2803,6 +2804,9 @@ def test_run_all_bounds_remote_probe_budget_and_clears_deadline(monkeypatch):
     assert report.sections[0].title == "Test"
     assert len(seen_deadlines) == 1
     assert seen_deadlines[0] is not None
+    assert seen_deadlines[0] - started_at <= (
+        eh._DOCTOR_BUDGET_S - eh._DOCTOR_COMPLETION_HEADROOM_S + 0.01
+    )
     assert eh._DOCTOR_DEADLINE is None
 
 

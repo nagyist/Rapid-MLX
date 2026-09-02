@@ -240,6 +240,12 @@ _RUNTIME_OVERRIDE_REPAIR_HINT_TEMPLATE = (
     "sidecar), then remove {root} and relaunch so the bundled sidecar is used"
 )
 _DOCTOR_BUDGET_S = 5.0
+# Leave enough wall-clock headroom for subprocess timeout cleanup, report
+# assembly, and CLI rendering.  ``subprocess.run(timeout=...)`` only starts
+# terminating the child at its timeout and can return a few milliseconds
+# later; consuming the full user-facing budget inside probes therefore makes
+# the end-to-end command exceed its own contract.
+_DOCTOR_COMPLETION_HEADROOM_S = 0.1
 _DOCTOR_DEADLINE: float | None = None
 _RUNTIME_CONTEXTS: dict[Path, tuple[Path, dict[str, str]]] = {}
 _RUNTIME_DISTRIBUTION_CACHE: dict[Path, bool] = {}
@@ -2778,7 +2784,9 @@ def run_all() -> Report:
     global _DOCTOR_DEADLINE, _RUNTIME_SELECTION_DONE
     report = Report()
     try:
-        _DOCTOR_DEADLINE = time.monotonic() + _DOCTOR_BUDGET_S
+        _DOCTOR_DEADLINE = time.monotonic() + (
+            _DOCTOR_BUDGET_S - _DOCTOR_COMPLETION_HEADROOM_S
+        )
         _RUNTIME_SELECTION_DONE = False
         _RUNTIME_PROBE_CACHE.clear()
         _RUNTIME_IMPORT_CACHE.clear()
