@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .canonical import rcj_digest
 from .validation import ContractValidator
@@ -204,7 +204,7 @@ def load_product_recommendation_policy(
 
     snapshot = snapshot or build_legacy_catalog_snapshot()
     path = Path(__file__).resolve().parents[1] / "model_recommendations.json"
-    policy = json.loads(path.read_text(encoding="utf-8"))
+    policy = cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
     aliases = {item["alias"]: item for item in snapshot["aliases"]}
     ContractValidator().validate_recommendation_policy(policy, aliases=aliases)
     return policy
