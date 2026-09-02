@@ -31,6 +31,15 @@ final class ChatAttachmentJourneyTests: XCTestCase {
                 completedDrop: false,
                 attempt: 1,
                 maximumAttempts: 2,
+                remainingTime: FileDropRetryPolicy.retryGestureBudget
+                    + FileDropRetryPolicy.minimumRetryBudget
+            )
+        )
+        XCTAssertFalse(
+            FileDropRetryPolicy.shouldRetry(
+                completedDrop: false,
+                attempt: 1,
+                maximumAttempts: 2,
                 remainingTime: FileDropRetryPolicy.minimumRetryBudget
             )
         )

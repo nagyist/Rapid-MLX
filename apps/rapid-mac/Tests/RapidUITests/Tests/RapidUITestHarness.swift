@@ -84,7 +84,7 @@ enum FileDropRetryPolicy {
     ) -> Bool {
         !completedDrop
             && attempt < maximumAttempts
-            && remainingTime >= minimumRetryBudget
+            && remainingTime >= retryGestureBudget + minimumRetryBudget
     }
 }
 
