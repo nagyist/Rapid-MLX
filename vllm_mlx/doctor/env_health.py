@@ -2888,6 +2888,8 @@ def _run_all_serialized(caller_deadline: float) -> Report:
         _RUNTIME_IMPORT_TIMEOUTS.clear()
         _RUNTIME_DISTRIBUTION_CACHE.clear()
         _RUNTIME_CONTEXTS.clear()
+        if time.monotonic() >= _DOCTOR_DEADLINE:
+            return _budget_exhausted_report()
         _selected_runtime()
         for index, builder in enumerate(_SECTION_BUILDERS):
             if time.monotonic() >= _DOCTOR_DEADLINE:

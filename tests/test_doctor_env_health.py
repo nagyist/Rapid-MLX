@@ -2848,6 +2848,24 @@ def test_run_all_skips_remaining_sections_after_shared_deadline(monkeypatch):
     assert eh._DOCTOR_DEADLINE is None
 
 
+def test_expired_caller_does_not_start_runtime_discovery(monkeypatch):
+    monkeypatch.setattr(eh.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        eh,
+        "_selected_runtime",
+        mock.Mock(side_effect=AssertionError("runtime discovery must not start")),
+    )
+
+    report = eh._run_all_serialized(99.0)
+
+    assert report.sections
+    assert all(
+        "budget exhausted" in section.checks[0].label for section in report.sections
+    )
+    eh._selected_runtime.assert_not_called()
+    assert eh._DOCTOR_DEADLINE is None
+
+
 def test_bounded_timeout_uses_only_one_millisecond_after_deadline(monkeypatch):
     monkeypatch.setattr(eh, "_DOCTOR_DEADLINE", 10.0)
     monkeypatch.setattr(eh.time, "monotonic", lambda: 10.5)
@@ -2859,6 +2877,8 @@ def test_run_all_serializes_process_global_probe_state(monkeypatch):
     active = 0
     peak_active = 0
     state_lock = threading.Lock()
+    results = []
+    errors = []
 
     def fake_run(_deadline):
         nonlocal active, peak_active
@@ -2871,12 +2891,21 @@ def test_run_all_serializes_process_global_probe_state(monkeypatch):
         return eh.Report()
 
     monkeypatch.setattr(eh, "_run_all_serialized", fake_run)
-    threads = [threading.Thread(target=eh.run_all) for _ in range(2)]
+
+    def invoke_run_all():
+        try:
+            results.append(eh.run_all())
+        except Exception as exc:  # pragma: no cover - assertion captures it
+            errors.append(exc)
+
+    threads = [threading.Thread(target=invoke_run_all) for _ in range(2)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
+    assert errors == []
+    assert len(results) == 2
     assert peak_active == 1
 
 
