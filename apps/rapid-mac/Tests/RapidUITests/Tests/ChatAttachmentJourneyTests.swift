@@ -179,7 +179,6 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         let recoveredAttempts = harness.dragFile(
             image,
             expectedChip: imageChip,
-            dropSettleTimeout: 12,
             simulateMissedFirstGesture: true
         )
         XCTAssertEqual(recoveredAttempts, 2)
@@ -189,7 +188,6 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         let delayedChipAttempts = harness.dragFile(
             document,
             expectedChip: documentChip,
-            dropSettleTimeout: 12,
             simulateChipVisibilityDelay: 4,
             simulateCompletionVisibilityDelay: 3
         )

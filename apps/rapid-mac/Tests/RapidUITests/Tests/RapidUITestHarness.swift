@@ -350,7 +350,7 @@ final class RapidUITestHarness {
     func dragFile(
         _ url: URL,
         expectedChip chip: XCUIElement? = nil,
-        dropSettleTimeout: TimeInterval = 10,
+        dropSettleTimeout: TimeInterval = 12,
         simulateMissedFirstGesture: Bool = false,
         simulateChipVisibilityDelay: TimeInterval = 0,
         simulateCompletionVisibilityDelay: TimeInterval = 0
