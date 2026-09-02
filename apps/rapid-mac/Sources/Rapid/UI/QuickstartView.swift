@@ -3342,8 +3342,12 @@ struct QuickstartView: View {
             if starterAlias != QuickstartCoordinator.lowMemoryChoice.alias {
                 excluded.insert(QuickstartCoordinator.lowMemoryChoice.alias)
             }
-            recommended = Self.recommendedChoices(
+            let resolved = RAMBucketedDefault.catalogPicks(
                 from: RAMBucketedDefault.picks(forPhysicalRAMGB: ram),
+                catalogAliases: Set(catalog.map(\.alias))
+            )
+            recommended = Self.recommendedChoices(
+                from: resolved.map(\.pick),
                 authored: choices,
                 excludedAliases: excluded
             )

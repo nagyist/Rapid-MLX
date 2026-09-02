@@ -152,6 +152,23 @@ struct RAMBucketedDefaultTests {
         #expect(RAMBucketedDefault.footprintGB(forAlias: "private-model") == nil)
     }
 
+    @Test("Recommendations resolve against the installed sidecar catalog")
+    func recommendationsResolveAgainstLiveCatalog() {
+        let known = RAMBucketedDefault.Pick(
+            alias: "known-model", footprintGB: 2, capabilityPct: 50,
+            tokensPerSec: 20, launchFlags: []
+        )
+        let missing = RAMBucketedDefault.Pick(
+            alias: "syntactically-valid-but-missing", footprintGB: 3,
+            capabilityPct: 60, tokensPerSec: 15, launchFlags: []
+        )
+        let resolved = RAMBucketedDefault.catalogPicks(
+            from: [missing, known], catalogAliases: ["known-model"]
+        )
+
+        #expect(resolved == [.init(pick: known, isPrimary: false)])
+    }
+
     // MARK: - Launch flags travel with the recommendation, gated by RAM
 
     @Test("Flags apply only when the alias IS the pick for that Mac's RAM")

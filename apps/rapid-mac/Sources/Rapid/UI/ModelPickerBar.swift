@@ -279,11 +279,15 @@ struct ModelPickerBar: View {
         // the post-filter index — otherwise a primary missing from the
         // catalog (rapid-mlx version skew) would leave the alt at index 0
         // and mislabel it "Recommended" instead of "Faster".
-        hardware.recommendedPicks.enumerated().compactMap { index, pick in
-            guard let entry = catalog.first(where: { $0.alias == pick.alias }) else {
+        let resolved = RAMBucketedDefault.catalogPicks(
+            from: hardware.recommendedPicks,
+            catalogAliases: Set(catalog.map(\.alias))
+        )
+        return resolved.compactMap { item in
+            guard let entry = catalog.first(where: { $0.alias == item.pick.alias }) else {
                 return nil
             }
-            return (pick, entry, index == 0)
+            return (item.pick, entry, item.isPrimary)
         }
     }
 

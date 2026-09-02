@@ -536,7 +536,10 @@ struct Step2ModelSelectionBehaviorTests {
 
     @Test("The Qwen 3.8 27B is offered on a 32 GB Mac (in the recommended row)")
     func qwen38OfferedOn32GB() {
-        let list = QuickstartView.shortlist(catalog: [], selection: "", physicalRAMGB: 32)
+        let list = QuickstartView.shortlist(
+            catalog: [Self.entry("qwen3.8-27b-4bit")],
+            selection: "", physicalRAMGB: 32
+        )
         #expect(Self.offeredAliases(list).contains("qwen3.8-27b-4bit"),
                 "a 20 GB model must be offered on a 32 GB Mac")
     }
@@ -544,7 +547,10 @@ struct Step2ModelSelectionBehaviorTests {
     @Test("The Qwen 3.8 27B is offered on larger Macs too (in the recommended row)")
     func qwen38OfferedOn48And64GB() {
         for ram in [48.0, 64.0, 96.0] {
-            let list = QuickstartView.shortlist(catalog: [], selection: "", physicalRAMGB: ram)
+            let list = QuickstartView.shortlist(
+                catalog: [Self.entry("qwen3.8-27b-4bit")],
+                selection: "", physicalRAMGB: ram
+            )
             #expect(Self.offeredAliases(list).contains("qwen3.8-27b-4bit"),
                     "should be offered on a \(Int(ram)) GB Mac")
         }
@@ -570,7 +576,13 @@ struct Step2ModelSelectionBehaviorTests {
 
     @Test("A 256 GB Mac recommends the SSOT smart + fast picks")
     func bigMacRecommends27BAnd35B() {
-        let list = QuickstartView.shortlist(catalog: [], selection: "", physicalRAMGB: 256)
+        let list = QuickstartView.shortlist(
+            catalog: [
+                Self.entry("qwen3.8-27b-4bit"),
+                Self.entry("qwen3.6-35b-4bit"),
+            ],
+            selection: "", physicalRAMGB: 256
+        )
         #expect(list.recommended.map(\.alias) == ["qwen3.8-27b-4bit", "qwen3.6-35b-4bit"],
                 "256 GB is the 48 GB+ tier: smart 27B then fast 35B")
     }
@@ -578,7 +590,12 @@ struct Step2ModelSelectionBehaviorTests {
     @Test("A recommended model is not also listed as a trade-up")
     func recommendedAliasesAreExcludedFromTradeUps() {
         for ram in [32.0, 48.0, 64.0, 96.0, 256.0] {
-            let list = QuickstartView.shortlist(catalog: [], selection: "", physicalRAMGB: ram)
+            let list = QuickstartView.shortlist(
+                catalog: RAMBucketedDefault.picks(forPhysicalRAMGB: ram).map {
+                    Self.entry($0.alias)
+                },
+                selection: "", physicalRAMGB: ram
+            )
             let recommended = Set(list.recommended.map(\.alias))
             let tradeUps = Set(list.tradeUps.map(\.alias))
             #expect(recommended.isDisjoint(with: tradeUps),
@@ -588,7 +605,13 @@ struct Step2ModelSelectionBehaviorTests {
 
     @Test("A 32 GB Mac recommends only the 27B, not the 48 GB+ 35B")
     func midRAMRecommendsOnly27B() {
-        let list = QuickstartView.shortlist(catalog: [], selection: "", physicalRAMGB: 32)
+        let list = QuickstartView.shortlist(
+            catalog: [
+                Self.entry("qwen3.8-27b-4bit"),
+                Self.entry("qwen3.5-4b-4bit"),
+            ],
+            selection: "", physicalRAMGB: 32
+        )
         #expect(list.recommended.map(\.alias) == ["qwen3.8-27b-4bit"],
                 "32 GB shows the smart 27B; the fast 4B is already the starter")
     }
@@ -597,7 +620,13 @@ struct Step2ModelSelectionBehaviorTests {
     func starterEqualFastPickIsDroppedFromRecommended() {
         // At 8 GB the fast pick is the automatic starter. The smart pick stays
         // visible once as an explicit, memory-guarded capability upgrade.
-        let list = QuickstartView.shortlist(catalog: [], selection: "", physicalRAMGB: 8)
+        let list = QuickstartView.shortlist(
+            catalog: [
+                Self.entry("lfm2.5-2.6b-4bit"),
+                Self.entry("lfm2.5-1b-4bit"),
+            ],
+            selection: "", physicalRAMGB: 8
+        )
         #expect(list.starters.map(\.alias) == ["lfm2.5-1b-4bit"])
         #expect(list.lowMemory.isEmpty)
         #expect(list.recommended.map(\.alias) == ["lfm2.5-2.6b-4bit"])

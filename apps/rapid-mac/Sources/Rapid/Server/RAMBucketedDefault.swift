@@ -105,6 +105,14 @@ enum RAMBucketedDefault {
         var picks: [Pick] { alt.map { [primary, $0] } ?? [primary] }
     }
 
+    /// A policy pick that resolves in the catalog currently advertised by
+    /// the installed sidecar. The source position is retained so a surviving
+    /// fast alternative is never relabelled as the primary recommendation.
+    struct CatalogPick: Sendable, Equatable {
+        let pick: Pick
+        let isPrimary: Bool
+    }
+
     /// Decoded from the repository-wide SSOT used by both Rapid Desktop and
     /// ``rapid-mlx recipe``. A missing or malformed table is a packaging error:
     /// silently inventing a fallback would recreate the cross-surface drift this
@@ -414,6 +422,20 @@ enum RAMBucketedDefault {
     /// existing conservative estimate.
     static func footprintGB(forAlias alias: String) -> Double? {
         footprintsByAlias[alias.lowercased()]
+    }
+
+    /// Resolve an immutable policy snapshot against the live model catalog.
+    /// Packaging validates the two artifacts together, while this boundary
+    /// handles an older externally installed sidecar without presenting an
+    /// alias that it cannot download or launch.
+    static func catalogPicks(
+        from picks: [Pick],
+        catalogAliases: Set<String>
+    ) -> [CatalogPick] {
+        picks.enumerated().compactMap { index, pick in
+            guard catalogAliases.contains(pick.alias) else { return nil }
+            return CatalogPick(pick: pick, isPrimary: index == 0)
+        }
     }
 
     /// Quality-aware order for choosing among models that are already on
