@@ -312,6 +312,48 @@ struct RAMBucketedDefaultTests {
         )
     }
 
+    @Test("Atomic policy enforces schema identifiers across Desktop")
+    func atomicPolicyRejectsMalformedIdentifiers() throws {
+        let original = try #require(
+            JSONSerialization.jsonObject(with: policyData()) as? [String: Any]
+        )
+
+        func policyDataWithPickMutation(
+            _ mutate: (inout [String: Any]) -> Void
+        ) throws -> Data {
+            var policy = original
+            var tiers = try #require(policy["tiers"] as? [[String: Any]])
+            var picks = try #require(tiers[0]["picks"] as? [[String: Any]])
+            mutate(&picks[0])
+            tiers[0]["picks"] = picks
+            policy["tiers"] = tiers
+            return try addressedPolicyData(policy)
+        }
+
+        #expect(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try policyDataWithPickMutation { $0["alias"] = "Qwen3" }
+            ) == nil
+        )
+        #expect(
+            RAMBucketedDefault.parseRecommendationPolicy(
+                try policyDataWithPickMutation {
+                    $0["reason_ids"] = ["Fits_Memory"]
+                }
+            ) == nil
+        )
+        for evidenceID in ["invalid evidence", String(repeating: "a", count: 161)] {
+            #expect(
+                RAMBucketedDefault.parseRecommendationPolicy(
+                    try policyDataWithPickMutation {
+                        $0["evidence_status"] = "promoted"
+                        $0["evidence_id"] = evidenceID
+                    }
+                ) == nil
+            )
+        }
+    }
+
     @Test("Atomic policy accepts the schema's zero capability boundary")
     func atomicPolicyAcceptsZeroCapability() throws {
         var policy = try #require(

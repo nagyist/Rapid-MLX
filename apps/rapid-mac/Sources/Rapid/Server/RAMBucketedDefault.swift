@@ -206,12 +206,30 @@ enum RAMBucketedDefault {
             )
         }
 
+        private static func isSchemaIdentifier(
+            _ value: String,
+            maxBytes: Int,
+            allowsSlash: Bool = false
+        ) -> Bool {
+            guard !value.isEmpty,
+                  value.utf8.count <= maxBytes,
+                  let first = value.utf8.first,
+                  (first >= 97 && first <= 122) || (first >= 48 && first <= 57)
+            else { return false }
+            return value.utf8.allSatisfy { byte in
+                (byte >= 97 && byte <= 122)
+                    || (byte >= 48 && byte <= 57)
+                    || byte == 45 || byte == 46 || byte == 95
+                    || (allowsSlash && byte == 47)
+            }
+        }
+
         func resolvedPick() -> Pick? {
             let limitationCopy = [
                 "not_for_coding": "Not for coding",
                 "basic_chat": "Basic chat",
             ]
-            guard ModelCatalog.isSafeAlias(alias),
+            guard Self.isSchemaIdentifier(alias, maxBytes: 128),
                   footprintMiB > 0,
                   capabilityScoreX100 >= 0,
                   capabilityScoreX100 <= 10_000,
@@ -219,11 +237,18 @@ enum RAMBucketedDefault {
                   decodeTokensPerSecondX100.map({ $0 > 0 }) ?? true,
                   !reasonIDs.isEmpty,
                   Set(reasonIDs).count == reasonIDs.count,
-                  reasonIDs.allSatisfy({ ModelCatalog.isSafeAlias($0) }),
+                  reasonIDs.allSatisfy({
+                      Self.isSchemaIdentifier($0, maxBytes: 128)
+                  }),
                   ["legacy_estimate", "legacy_measured", "community_candidate", "promoted"]
                       .contains(evidenceStatus),
                   !["community_candidate", "promoted"].contains(evidenceStatus)
                     || evidenceID?.isEmpty == false,
+                  evidenceID.map({
+                      Self.isSchemaIdentifier(
+                          $0, maxBytes: 160, allowsSlash: true
+                      )
+                  }) ?? true,
                   executionPresetID == nil,
                   Set(limitationIDs).count == limitationIDs.count,
                   limitationIDs.count <= 1
