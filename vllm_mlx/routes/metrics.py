@@ -51,6 +51,7 @@ from fastapi.responses import PlainTextResponse
 
 from .. import __version__
 from ..config import get_config
+from ..runtime.model_performance import get_model_performance_snapshots
 
 router = APIRouter()
 
@@ -366,6 +367,25 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
                 )
             )
 
+    return lines
+
+
+def _render_retained_model_performance() -> list[str]:
+    """Render every process-owned model ledger as shared metric families."""
+    lines: list[str] = []
+    for index, snapshot in enumerate(get_model_performance_snapshots()):
+        rendered = _render_model_performance(
+            {"model_performance": snapshot.__dict__}
+        )
+        if index:
+            # HELP/TYPE declarations belong to the family, not each label set.
+            rendered = [
+                line
+                for line in rendered
+                if not line.startswith("# HELP rapid_mlx_model_")
+                and not line.startswith("# TYPE rapid_mlx_model_")
+            ]
+        lines.extend(rendered)
     return lines
 
 
@@ -1339,6 +1359,11 @@ def _render_prometheus(cfg: Any) -> str:
     # dashboards see the active mode + skip rate even between restarts.
     lines.extend(_render_turboquant_metrics(cfg))
 
+    # Per-model ledgers are process-owned rather than engine-owned. Render all
+    # retained models before engine early returns so unload windows and model
+    # switches do not make historical labelled series disappear.
+    lines.extend(_render_retained_model_performance())
+
     if cfg.engine is None:
         # No engine yet — return build info + response_format counters
         # only. Prometheus must NOT see a 500 here or the whole target
@@ -1354,7 +1379,6 @@ def _render_prometheus(cfg: Any) -> str:
         return "\n".join(lines) + "\n"
 
     # ---- Scheduler counters & gauges -----------------------------------
-    lines.extend(_render_model_performance(stats))
     lines.extend(
         _fmt_metric(
             "rapid_mlx_requests_processed_total",

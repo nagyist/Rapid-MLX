@@ -388,6 +388,13 @@ def get_model_performance_ledger(
         return ledger
 
 
+def get_model_performance_snapshots() -> list[ModelPerformanceSnapshot]:
+    """Return coherent snapshots for every model observed by this process."""
+    with _MODEL_LEDGER_REGISTRY_LOCK:
+        ledgers = list(_MODEL_LEDGER_REGISTRY.values())
+    return [ledger.snapshot() for ledger in ledgers]
+
+
 def _reset_model_performance_registry_for_tests() -> None:
     with _MODEL_LEDGER_REGISTRY_LOCK:
         _MODEL_LEDGER_REGISTRY.clear()

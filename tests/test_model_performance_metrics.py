@@ -510,8 +510,9 @@ def test_metrics_renders_model_performance_series():
 
     from vllm_mlx.config import reset_config
     from vllm_mlx.routes.metrics import _reset_accumulator_for_tests, router
+    from vllm_mlx.runtime.model_performance import get_model_performance_ledger
 
-    ledger = ModelPerformanceLedger("gemma-4-12b")
+    ledger = get_model_performance_ledger("gemma-4-12b")
     ledger.record_success(
         "1",
         prompt_tokens=7,
@@ -599,12 +600,8 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
 
     from vllm_mlx.config import reset_config
     from vllm_mlx.routes.metrics import _reset_accumulator_for_tests, router
-    from vllm_mlx.runtime.model_performance import (
-        _reset_model_performance_registry_for_tests,
-        get_model_performance_ledger,
-    )
+    from vllm_mlx.runtime.model_performance import get_model_performance_ledger
 
-    _reset_model_performance_registry_for_tests()
     first = get_model_performance_ledger("reloadable-model")
     first.record_success(
         "first",
@@ -687,6 +684,27 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
         in second_body
     )
 
+    # Unloading the active engine must not make the retained model series stale.
+    cfg.engine = None
+    unloaded_body = client.get("/metrics").text
+    assert (
+        'rapid_mlx_model_requests_total{model="reloadable-model",outcome="succeeded"} 3'
+        in unloaded_body
+    )
+
+    switched = get_model_performance_ledger("second-model")
+    switched.record_failure("failure-after-switch")
+    switched_body = client.get("/metrics").text
+    assert (
+        'rapid_mlx_model_requests_total{model="reloadable-model",outcome="succeeded"} 3'
+        in switched_body
+    )
+    assert (
+        'rapid_mlx_model_requests_total{model="second-model",outcome="failed"} 1'
+        in switched_body
+    )
+    assert switched_body.count("# HELP rapid_mlx_model_requests_total ") == 1
+    assert switched_body.count("# TYPE rapid_mlx_model_requests_total ") == 1
+
     reset_config()
     _reset_accumulator_for_tests()
-    _reset_model_performance_registry_for_tests()
