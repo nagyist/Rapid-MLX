@@ -62,6 +62,7 @@ DECODE_TOKENS_PER_SECOND_BUCKETS = (
 # Keep duplicate-delivery dedupe bounded for 24/7 servers while retaining
 # enough recent IDs to absorb duplicate terminal/cancellation events.
 SEEN_REQUEST_ID_LIMIT = 65_536
+MODEL_LEDGER_REGISTRY_LIMIT = 128
 
 
 def _empty_bucket_counts(buckets: tuple[float, ...]) -> dict[str, int]:
@@ -169,13 +170,11 @@ class ModelPerformanceLedger:
     def record_finished_performance(self, request: Request) -> None:
         """Best-effort performance accounting for a terminal response."""
         try:
-            self.record_success(
-                request.request_id,
-                prompt_tokens=self.prompt_tokens_for_request(request),
-                completion_tokens=request.num_output_tokens,
+            self.record_request_performance(
+                request,
+                "succeeded",
                 ttft_seconds=self.ttft_for_request(request),
                 decode_tokens_per_second=self.decode_rate_for_request(request),
-                request_lifetime=request.arrival_time,
             )
         except Exception:
             logger.debug("Failed to record performance for %s", request.request_id)
@@ -183,13 +182,11 @@ class ModelPerformanceLedger:
     def record_cancelled_performance(self, request: Request) -> None:
         """Best-effort performance accounting for an aborted request."""
         try:
-            self.record_cancelled(
-                request.request_id,
-                prompt_tokens=self.prompt_tokens_for_request(request),
-                completion_tokens=request.num_output_tokens,
+            self.record_request_performance(
+                request,
+                "cancelled",
                 ttft_seconds=self.ttft_for_request(request),
                 decode_tokens_per_second=self.decode_rate_for_request(request),
-                request_lifetime=request.arrival_time,
             )
         except Exception:
             logger.debug("Failed to record cancellation for %s", request.request_id)
@@ -197,6 +194,38 @@ class ModelPerformanceLedger:
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    def record_request_performance(
+        self,
+        request: Any,
+        outcome: str,
+        *,
+        ttft_seconds: float | None = None,
+        decode_tokens_per_second: float | None = None,
+    ) -> bool:
+        """Atomically account one request object exactly once for its lifetime."""
+        with self._lock:
+            if getattr(request, "_performance_recorded", False):
+                return False
+            request._performance_recorded = True
+            prompt_tokens = max(0, self.prompt_tokens_for_request(request))
+            completion_tokens = max(0, int(request.num_output_tokens))
+            if outcome == "succeeded":
+                self._requests_succeeded += 1
+            elif outcome == "cancelled":
+                self._requests_cancelled += 1
+            elif outcome == "failed":
+                self._requests_failed += 1
+            else:
+                request._performance_recorded = False
+                raise ValueError(f"unsupported terminal outcome: {outcome}")
+            self._prompt_tokens += prompt_tokens
+            self._completion_tokens += completion_tokens
+            self._observe_timings(
+                ttft_seconds=ttft_seconds,
+                decode_tokens_per_second=decode_tokens_per_second,
+            )
+            return True
 
     def record_success(
         self,
@@ -284,13 +313,11 @@ class ModelPerformanceLedger:
 
     def record_failed_performance(self, request: Request) -> bool:
         """Record one failed request lifetime, even when its ID is later reused."""
-        return self.record_failure(
-            request.request_id,
-            prompt_tokens=self.prompt_tokens_for_request(request),
-            completion_tokens=request.num_output_tokens,
+        return self.record_request_performance(
+            request,
+            "failed",
             ttft_seconds=self.ttft_for_request(request),
             decode_tokens_per_second=self.decode_rate_for_request(request),
-            request_lifetime=request.arrival_time,
         )
 
     def snapshot(self) -> ModelPerformanceSnapshot:
@@ -372,7 +399,7 @@ class ModelPerformanceLedger:
 # Scheduler instances are replaceable; Prometheus counters are not. Keep one
 # process-owned ledger per model so terminal events completed between scrapes
 # survive an unload/reload of that model.
-_MODEL_LEDGER_REGISTRY: dict[str, ModelPerformanceLedger] = {}
+_MODEL_LEDGER_REGISTRY: OrderedDict[str, ModelPerformanceLedger] = OrderedDict()
 _MODEL_LEDGER_REGISTRY_LOCK = threading.Lock()
 
 
@@ -385,6 +412,10 @@ def get_model_performance_ledger(
         if ledger is None:
             ledger = ModelPerformanceLedger(key)
             _MODEL_LEDGER_REGISTRY[key] = ledger
+            if len(_MODEL_LEDGER_REGISTRY) > MODEL_LEDGER_REGISTRY_LIMIT:
+                _MODEL_LEDGER_REGISTRY.popitem(last=False)
+        else:
+            _MODEL_LEDGER_REGISTRY.move_to_end(key)
         return ledger
 
 

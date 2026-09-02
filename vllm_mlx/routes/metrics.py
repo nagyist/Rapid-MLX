@@ -373,17 +373,17 @@ def _render_model_performance(stats: dict[str, Any]) -> list[str]:
 def _render_retained_model_performance() -> list[str]:
     """Render every process-owned model ledger as shared metric families."""
     lines: list[str] = []
-    for index, snapshot in enumerate(get_model_performance_snapshots()):
+    declarations: set[tuple[str, str]] = set()
+    for snapshot in get_model_performance_snapshots():
         rendered = _render_model_performance({"model_performance": snapshot.__dict__})
-        if index:
-            # HELP/TYPE declarations belong to the family, not each label set.
-            rendered = [
-                line
-                for line in rendered
-                if not line.startswith("# HELP rapid_mlx_model_")
-                and not line.startswith("# TYPE rapid_mlx_model_")
-            ]
-        lines.extend(rendered)
+        for line in rendered:
+            if line.startswith(("# HELP ", "# TYPE ")):
+                kind, metric_name = line.split(maxsplit=3)[1:3]
+                declaration = (kind, metric_name)
+                if declaration in declarations:
+                    continue
+                declarations.add(declaration)
+            lines.append(line)
     return lines
 
 

@@ -12,6 +12,7 @@ import pytest
 
 from vllm_mlx.output_collector import RequestOutputCollector
 from vllm_mlx.runtime.model_performance import (
+    MODEL_LEDGER_REGISTRY_LIMIT,
     SEEN_REQUEST_ID_LIMIT,
     ModelPerformanceLedger,
 )
@@ -152,12 +153,7 @@ def test_ledger_best_effort_helpers_ignore_unusable_timings_and_errors(
 
     monkeypatch.setattr(
         ledger,
-        "record_success",
-        MagicMock(side_effect=RuntimeError("accounting failure")),
-    )
-    monkeypatch.setattr(
-        ledger,
-        "record_cancelled",
+        "record_request_performance",
         MagicMock(side_effect=RuntimeError("accounting failure")),
     )
 
@@ -177,6 +173,24 @@ def test_ledger_dedupe_cache_is_bounded():
     assert len(ledger._seen_request_ids) == SEEN_REQUEST_ID_LIMIT
     assert ledger.record_failure("0") is True
     assert ledger.record_failure("overflow") is False
+
+
+def test_request_owned_idempotency_survives_low_level_cache_eviction():
+    from types import SimpleNamespace
+
+    ledger = ModelPerformanceLedger("model-b")
+    request = SimpleNamespace(
+        request_id="request-owned",
+        status=SimpleNamespace(name="RUNNING"),
+        num_prompt_tokens=3,
+        num_output_tokens=2,
+    )
+    assert ledger.record_request_performance(request, "failed") is True
+    for request_id in range(SEEN_REQUEST_ID_LIMIT + 1):
+        ledger.record_failure(f"synthetic-{request_id}")
+
+    assert ledger.record_request_performance(request, "failed") is False
+    assert ledger.snapshot().requests_failed == SEEN_REQUEST_ID_LIMIT + 2
 
 
 def test_distinct_request_lifetimes_may_reuse_the_same_id():
@@ -310,6 +324,27 @@ def test_waiting_cancellation_records_no_unprocessed_prompt_tokens():
     scheduler.waiting.append(request)
 
     assert scheduler._do_abort_request(request.request_id) is True
+
+    performance = scheduler.performance.snapshot()
+    assert performance.requests_cancelled == 1
+    assert performance.prompt_tokens == 0
+
+
+def test_mllm_waiting_cancellation_records_zero_prompt_tokens():
+    from vllm_mlx.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
+
+    processor = MagicMock()
+    processor.tokenizer = MagicMock()
+    scheduler = MLLMScheduler(
+        MagicMock(),
+        processor,
+        MLLMSchedulerConfig(),
+        model_name="mllm-cancel-test",
+    )
+    request_id = scheduler.add_request("queued prompt")
+    scheduler.requests[request_id].num_prompt_tokens = 5
+
+    scheduler._do_abort_request(request_id)
 
     performance = scheduler.performance.snapshot()
     assert performance.requests_cancelled == 1
@@ -706,3 +741,21 @@ def test_metrics_preserves_unseen_events_across_scheduler_reloads():
 
     reset_config()
     _reset_accumulator_for_tests()
+
+
+def test_process_model_registry_is_lru_bounded():
+    from vllm_mlx.runtime.model_performance import (
+        get_model_performance_ledger,
+        get_model_performance_snapshots,
+    )
+
+    for index in range(MODEL_LEDGER_REGISTRY_LIMIT + 1):
+        get_model_performance_ledger(f"model-{index}")
+
+    retained = get_model_performance_snapshots()
+    assert len(retained) == MODEL_LEDGER_REGISTRY_LIMIT
+    assert all(snapshot.model_name != "model-0" for snapshot in retained)
+    assert any(
+        snapshot.model_name == f"model-{MODEL_LEDGER_REGISTRY_LIMIT}"
+        for snapshot in retained
+    )

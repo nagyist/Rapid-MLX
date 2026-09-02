@@ -144,6 +144,7 @@ class MLLMRequest:
     video_max_frames: int | None = None
     arrival_time: float = field(default_factory=time.time)
     first_token_time: float | None = None
+    _performance_recorded: bool = field(default=False, init=False, repr=False)
 
     # Batch generator UID (assigned when scheduled)
     batch_uid: int | None = None
@@ -408,33 +409,12 @@ class MLLMScheduler:
         """Record one MLLM request lifetime without changing its lifecycle."""
         try:
             ttft, decode_rate = self._request_timings(request)
-            if outcome == "succeeded":
-                self.performance.record_success(
-                    request.request_id,
-                    prompt_tokens=self.performance.prompt_tokens_for_request(request),
-                    completion_tokens=request.num_output_tokens,
-                    ttft_seconds=ttft,
-                    decode_tokens_per_second=decode_rate,
-                    request_lifetime=request.arrival_time,
-                )
-            elif outcome == "cancelled":
-                self.performance.record_cancelled(
-                    request.request_id,
-                    prompt_tokens=self.performance.prompt_tokens_for_request(request),
-                    completion_tokens=request.num_output_tokens,
-                    ttft_seconds=ttft,
-                    decode_tokens_per_second=decode_rate,
-                    request_lifetime=request.arrival_time,
-                )
-            else:
-                self.performance.record_failure(
-                    request.request_id,
-                    prompt_tokens=self.performance.prompt_tokens_for_request(request),
-                    completion_tokens=request.num_output_tokens,
-                    ttft_seconds=ttft,
-                    decode_tokens_per_second=decode_rate,
-                    request_lifetime=request.arrival_time,
-                )
+            self.performance.record_request_performance(
+                request,
+                outcome,
+                ttft_seconds=ttft,
+                decode_tokens_per_second=decode_rate,
+            )
         except Exception:
             logger.debug("Failed to record MLLM performance for %s", request.request_id)
 
