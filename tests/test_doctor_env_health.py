@@ -2810,6 +2810,28 @@ def test_run_all_bounds_remote_probe_budget_and_clears_deadline(monkeypatch):
     assert eh._DOCTOR_DEADLINE is None
 
 
+def test_run_all_skips_remaining_sections_after_shared_deadline(monkeypatch):
+    clock = [100.0]
+
+    def consume_budget():
+        clock[0] = 105.0
+        return eh.Section("First")
+
+    def must_not_run():
+        raise AssertionError("section started after doctor deadline")
+
+    monkeypatch.setattr(eh.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(eh, "_selected_runtime", lambda: Path(sys.executable))
+    monkeypatch.setattr(eh, "_SECTION_BUILDERS", (consume_budget, must_not_run))
+
+    report = eh.run_all()
+
+    assert [section.title for section in report.sections] == ["First", "Must_Not_Run"]
+    assert report.sections[1].checks[0].status is eh.CheckStatus.WARN
+    assert "budget exhausted" in report.sections[1].checks[0].label
+    assert eh._DOCTOR_DEADLINE is None
+
+
 def test_runtime_process_scan_stops_when_doctor_budget_expires(tmp_path, monkeypatch):
     runtime_override = tmp_path / "override" / "python3"
     runtime_override.parent.mkdir(parents=True)

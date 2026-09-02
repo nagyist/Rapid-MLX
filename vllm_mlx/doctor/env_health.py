@@ -1230,14 +1230,14 @@ def _detect_apple_silicon() -> tuple[str | None, int | None]:
             ["sysctl", "-n", "machdep.cpu.brand_string"],  # noqa: S607
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_bounded_timeout(2),
             check=False,
         )
         memsize = subprocess.run(
             ["sysctl", "-n", "hw.memsize"],  # noqa: S607
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_bounded_timeout(2),
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -2380,7 +2380,9 @@ def _probe_hf(timeout: float = _HF_PROBE_TIMEOUT_S) -> tuple[CheckStatus, str]:
     """Return (status, detail) for the huggingface.co HEAD probe."""
     req = urllib.request.Request(_HF_PROBE_URL, method="HEAD")  # noqa: S310 — https only
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(  # noqa: S310
+            req, timeout=_bounded_timeout(timeout)
+        ) as resp:
             return (
                 CheckStatus.OK,
                 f"HEAD {_HF_PROBE_URL} → HTTP {resp.status}",
@@ -2706,7 +2708,7 @@ def _server_reachable(
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return False
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        connection = connect((parsed.hostname, port), timeout=0.25)
+        connection = connect((parsed.hostname, port), timeout=_bounded_timeout(0.25))
         close = getattr(connection, "close", None)
         if close:
             close()
@@ -2772,6 +2774,19 @@ _SECTION_BUILDERS = (
     section_agent_integrations,
 )
 
+_SECTION_TITLES = {
+    section_system: "System",
+    section_python: "Python",
+    section_required_packages: "Required Packages",
+    section_updates: "Updates",
+    section_optional_packages: "Optional Packages",
+    section_hf_cache: "HuggingFace Cache",
+    section_network: "Network",
+    section_shell_integration: "Shell Integration",
+    section_optional_tools: "Optional Tools",
+    section_agent_integrations: "Agent Integrations",
+}
+
 
 def run_all() -> Report:
     """Run every section and return the aggregate report.
@@ -2794,7 +2809,22 @@ def run_all() -> Report:
         _RUNTIME_DISTRIBUTION_CACHE.clear()
         _RUNTIME_CONTEXTS.clear()
         _selected_runtime()
-        for builder in _SECTION_BUILDERS:
+        for index, builder in enumerate(_SECTION_BUILDERS):
+            if time.monotonic() >= _DOCTOR_DEADLINE:
+                for skipped_builder in _SECTION_BUILDERS[index:]:
+                    skipped = Section(
+                        _SECTION_TITLES.get(
+                            skipped_builder,
+                            skipped_builder.__name__.replace("section_", "").title(),
+                        )
+                    )
+                    skipped.add(
+                        "Skipped: doctor time budget exhausted",
+                        CheckStatus.WARN,
+                        detail="probe did not start before the shared deadline",
+                    )
+                    report.sections.append(skipped)
+                break
             try:
                 report.sections.append(builder())
             except Exception as e:  # noqa: BLE001 — see docstring above
